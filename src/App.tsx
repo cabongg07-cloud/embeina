@@ -1,0 +1,2093 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+// Hằng số chế độ xác thực ("demo" hoặc "real") theo yêu cầu:
+// - "demo": hiện nút chuyển vai nhanh Khách / Người dùng / Creator để thử giao diện, không cần đăng nhập thật.
+// - "real": ẩn nút chuyển vai nhanh, bắt buộc đăng nhập qua lớp authService (sẵn sàng nối Firebase/Supabase Auth).
+export const AUTH_MODE: 'demo' | 'real' = 'demo';
+
+// Hằng số để bạn tự điền các đường dẫn file .mp3 mặc định trong code (ngoài ra Chủ web có thể thêm/xóa trực tiếp trong bảng "Cài đặt trang"):
+export const MUSIC_URLS: string[] = [];
+
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import {
+  Volume2,
+  VolumeX,
+  Palette,
+  Download,
+  Upload,
+  Command,
+  UserCheck,
+  LogOut,
+  LogIn,
+  Lock,
+  CheckCircle2,
+  Crown,
+} from 'lucide-react';
+import {
+  THEMES,
+  MODE_PALETTES,
+  ColorMode,
+  ThemeConfig,
+} from './constants/themes';
+import { dataStore } from './services/dataLayer';
+import {
+  authService,
+  AuthUser,
+  can,
+  canEditItem,
+} from './services/authLayer';
+import {
+  SiteConfig,
+  getSiteConfig,
+  saveSiteConfig,
+  updateCustomText,
+} from './services/siteSettings';
+import { SparkleCanvas } from './components/SparkleCanvas';
+import { GateOverlay } from './components/GateOverlay';
+import { AuthModal } from './components/AuthModal';
+import { EditableText } from './components/EditableText';
+import { EditModeSystem } from './components/EditModeSystem';
+import {
+  ensureInitialLibraryData,
+  Creator,
+  CharacterItem,
+  UserRole,
+} from './data/sampleData';
+import { CharTab } from './components/CharTab';
+import { FeedbackTab } from './components/FeedbackTab';
+import { CommissionTab } from './components/CommissionTab';
+import {
+  SharedPromptsTab,
+  PersonalPromptVaultTab,
+} from './components/PromptsTabs';
+import { LoveCornerTab, RequestTab } from './components/CommunityTabs';
+import {
+  GiveawayTab,
+  RankingTab,
+} from './components/GiveawayAndRankingTabs';
+import { MiniGameTab } from './components/MiniGameTab';
+import { DocsVaultTab } from './components/DocsVaultTab';
+import { RescueStationTab } from './components/RescueStationTab';
+import { CommandPaletteModal } from './components/CommandPaletteModal';
+import {
+  CornerMusicWidget,
+  MusicTab,
+} from './components/MusicPlayerAndTab';
+import {
+  MusicTrack,
+  PlayMode,
+  BUILTIN_SYNTH_TRACKS,
+  getSavedPlaylist,
+  savePlaylist,
+  getSavedPlayerState,
+  savePlayerState,
+  musicIdbStorage,
+} from './services/musicService';
+
+const THEME_STORAGE_KEY = 'selected_theme_id';
+const COLOR_MODE_STORAGE_KEY = 'selected_color_mode';
+const VOLUME_STORAGE_KEY = 'ambient_volume';
+const FAVORITES_STORAGE_KEY = 'favorite_char_ids';
+const NOTES_STORAGE_KEY = 'personal_char_notes';
+const PETALS_STORAGE_KEY = 'petals_balance';
+const UNLOCKED_CHARS_KEY = 'unlocked_char_ids';
+const LAST_DAILY_VISIT_KEY = 'last_daily_visit_date';
+const EDIT_GUIDE_SEEN_KEY = 'edit_mode_guide_seen_v1';
+const CREATORS_COLLECTION = 'creators';
+const CHARACTERS_COLLECTION = 'characters';
+
+interface WebAudioSynthNodes {
+  ctx: AudioContext;
+  masterGain: GainNode;
+  cleanup: () => void;
+}
+
+const ROLE_LABELS: Record<UserRole, string> = {
+  guest: 'Khách',
+  user: 'Người dùng',
+  creator: 'Creator',
+};
+
+function getInitialColorMode(defaultModeSetting?: ColorMode | 'system'): ColorMode {
+  try {
+    const saved = dataStore.get<string | null>(COLOR_MODE_STORAGE_KEY, null);
+    if (saved === 'light' || saved === 'dark') {
+      return saved;
+    }
+    if (defaultModeSetting === 'light' || defaultModeSetting === 'dark') {
+      return defaultModeSetting;
+    }
+    if (
+      typeof window !== 'undefined' &&
+      window.matchMedia &&
+      window.matchMedia('(prefers-color-scheme: dark)').matches
+    ) {
+      return 'dark';
+    }
+    return 'light';
+  } catch {
+    return 'light';
+  }
+}
+
+export default function App() {
+  // Cấu hình toàn trang ("Cài đặt trang") lưu qua dataStore (localStorage)
+  // GHI CHÚ: Hiện tại mọi chỉnh sửa lưu trên trình duyệt của người sửa; khi nối database thật sẽ đồng bộ cho mọi người.
+  const [siteConfig, setSiteConfig] = useState<SiteConfig>(() => getSiteConfig());
+
+  // Khởi tạo màu nhấn (5 màu pastel từ siteConfig.themes)
+  const [activeThemeId, setActiveThemeId] = useState<string>(() => {
+    const initialCfg = getSiteConfig();
+    const saved = dataStore.get<string>(
+      THEME_STORAGE_KEY,
+      initialCfg.themes[0]?.id || THEMES[0].id
+    );
+    return initialCfg.themes.some((t) => t.id === saved)
+      ? saved
+      : initialCfg.themes[0]?.id || THEMES[0].id;
+  });
+
+  // Khởi tạo chế độ Sáng / Tối
+  const [colorMode, setColorMode] = useState<ColorMode>(() =>
+    getInitialColorMode(getSiteConfig().defaultColorMode)
+  );
+
+  // Trạng thái cổng fullscreen
+  const [gateClosing, setGateClosing] = useState(false);
+  const [gateClosed, setGateClosed] = useState(false);
+
+  // Người dùng hiện tại từ lớp authService
+  const [currentUser, setCurrentUser] = useState<AuthUser>(() =>
+    authService.getCurrentUser()
+  );
+  const [authModalOpen, setAuthModalOpen] = useState(false);
+  const [authPromptReason, setAuthPromptReason] = useState<string | null>(null);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+
+  // Trạng thái CHẾ ĐỘ CHỈNH SỬA (Chỉ dành cho Creator qua can("edit", currentUser))
+  const [editMode, setEditMode] = useState(false);
+  const [showEditGuideModal, setShowEditGuideModal] = useState(false);
+
+  // Trạng thái Undo & đồng bộ dữ liệu khi Hoàn tác / Khôi phục mặc định
+  const [undoCount, setUndoCount] = useState<number>(() =>
+    dataStore.getUndoCount()
+  );
+  const [lastUndoLabel, setLastUndoLabel] = useState<string | null>(() =>
+    dataStore.getLastUndoLabel()
+  );
+  const [dataRevision, setDataRevision] = useState<number>(0);
+
+  // Lắng nghe thay đổi xác thực qua onAuthChange
+  useEffect(() => {
+    const unsubscribe = authService.onAuthChange((user) => {
+      setCurrentUser(user);
+    });
+    return unsubscribe;
+  }, []);
+
+  // Bảo vệ nghiêm ngặt: Nếu người dùng không có quyền can("edit"), tự động tắt ngay Chế độ chỉnh sửa
+  const hasEditPermission = can('edit', currentUser);
+  useEffect(() => {
+    if (!hasEditPermission && editMode) {
+      setEditMode(false);
+      setShowEditGuideModal(false);
+    }
+  }, [hasEditPermission, editMode]);
+
+  const isEditActive = Boolean(editMode && hasEditPermission);
+
+  // Lắng nghe thay đổi trên dataStore để cập nhật số bước Hoàn tác (Undo) & cấu hình
+  useEffect(() => {
+    const unsubscribe = dataStore.onChange(() => {
+      setUndoCount(dataStore.getUndoCount());
+      setLastUndoLabel(dataStore.getLastUndoLabel());
+    });
+    return unsubscribe;
+  }, []);
+
+  // Mở hộp thoại mời đăng nhập dễ thương khi Khách bấm vào tính năng cần tài khoản
+  const handleRequireAuth = useCallback((reason: string) => {
+    setAuthPromptReason(reason);
+    setAuthModalOpen(true);
+  }, []);
+
+  // Tiền tệ ("Cánh hoa" hoặc tên tùy chỉnh trong Cài đặt trang) & danh sách char đã mở khóa
+  const [petalsBalance, setPetalsBalance] = useState<number>(() =>
+    dataStore.get<number>(PETALS_STORAGE_KEY, 45)
+  );
+  const [unlockedCharIds, setUnlockedCharIds] = useState<string[]>(() =>
+    dataStore.get<string[]>(UNLOCKED_CHARS_KEY, [])
+  );
+  const [dailyToast, setDailyToast] = useState<string | null>(null);
+
+  const notifyToast = useCallback((msg: string, duration = 3800) => {
+    setDailyToast(msg);
+    setTimeout(() => {
+      setDailyToast((prev) => (prev === msg ? null : prev));
+    }, duration);
+  }, []);
+
+  // Danh sách tab hiển thị theo cấu hình trang & phân quyền:
+  // Ba tab Commission, Request, Kho lệnh chỉ hiện với vai Creator (kiểm tra bằng can('view_creator_tabs', currentUser))
+  const canViewCreatorTabs = can('view_creator_tabs', currentUser);
+  const visibleTabs = useMemo(
+    () =>
+      siteConfig.tabs.filter((t) => {
+        if (!t.visible) return false;
+        if (
+          t.creatorOnly ||
+          t.id === 'commission' ||
+          t.id === 'request' ||
+          t.id === 'kho-lenh'
+        ) {
+          return canViewCreatorTabs;
+        }
+        return true;
+      }),
+    [siteConfig.tabs, canViewCreatorTabs]
+  );
+
+  // Tab điều hướng hiện tại
+  const [activeTabId, setActiveTabId] = useState<string>('char');
+
+  useEffect(() => {
+    if (
+      visibleTabs.length > 0 &&
+      !visibleTabs.some((t) => t.id === activeTabId)
+    ) {
+      setActiveTabId(visibleTabs[0].id);
+    }
+  }, [visibleTabs, activeTabId]);
+
+  // Dữ liệu Creator & Character khởi tạo từ dataLayer
+  const [libraryData, setLibraryData] = useState<{
+    creators: Creator[];
+    characters: CharacterItem[];
+  }>(() => ensureInitialLibraryData());
+
+  // Danh sách yêu thích & ghi chú cá nhân lưu qua dataStore
+  const [favoriteIds, setFavoriteIds] = useState<string[]>(() =>
+    dataStore.get<string[]>(FAVORITES_STORAGE_KEY, [])
+  );
+  const [notesMap, setNotesMap] = useState<Record<string, string>>(() =>
+    dataStore.get<Record<string, string>>(NOTES_STORAGE_KEY, {})
+  );
+
+  // Trạng thái bộ lọc trong tab Char
+  const [searchSelectedTags, setSearchSelectedTags] = useState<string[]>([]);
+  const [searchCreatorFilter, setSearchCreatorFilter] = useState<string>('all');
+
+  // Trạng thái Command Palette (Ctrl+K) & JSON Import
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const fileImportRef = useRef<HTMLInputElement | null>(null);
+
+  // ============================================================================
+  // HỆ THỐNG NHẠC & PLAYLIST (Nhớ bài, vị trí, âm lượng, chế độ bằng localStorage try/catch)
+  // ============================================================================
+  const effectiveMusicUrls = useMemo(() => {
+    const combined = [...MUSIC_URLS, ...(siteConfig.musicUrls || [])]
+      .map((u) => u.trim())
+      .filter(Boolean);
+    return Array.from(new Set(combined));
+  }, [siteConfig.musicUrls]);
+
+  const [playlist, setPlaylist] = useState<MusicTrack[]>(() =>
+    getSavedPlaylist([
+      ...MUSIC_URLS,
+      ...(getSiteConfig().musicUrls || []),
+    ])
+  );
+
+  const initialPlayerState = useMemo(
+    () => getSavedPlayerState(playlist[0]?.id || BUILTIN_SYNTH_TRACKS[0].id),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  );
+
+  const [currentTrackId, setCurrentTrackId] = useState<string>(
+    initialPlayerState.currentTrackId
+  );
+  const [currentTime, setCurrentTime] = useState<number>(
+    initialPlayerState.currentTime
+  );
+  const [duration, setDuration] = useState<number>(180);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [volume, setVolume] = useState<number>(initialPlayerState.volume);
+  const [isMuted, setIsMuted] = useState<boolean>(initialPlayerState.isMuted);
+  const [playMode, setPlayMode] = useState<PlayMode>(
+    initialPlayerState.playMode
+  );
+
+  const synthRef = useRef<WebAudioSynthNodes | null>(null);
+  const audioElRef = useRef<HTMLAudioElement | null>(null);
+  const currentTimeRef = useRef<number>(initialPlayerState.currentTime);
+  const loadedTrackIdRef = useRef<string | null>(null);
+
+  // Đồng bộ các link thêm từ "Cài đặt trang" vào Playlist
+  useEffect(() => {
+    const synced = getSavedPlaylist(effectiveMusicUrls);
+    setPlaylist(synced);
+  }, [effectiveMusicUrls]);
+
+  const currentTrack = useMemo(() => {
+    return (
+      playlist.find((t) => t.id === currentTrackId) ||
+      playlist[0] ||
+      BUILTIN_SYNTH_TRACKS[0]
+    );
+  }, [playlist, currentTrackId]);
+
+  const applyAppearanceVariables = useCallback(
+    (mode: ColorMode, theme: ThemeConfig) => {
+      const root = document.documentElement;
+      const modeVars = MODE_PALETTES[mode];
+      Object.entries(modeVars).forEach(([key, val]) => {
+        root.style.setProperty(key, val);
+      });
+      root.style.setProperty('--accent', theme.accent);
+    },
+    []
+  );
+
+  useEffect(() => {
+    const availableThemes =
+      siteConfig.themes?.length > 0 ? siteConfig.themes : THEMES;
+    const foundTheme =
+      availableThemes.find((t) => t.id === activeThemeId) || availableThemes[0];
+    applyAppearanceVariables(colorMode, foundTheme);
+    dataStore.set(THEME_STORAGE_KEY, foundTheme.id, true);
+    dataStore.set(COLOR_MODE_STORAGE_KEY, colorMode, true);
+  }, [activeThemeId, colorMode, siteConfig.themes, applyAppearanceVariables]);
+
+  // Đồng bộ title trang trình duyệt theo tên web trong siteConfig
+  useEffect(() => {
+    try {
+      if (siteConfig.siteTitle) {
+        document.title = `${siteConfig.siteTitle} — ${siteConfig.siteSlogan}`;
+      }
+    } catch {
+      // Ignore document title error
+    }
+  }, [siteConfig.siteTitle, siteConfig.siteSlogan]);
+
+  const handleToggleColorMode = useCallback(() => {
+    setColorMode((prev) => (prev === 'light' ? 'dark' : 'light'));
+  }, []);
+
+  // Bật / tắt Chế độ chỉnh sửa (Chỉ hoạt động khi can("edit", currentUser) === true)
+  const handleToggleEditMode = useCallback(() => {
+    if (!can('edit', currentUser)) return;
+    setEditMode((prev) => {
+      const next = !prev;
+      if (next) {
+        const seenGuide = dataStore.get<boolean>(EDIT_GUIDE_SEEN_KEY, false);
+        if (!seenGuide) {
+          dataStore.set(EDIT_GUIDE_SEEN_KEY, true, true);
+          setShowEditGuideModal(true);
+        }
+      }
+      return next;
+    });
+  }, [currentUser]);
+
+  // Cập nhật cấu hình trang (SiteConfig)
+  const handleUpdateSiteConfig = useCallback(
+    (patch: Partial<SiteConfig>, undoLabel = 'Cập nhật cài đặt trang') => {
+      if (!can('edit', currentUser)) return;
+      const next = saveSiteConfig(patch, undoLabel);
+      setSiteConfig(next);
+      if (patch.defaultColorMode === 'light' || patch.defaultColorMode === 'dark') {
+        setColorMode(patch.defaultColorMode);
+      }
+    },
+    [currentUser]
+  );
+
+  // Cập nhật văn bản sửa trực tiếp trên giao diện (tự lưu ngay)
+  const handleUpdateCustomText = useCallback(
+    (key: string, value: string) => {
+      if (!can('edit', currentUser)) return;
+      const next = updateCustomText(key, value, '');
+      setSiteConfig(next);
+    },
+    [currentUser]
+  );
+
+  // Hoàn tác (Undo) thao tác chỉnh sửa gần nhất
+  const handleUndo = useCallback(() => {
+    if (!can('edit', currentUser)) return;
+    const res = dataStore.undo();
+    if (res) {
+      const freshCfg = getSiteConfig();
+      setSiteConfig(freshCfg);
+      setLibraryData(ensureInitialLibraryData());
+      setDataRevision((r) => r + 1);
+      notifyToast(`↩️ Đã hoàn tác: ${res.label || 'Thao tác gần nhất'}`);
+    }
+  }, [currentUser, notifyToast]);
+
+  // Khôi phục mặc định toàn bộ dữ liệu
+  const handleResetDefaults = useCallback(() => {
+    if (!can('edit', currentUser)) return;
+    dataStore.resetAllToDefaults();
+    dataStore.set(EDIT_GUIDE_SEEN_KEY, true, true);
+    const freshData = ensureInitialLibraryData();
+    const freshCfg = getSiteConfig();
+    setLibraryData(freshData);
+    setSiteConfig(freshCfg);
+    setFavoriteIds(dataStore.get<string[]>(FAVORITES_STORAGE_KEY, []));
+    setNotesMap(dataStore.get<Record<string, string>>(NOTES_STORAGE_KEY, {}));
+    setPetalsBalance(dataStore.get<number>(PETALS_STORAGE_KEY, 45));
+    setUnlockedCharIds(dataStore.get<string[]>(UNLOCKED_CHARS_KEY, []));
+    setDataRevision((r) => r + 1);
+    notifyToast('🌸 Đã khôi phục toàn bộ trang về dữ liệu mặc định ban đầu!');
+  }, [currentUser, notifyToast]);
+
+  // Thưởng tiền tệ khi ghé thăm mỗi ngày
+  useEffect(() => {
+    const today = new Date().toISOString().slice(0, 10);
+    const lastVisit = dataStore.get<string>(LAST_DAILY_VISIT_KEY, '');
+    if (lastVisit !== today) {
+      dataStore.set(LAST_DAILY_VISIT_KEY, today, true);
+      setPetalsBalance((prev) => {
+        const next = prev + 15;
+        dataStore.set(PETALS_STORAGE_KEY, next, true);
+        return next;
+      });
+      const curCfg = getSiteConfig();
+      notifyToast(
+        `${curCfg.currencyEmoji} Quà ghé thăm góc nhỏ hôm nay: +15 ${curCfg.currencyName}!`,
+        5000
+      );
+    }
+  }, [notifyToast]);
+
+  const handleAddPetals = useCallback((amount: number) => {
+    setPetalsBalance((prev) => {
+      const next = Math.max(0, prev + amount);
+      dataStore.set(PETALS_STORAGE_KEY, next, true);
+      return next;
+    });
+  }, []);
+
+  // Kiểm tra quyền qua hàm can() trước khi mở khóa nhân vật
+  const handleUnlockCharWithPetals = useCallback(
+    (charId: string, price: number): boolean => {
+      if (!can('unlock_char', currentUser)) {
+        handleRequireAuth(
+          `Mời bạn đăng nhập để dùng ${siteConfig.currencyName} mở khóa liên kết trò chuyện của nhân vật nhé ${siteConfig.currencyEmoji}`
+        );
+        return false;
+      }
+      if (petalsBalance < price) return false;
+      setPetalsBalance((prev) => {
+        const next = prev - price;
+        dataStore.set(PETALS_STORAGE_KEY, next, true);
+        return next;
+      });
+      setUnlockedCharIds((prev) => {
+        const next = prev.includes(charId) ? prev : [...prev, charId];
+        dataStore.set(UNLOCKED_CHARS_KEY, next, true);
+        return next;
+      });
+      return true;
+    },
+    [currentUser, petalsBalance, handleRequireAuth, siteConfig.currencyName, siteConfig.currencyEmoji]
+  );
+
+  // Mở khóa nhân vật vĩnh viễn bằng vật phẩm từ Mini game
+  const handleUnlockCharWithItems = useCallback(
+    (charId: string) => {
+      setUnlockedCharIds((prev) => {
+        const next = prev.includes(charId) ? prev : [...prev, charId];
+        dataStore.set(UNLOCKED_CHARS_KEY, next, true);
+        return next;
+      });
+      const target = libraryData.characters.find((c) => c.id === charId);
+      notifyToast(
+        `✨ Đã mở khóa vĩnh viễn nhân vật "${target?.name || 'Char'}"! Link chat và Open Scene đã sẵn sàng.`,
+        5000
+      );
+    },
+    [libraryData.characters, notifyToast]
+  );
+
+  // Chuyển vai nhanh khi ở chế độ AUTH_MODE === 'demo'
+  const handleDemoRoleSwitch = (nextRole: UserRole) => {
+    authService.switchDemoRole(nextRole);
+  };
+
+  // Lưu âm lượng, bài đang chọn & chế độ phát vào localStorage (try/catch)
+  useEffect(() => {
+    const effectiveVol = isMuted ? 0 : volume;
+    dataStore.set(VOLUME_STORAGE_KEY, volume, true);
+    savePlayerState({
+      currentTrackId: currentTrack.id,
+      volume,
+      isMuted,
+      playMode,
+    });
+    try {
+      if (synthRef.current) {
+        const { ctx, masterGain } = synthRef.current;
+        masterGain.gain.setTargetAtTime(
+          Math.max(0.0001, effectiveVol),
+          ctx.currentTime,
+          0.08
+        );
+      }
+      if (audioElRef.current) {
+        audioElRef.current.volume = Math.max(0, Math.min(1, effectiveVol));
+        audioElRef.current.muted = isMuted;
+      }
+    } catch {
+      // Ignore audio errors
+    }
+  }, [volume, isMuted, currentTrack.id, playMode]);
+
+  // Kiểm tra quyền qua can() cho Yêu thích & Ghi chú cá nhân
+  const handleToggleFavorite = useCallback(
+    (charId: string) => {
+      if (!can('favorite_char', currentUser)) {
+        handleRequireAuth(
+          'Mời bạn đăng nhập để thả tim lưu nhân vật vào danh sách yêu thích nhé 💌'
+        );
+        return;
+      }
+      setFavoriteIds((prev) => {
+        const next = prev.includes(charId)
+          ? prev.filter((id) => id !== charId)
+          : [...prev, charId];
+        dataStore.set(FAVORITES_STORAGE_KEY, next, true);
+        return next;
+      });
+    },
+    [currentUser, handleRequireAuth]
+  );
+
+  const handleSaveNote = useCallback(
+    (charId: string, note: string) => {
+      if (!can('personal_note', currentUser)) {
+        handleRequireAuth(
+          'Mời bạn đăng nhập để lưu ghi chú sổ tay cá nhân cho nhân vật này nhé 📒'
+        );
+        return;
+      }
+      setNotesMap((prev) => {
+        const next = { ...prev };
+        if (note.trim()) {
+          next[charId] = note.trim();
+        } else {
+          delete next[charId];
+        }
+        dataStore.set(NOTES_STORAGE_KEY, next, true);
+        return next;
+      });
+    },
+    [currentUser, handleRequireAuth]
+  );
+
+  // ============================================================================
+  // CRUD & Sắp xếp cho Creator và Character (Phân quyền Chủ web vs Creator thường)
+  // ============================================================================
+  const refreshLibraryData = useCallback(() => {
+    setLibraryData({
+      creators: dataStore.list<Creator>(CREATORS_COLLECTION),
+      characters: dataStore.list<CharacterItem>(CHARACTERS_COLLECTION),
+    });
+  }, []);
+
+  const handleAddCharacterByCreator = useCallback(
+    (newChar: Omit<CharacterItem, 'id'>) => {
+      if (!can('manage_own_chars', currentUser)) {
+        handleRequireAuth('Chỉ Creator mới có quyền thêm nhân vật mới.');
+        return;
+      }
+      const added = dataStore.add<CharacterItem>(
+        CHARACTERS_COLLECTION,
+        newChar
+      );
+      if (added) {
+        refreshLibraryData();
+        notifyToast(`✨ Đã thêm nhân vật "${added.name}" lên kệ sổ tay!`);
+      }
+    },
+    [currentUser, handleRequireAuth, refreshLibraryData, notifyToast]
+  );
+
+  const handleUpdateCharacter = useCallback(
+    (charId: string, patch: Partial<CharacterItem>) => {
+      const target = libraryData.characters.find((c) => c.id === charId);
+      if (!target) return;
+      const canModify =
+        canEditItem(currentUser, target.creatorId) ||
+        (target.creatorName &&
+          currentUser.displayName &&
+          target.creatorName.toLowerCase() ===
+            currentUser.displayName.toLowerCase());
+      if (!canModify) return;
+      const updated = dataStore.update<CharacterItem>(
+        CHARACTERS_COLLECTION,
+        charId,
+        patch
+      );
+      if (updated) {
+        refreshLibraryData();
+      }
+    },
+    [currentUser, libraryData.characters, refreshLibraryData]
+  );
+
+  const handleDeleteCharacter = useCallback(
+    (charId: string) => {
+      const target = libraryData.characters.find((c) => c.id === charId);
+      if (!target) return;
+      const canModify =
+        canEditItem(currentUser, target.creatorId) ||
+        (target.creatorName &&
+          currentUser.displayName &&
+          target.creatorName.toLowerCase() ===
+            currentUser.displayName.toLowerCase());
+      if (!canModify) return;
+      const removed = dataStore.remove(CHARACTERS_COLLECTION, charId);
+      if (removed) {
+        refreshLibraryData();
+        notifyToast(`🗑️ Đã xóa nhân vật "${target.name}".`);
+      }
+    },
+    [currentUser, libraryData.characters, refreshLibraryData, notifyToast]
+  );
+
+  const handleMoveCharacter = useCallback(
+    (charId: string, direction: 'up' | 'down') => {
+      if (!can('edit', currentUser)) return;
+      const moved = dataStore.moveItem<CharacterItem>(
+        CHARACTERS_COLLECTION,
+        charId,
+        direction
+      );
+      if (moved) {
+        refreshLibraryData();
+      }
+    },
+    [currentUser, refreshLibraryData]
+  );
+
+  const handleToggleSearchTag = useCallback((tag: string) => {
+    setSearchSelectedTags((prev) =>
+      prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]
+    );
+  }, []);
+
+  const handleResetSearchFilters = useCallback(() => {
+    setSearchSelectedTags([]);
+    setSearchCreatorFilter('all');
+  }, []);
+
+  const handleOpenCreatorProfile = useCallback((creatorId: string) => {
+    setSearchCreatorFilter(creatorId);
+    setActiveTabId('char');
+  }, []);
+
+  /**
+   * Khởi tạo bộ tổng hợp âm thanh Web Audio API:
+   * Hộp nhạc / Chuông nhẹ (Music Box Chimes) trên nền Pad êm dịu
+   */
+  const startWebAudioAmbient = useCallback((initialVol: number) => {
+    if (synthRef.current) {
+      const { ctx, masterGain } = synthRef.current;
+      if (ctx.state === 'suspended') {
+        ctx.resume();
+      }
+      masterGain.gain.setTargetAtTime(initialVol, ctx.currentTime, 0.4);
+      return;
+    }
+
+    const AudioCtx =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext: typeof AudioContext })
+        .webkitAudioContext;
+    const ctx = new AudioCtx();
+
+    const masterGain = ctx.createGain();
+    masterGain.gain.setValueAtTime(0.001, ctx.currentTime);
+    masterGain.gain.linearRampToValueAtTime(initialVol, ctx.currentTime + 1.5);
+    masterGain.connect(ctx.destination);
+
+    const padGain = ctx.createGain();
+    padGain.gain.value = 0.22;
+
+    const padFilter = ctx.createBiquadFilter();
+    padFilter.type = 'lowpass';
+    padFilter.frequency.value = 420;
+
+    const padFreqs = [174.61, 220.0, 261.63, 329.63];
+    const oscillators: OscillatorNode[] = [];
+
+    padFreqs.forEach((freq, idx) => {
+      const osc = ctx.createOscillator();
+      const oscGain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      osc.detune.value = (idx - 1.5) * 3;
+      oscGain.gain.value = 0.18 / padFreqs.length;
+      osc.connect(oscGain);
+      oscGain.connect(padFilter);
+      osc.start();
+      oscillators.push(osc);
+    });
+
+    padFilter.connect(padGain);
+    padGain.connect(masterGain);
+
+    const chimeNotes = [523.25, 587.33, 659.25, 698.46, 783.99, 880.0, 1046.5];
+
+    const playChimeNote = () => {
+      if (ctx.state !== 'running') return;
+      try {
+        const now = ctx.currentTime;
+        const freq =
+          chimeNotes[Math.floor(Math.random() * chimeNotes.length)];
+
+        const osc = ctx.createOscillator();
+        const overtone = ctx.createOscillator();
+        const noteGain = ctx.createGain();
+
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(freq, now);
+
+        overtone.type = 'triangle';
+        overtone.frequency.setValueAtTime(freq * 2, now);
+
+        const overtoneGain = ctx.createGain();
+        overtoneGain.gain.setValueAtTime(0.06, now);
+        overtoneGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.8);
+
+        noteGain.gain.setValueAtTime(0.001, now);
+        noteGain.gain.linearRampToValueAtTime(0.18, now + 0.02);
+        noteGain.gain.exponentialRampToValueAtTime(0.0008, now + 2.8);
+
+        osc.connect(noteGain);
+        overtone.connect(overtoneGain);
+        overtoneGain.connect(noteGain);
+        noteGain.connect(masterGain);
+
+        osc.start(now);
+        overtone.start(now);
+        osc.stop(now + 2.9);
+        overtone.stop(now + 0.9);
+      } catch {
+        // Ignore single chime error
+      }
+    };
+
+    setTimeout(playChimeNote, 400);
+
+    const chimeInterval = window.setInterval(() => {
+      playChimeNote();
+      if (Math.random() < 0.45) {
+        setTimeout(playChimeNote, 450);
+      }
+    }, 2200);
+
+    const cleanup = () => {
+      try {
+        window.clearInterval(chimeInterval);
+        oscillators.forEach((o) => o.stop());
+        ctx.close();
+      } catch {
+        // Ignore cleanup errors
+      }
+    };
+
+    synthRef.current = { ctx, masterGain, cleanup };
+  }, []);
+
+  const stopWebAudioSynth = useCallback(() => {
+    try {
+      if (synthRef.current) {
+        const { ctx, masterGain } = synthRef.current;
+        masterGain.gain.setTargetAtTime(0.0001, ctx.currentTime, 0.12);
+        setTimeout(() => {
+          try {
+            if (synthRef.current && synthRef.current.ctx.state === 'running') {
+              synthRef.current.ctx.suspend();
+            }
+          } catch {
+            // Ignore suspend error
+          }
+        }, 200);
+      }
+    } catch {
+      // Ignore synth stop error
+    }
+  }, []);
+
+  // Chọn bài tiếp theo dựa trên chế độ phát (repeat-one / repeat-all / shuffle)
+  const getNextTrackId = useCallback(
+    (direction: 'next' | 'prev' | 'ended'): string => {
+      if (playlist.length === 0) return BUILTIN_SYNTH_TRACKS[0].id;
+      if (direction === 'ended' && playMode === 'repeat-one') {
+        return currentTrack.id;
+      }
+      if (playMode === 'shuffle' && playlist.length > 1) {
+        const others = playlist.filter((t) => t.id !== currentTrack.id);
+        const picked =
+          others[Math.floor(Math.random() * others.length)] || playlist[0];
+        return picked.id;
+      }
+      const curIdx = playlist.findIndex((t) => t.id === currentTrack.id);
+      const safeIdx = curIdx >= 0 ? curIdx : 0;
+      const nextIdx =
+        direction === 'prev'
+          ? (safeIdx - 1 + playlist.length) % playlist.length
+          : (safeIdx + 1) % playlist.length;
+      return playlist[nextIdx].id;
+    },
+    [playlist, playMode, currentTrack.id]
+  );
+
+  // Phát một bài nhạc cụ thể (Hỗ trợ cả 3 nguồn: builtin-synth, url trực tiếp, và file trong IndexedDB)
+  const playTrack = useCallback(
+    async (trackToPlay: MusicTrack, startFromTime?: number) => {
+      const effectiveVol = isMuted ? 0 : volume;
+      try {
+        // Trường hợp 1: Giai điệu Hộp nhạc Web Audio mặc định
+        if (trackToPlay.sourceType === 'builtin-synth') {
+          if (audioElRef.current) {
+            audioElRef.current.pause();
+          }
+          loadedTrackIdRef.current = trackToPlay.id;
+          const dur = trackToPlay.duration || 180;
+          setDuration(dur);
+          if (typeof startFromTime === 'number') {
+            setCurrentTime(startFromTime);
+            currentTimeRef.current = startFromTime;
+          }
+          startWebAudioAmbient(effectiveVol);
+          setIsPlaying(true);
+          return;
+        }
+
+        // Trường hợp 2 & 3: Bài nhạc từ Link MP3 trực tiếp hoặc File tải lên trong IndexedDB
+        stopWebAudioSynth();
+
+        let audioSrc = trackToPlay.url || '';
+        if (trackToPlay.sourceType === 'indexeddb' && trackToPlay.idbKey) {
+          const blobUrl = await musicIdbStorage.getAudioObjectUrl(
+            trackToPlay.idbKey
+          );
+          if (!blobUrl) {
+            notifyToast(
+              '🌸 Không tìm thấy file nhạc trong trình duyệt, góc nhỏ phát giai điệu Hộp nhạc thay thế nhé!'
+            );
+            startWebAudioAmbient(effectiveVol);
+            setIsPlaying(true);
+            return;
+          }
+          audioSrc = blobUrl;
+        }
+
+        if (!audioSrc) {
+          startWebAudioAmbient(effectiveVol);
+          setIsPlaying(true);
+          return;
+        }
+
+        if (!audioElRef.current) {
+          audioElRef.current = new Audio();
+        }
+
+        const audio = audioElRef.current;
+        const isSameTrack = loadedTrackIdRef.current === trackToPlay.id;
+
+        if (!isSameTrack || audio.src !== audioSrc) {
+          audio.src = audioSrc;
+          loadedTrackIdRef.current = trackToPlay.id;
+          audio.load();
+        }
+
+        audio.volume = Math.max(0, Math.min(1, effectiveVol));
+        audio.muted = isMuted;
+
+        if (typeof startFromTime === 'number' && startFromTime > 0) {
+          try {
+            audio.currentTime = startFromTime;
+          } catch {
+            // Sẽ áp dụng sau khi loadedmetadata
+          }
+        }
+
+        const playPromise = audio.play();
+        if (playPromise !== undefined) {
+          playPromise
+            .then(() => {
+              setIsPlaying(true);
+            })
+            .catch(() => {
+              // Nếu link lỗi không phát được, chuyển nhẹ sang Hộp nhạc để không bao giờ kẹt
+              notifyToast(
+                `🌸 Không phát được "${trackToPlay.title}", góc nhỏ tạm mở tiếng Hộp nhạc dịu êm nhé!`
+              );
+              startWebAudioAmbient(effectiveVol);
+              setIsPlaying(true);
+            });
+        } else {
+          setIsPlaying(true);
+        }
+      } catch {
+        setIsPlaying(false);
+      }
+    },
+    [isMuted, volume, startWebAudioAmbient, stopWebAudioSynth, notifyToast]
+  );
+
+  const stopAmbientMusic = useCallback(() => {
+    try {
+      if (audioElRef.current) {
+        audioElRef.current.pause();
+      }
+      stopWebAudioSynth();
+      setIsPlaying(false);
+    } catch {
+      setIsPlaying(false);
+    }
+  }, [stopWebAudioSynth]);
+
+  const toggleMusic = useCallback(() => {
+    if (isPlaying) {
+      stopAmbientMusic();
+    } else {
+      playTrack(currentTrack, currentTimeRef.current);
+    }
+  }, [isPlaying, stopAmbientMusic, playTrack, currentTrack]);
+
+  // Gắn sự kiện timeupdate, loadedmetadata, ended, error cho thẻ <audio>
+  useEffect(() => {
+    if (!audioElRef.current) {
+      audioElRef.current = new Audio();
+    }
+    const audio = audioElRef.current;
+
+    const handleTimeUpdate = () => {
+      const nowSec = Math.floor(audio.currentTime || 0);
+      setCurrentTime(nowSec);
+      currentTimeRef.current = nowSec;
+      savePlayerState({ currentTime: nowSec });
+    };
+
+    const handleLoadedMetadata = () => {
+      if (Number.isFinite(audio.duration) && audio.duration > 0) {
+        setDuration(Math.round(audio.duration));
+      }
+      // Khôi phục vị trí đã lưu nếu vừa tải bài
+      if (
+        currentTimeRef.current > 0 &&
+        Math.abs(audio.currentTime - currentTimeRef.current) > 2 &&
+        currentTimeRef.current < (audio.duration || 9999)
+      ) {
+        try {
+          audio.currentTime = currentTimeRef.current;
+        } catch {
+          // Ignore seek error
+        }
+      }
+    };
+
+    const handleEnded = () => {
+      if (playMode === 'repeat-one') {
+        audio.currentTime = 0;
+        audio.play().catch(() => {});
+        return;
+      }
+      const nextId = getNextTrackId('ended');
+      setCurrentTrackId(nextId);
+      setCurrentTime(0);
+      currentTimeRef.current = 0;
+      savePlayerState({ currentTrackId: nextId, currentTime: 0 });
+      const nextTrack =
+        playlist.find((t) => t.id === nextId) || BUILTIN_SYNTH_TRACKS[0];
+      playTrack(nextTrack, 0);
+    };
+
+    const handleError = () => {
+      if (currentTrack.sourceType !== 'builtin-synth' && isPlaying) {
+        notifyToast(
+          `🌸 Bài "${currentTrack.title}" đang gặp lỗi kết nối, chuyển sang giai điệu tiếp theo nhé!`
+        );
+        startWebAudioAmbient(isMuted ? 0 : volume);
+      }
+    };
+
+    audio.addEventListener('timeupdate', handleTimeUpdate);
+    audio.addEventListener('loadedmetadata', handleLoadedMetadata);
+    audio.addEventListener('ended', handleEnded);
+    audio.addEventListener('error', handleError);
+
+    return () => {
+      audio.removeEventListener('timeupdate', handleTimeUpdate);
+      audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
+      audio.removeEventListener('ended', handleEnded);
+      audio.removeEventListener('error', handleError);
+    };
+  }, [
+    playMode,
+    getNextTrackId,
+    playlist,
+    playTrack,
+    currentTrack,
+    isPlaying,
+    notifyToast,
+    startWebAudioAmbient,
+    isMuted,
+    volume,
+  ]);
+
+  // Bộ đếm thời gian cho các bài Hộp nhạc Web Audio mặc định (để thanh tua hoạt động mượt mà)
+  useEffect(() => {
+    if (!isPlaying || currentTrack.sourceType !== 'builtin-synth') return;
+    const targetDur = currentTrack.duration || 180;
+    setDuration(targetDur);
+
+    const timer = window.setInterval(() => {
+      setCurrentTime((prev) => {
+        const next = prev + 1;
+        if (next >= targetDur) {
+          if (playMode === 'repeat-one') {
+            currentTimeRef.current = 0;
+            savePlayerState({ currentTime: 0 });
+            return 0;
+          }
+          const nextId = getNextTrackId('ended');
+          setCurrentTrackId(nextId);
+          currentTimeRef.current = 0;
+          savePlayerState({ currentTrackId: nextId, currentTime: 0 });
+          const nextTrack =
+            playlist.find((t) => t.id === nextId) || BUILTIN_SYNTH_TRACKS[0];
+          playTrack(nextTrack, 0);
+          return 0;
+        }
+        currentTimeRef.current = next;
+        savePlayerState({ currentTime: next });
+        return next;
+      });
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [
+    isPlaying,
+    currentTrack,
+    playMode,
+    getNextTrackId,
+    playlist,
+    playTrack,
+  ]);
+
+  // Các hàm điều khiển Playlist (Chọn bài, Trước, Sau, Tua, Đổi chế độ, Thêm/Sửa/Xóa/Sắp xếp)
+  const handleSelectTrack = useCallback(
+    (trackId: string) => {
+      const found = playlist.find((t) => t.id === trackId);
+      if (!found) return;
+      setCurrentTrackId(found.id);
+      setCurrentTime(0);
+      currentTimeRef.current = 0;
+      setDuration(found.duration || 180);
+      savePlayerState({ currentTrackId: found.id, currentTime: 0 });
+      playTrack(found, 0);
+    },
+    [playlist, playTrack]
+  );
+
+  const handlePrevTrack = useCallback(() => {
+    if (currentTimeRef.current > 5) {
+      // Nếu đã nghe quá 5 giây thì tua về đầu bài
+      setCurrentTime(0);
+      currentTimeRef.current = 0;
+      savePlayerState({ currentTime: 0 });
+      if (
+        currentTrack.sourceType !== 'builtin-synth' &&
+        audioElRef.current
+      ) {
+        try {
+          audioElRef.current.currentTime = 0;
+        } catch {
+          // Ignore
+        }
+      }
+      return;
+    }
+    const prevId = getNextTrackId('prev');
+    handleSelectTrack(prevId);
+  }, [currentTrack.sourceType, getNextTrackId, handleSelectTrack]);
+
+  const handleNextTrack = useCallback(() => {
+    const nextId = getNextTrackId('next');
+    handleSelectTrack(nextId);
+  }, [getNextTrackId, handleSelectTrack]);
+
+  const handleSeekTrack = useCallback(
+    (newTime: number) => {
+      const clamped = Math.max(0, Math.floor(newTime));
+      setCurrentTime(clamped);
+      currentTimeRef.current = clamped;
+      savePlayerState({ currentTime: clamped });
+      if (
+        currentTrack.sourceType !== 'builtin-synth' &&
+        audioElRef.current
+      ) {
+        try {
+          audioElRef.current.currentTime = clamped;
+        } catch {
+          // Ignore seek error
+        }
+      }
+    },
+    [currentTrack.sourceType]
+  );
+
+  const handleCyclePlayMode = useCallback(() => {
+    setPlayMode((prev) => {
+      const next: PlayMode =
+        prev === 'repeat-all'
+          ? 'repeat-one'
+          : prev === 'repeat-one'
+          ? 'shuffle'
+          : 'repeat-all';
+      savePlayerState({ playMode: next });
+      return next;
+    });
+  }, []);
+
+  const handleAddMusicTrack = useCallback(
+    (newTrack: MusicTrack, playImmediately = true) => {
+      setPlaylist((prev) => {
+        const next = [newTrack, ...prev];
+        savePlaylist(next);
+        return next;
+      });
+      if (newTrack.sourceType === 'url' && newTrack.url && can('edit', currentUser)) {
+        const nextUrls = Array.from(
+          new Set([newTrack.url, ...(siteConfig.musicUrls || [])])
+        );
+        const updatedCfg = saveSiteConfig(
+          { musicUrls: nextUrls },
+          `Thêm bài nhạc "${newTrack.title}"`
+        );
+        setSiteConfig(updatedCfg);
+      }
+      notifyToast(`🎵 Đã thêm "${newTrack.title}" vào Playlist!`);
+      if (playImmediately) {
+        setCurrentTrackId(newTrack.id);
+        setCurrentTime(0);
+        currentTimeRef.current = 0;
+        setDuration(newTrack.duration || 180);
+        savePlayerState({ currentTrackId: newTrack.id, currentTime: 0 });
+        playTrack(newTrack, 0);
+      }
+    },
+    [currentUser, siteConfig.musicUrls, notifyToast, playTrack]
+  );
+
+  const handleUpdateMusicTrack = useCallback(
+    (trackId: string, patch: Partial<MusicTrack>) => {
+      setPlaylist((prev) => {
+        const next = prev.map((t) =>
+          t.id === trackId ? { ...t, ...patch } : t
+        );
+        savePlaylist(next);
+        return next;
+      });
+      notifyToast('✨ Đã cập nhật thông tin bài nhạc!');
+    },
+    [notifyToast]
+  );
+
+  const handleDeleteMusicTrack = useCallback(
+    (trackId: string) => {
+      const target = playlist.find((t) => t.id === trackId);
+      if (!target) return;
+      if (target.sourceType === 'indexeddb' && target.idbKey) {
+        musicIdbStorage.deleteAudioFile(target.idbKey);
+      }
+      setPlaylist((prev) => {
+        const filtered = prev.filter((t) => t.id !== trackId);
+        const finalList =
+          filtered.length > 0 ? filtered : [...BUILTIN_SYNTH_TRACKS];
+        savePlaylist(finalList);
+        if (currentTrackId === trackId) {
+          const fallback = finalList[0];
+          setCurrentTrackId(fallback.id);
+          setCurrentTime(0);
+          currentTimeRef.current = 0;
+          savePlayerState({ currentTrackId: fallback.id, currentTime: 0 });
+          if (isPlaying) {
+            playTrack(fallback, 0);
+          }
+        }
+        return finalList;
+      });
+      notifyToast(`🗑️ Đã xóa "${target.title}" khỏi Playlist.`);
+    },
+    [playlist, currentTrackId, isPlaying, playTrack, notifyToast]
+  );
+
+  const handleMoveMusicTrack = useCallback(
+    (trackId: string, direction: 'up' | 'down') => {
+      setPlaylist((prev) => {
+        const idx = prev.findIndex((t) => t.id === trackId);
+        if (idx < 0) return prev;
+        const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
+        if (targetIdx < 0 || targetIdx >= prev.length) return prev;
+        const copy = [...prev];
+        const [item] = copy.splice(idx, 1);
+        copy.splice(targetIdx, 0, item);
+        savePlaylist(copy);
+        return copy;
+      });
+    },
+    []
+  );
+
+  const handleRestoreBuiltinTracks = useCallback(() => {
+    setPlaylist((prev) => {
+      const existingIds = new Set(prev.map((t) => t.id));
+      const missing = BUILTIN_SYNTH_TRACKS.filter(
+        (b) => !existingIds.has(b.id)
+      );
+      if (missing.length === 0) {
+        notifyToast('🎐 Cả 4 giai điệu hộp nhạc gốc đều đang có sẵn trong Playlist!');
+        return prev;
+      }
+      const next = [...prev, ...missing];
+      savePlaylist(next);
+      notifyToast('✨ Đã khôi phục đầy đủ 4 giai điệu hộp nhạc gốc!');
+      return next;
+    });
+  }, [notifyToast]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const isTyping =
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable);
+
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setPaletteOpen((prev) => !prev);
+        return;
+      }
+
+      if (e.key === 'Escape' && paletteOpen) {
+        setPaletteOpen(false);
+        return;
+      }
+
+      if (isTyping) return;
+
+      if (e.key === '/') {
+        e.preventDefault();
+        setActiveTabId('char');
+        setTimeout(() => {
+          searchInputRef.current?.focus();
+        }, 60);
+      } else if (e.key.toLowerCase() === 'm') {
+        e.preventDefault();
+        toggleMusic();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [paletteOpen, toggleMusic]);
+
+  const handleExportAllJson = useCallback(() => {
+    const dump = dataStore.exportAll();
+    const blob = new Blob([JSON.stringify(dump, null, 2)], {
+      type: 'application/json;charset=utf-8',
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `goc-nho-lap-lanh-config-${new Date()
+      .toISOString()
+      .slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    notifyToast('✨ Đã xuất toàn bộ cấu hình & sổ tay ra file JSON!');
+  }, [notifyToast]);
+
+  const handleImportJsonFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result));
+        const ok = dataStore.importAll(parsed);
+        if (ok) {
+          setLibraryData(ensureInitialLibraryData());
+          setSiteConfig(getSiteConfig());
+          setFavoriteIds(dataStore.get<string[]>(FAVORITES_STORAGE_KEY, []));
+          setNotesMap(dataStore.get<Record<string, string>>(NOTES_STORAGE_KEY, {}));
+          setPetalsBalance(dataStore.get<number>(PETALS_STORAGE_KEY, 45));
+          setUnlockedCharIds(dataStore.get<string[]>(UNLOCKED_CHARS_KEY, []));
+          setDataRevision((r) => r + 1);
+          notifyToast('🌸 Đã nhập dữ liệu & cấu hình từ file JSON thành công!');
+        }
+      } catch {
+        notifyToast('File JSON chưa đúng định dạng rồi.');
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  const handleEnterFromGate = (withMusic: boolean) => {
+    setGateClosing(true);
+    setTimeout(() => {
+      setGateClosed(true);
+    }, 700);
+
+    if (withMusic) {
+      setTimeout(() => {
+        try {
+          playTrack(currentTrack, currentTimeRef.current);
+        } catch {
+          // Lỗi nhạc không làm kẹt cổng
+        }
+      }, 60);
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (synthRef.current) {
+        synthRef.current.cleanup();
+      }
+      if (audioElRef.current) {
+        audioElRef.current.pause();
+      }
+    };
+  }, []);
+
+  const activeThemesList =
+    siteConfig.themes?.length > 0 ? siteConfig.themes : THEMES;
+  const currentTheme =
+    activeThemesList.find((t) => t.id === activeThemeId) || activeThemesList[0];
+  const currentTabInfo =
+    siteConfig.tabs.find((t) => t.id === activeTabId) || siteConfig.tabs[0];
+
+  const renderGuestGatePrompt = (title: string, desc: string) => (
+    <div className="soft-card py-16 px-6 text-center space-y-4 max-w-xl mx-auto">
+      <div className="w-12 h-12 rounded-full bg-[var(--accent)]/25 flex items-center justify-center mx-auto">
+        <Lock className="w-5 h-5 text-[var(--text)]" />
+      </div>
+      <h2 className="font-serif-title text-2xl sm:text-3xl font-bold text-[var(--text)]">
+        {title}
+      </h2>
+      <p className="text-sm text-[var(--muted)] leading-relaxed">{desc}</p>
+      <button
+        type="button"
+        onClick={() => handleRequireAuth(desc)}
+        className="px-6 py-2.5 rounded-full text-xs font-bold bg-[var(--accent)] text-[#3a2b30] bouncy-btn cursor-pointer"
+      >
+        ✨ Đăng nhập / Đăng ký ngay
+      </button>
+    </div>
+  );
+
+  return (
+    <div className="min-h-screen flex flex-col bg-[var(--bg)] text-[var(--text)] theme-transition selection:bg-[var(--accent)] selection:text-[#3a2b30]">
+      {/* Hiệu ứng lấp lánh pastel rải theo con trỏ chuột & hạt bay nền (pointer-events: none) */}
+      <SparkleCanvas
+        sparkleEnabled={siteConfig.sparkleEnabled}
+        floatingParticlesEnabled={siteConfig.floatingParticlesEnabled}
+      />
+
+      {/* Hệ thống Chế độ chỉnh sửa (Chỉ hiển thị khi can("edit", currentUser) === true) */}
+      <EditModeSystem
+        currentUser={currentUser}
+        editMode={isEditActive}
+        onToggleEditMode={handleToggleEditMode}
+        siteConfig={siteConfig}
+        onUpdateSiteConfig={handleUpdateSiteConfig}
+        undoCount={undoCount}
+        lastUndoLabel={lastUndoLabel}
+        onUndo={handleUndo}
+        onResetDefaults={handleResetDefaults}
+        onExportJson={handleExportAllJson}
+        onTriggerImportJson={() => fileImportRef.current?.click()}
+        onReopenGate={() => {
+          setGateClosing(false);
+          setGateClosed(false);
+        }}
+        showGuideModal={showEditGuideModal}
+        onCloseGuideModal={() => setShowEditGuideModal(false)}
+        onOpenGuideModal={() => setShowEditGuideModal(true)}
+        onNotify={notifyToast}
+      />
+
+      {/* Hộp thoại Đăng nhập / Đăng ký */}
+      <AuthModal
+        isOpen={authModalOpen}
+        onClose={() => {
+          setAuthModalOpen(false);
+          setAuthPromptReason(null);
+        }}
+        promptReason={authPromptReason}
+        onAuthSuccess={(user, msg) => {
+          setCurrentUser(user);
+          notifyToast(msg, 4500);
+        }}
+      />
+
+      {/* Command Palette (Ctrl + K) */}
+      <CommandPaletteModal
+        isOpen={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        activeTabId={activeTabId}
+        onSelectTab={setActiveTabId}
+        themes={activeThemesList}
+        onSelectTheme={setActiveThemeId}
+        onToggleMusic={toggleMusic}
+        onExportJson={handleExportAllJson}
+        availableTabs={visibleTabs}
+      />
+
+      {/* Màn hình cổng Fullscreen */}
+      {!gateClosed && (
+        <GateOverlay
+          themes={activeThemesList}
+          activeThemeId={activeThemeId}
+          onSelectTheme={setActiveThemeId}
+          colorMode={colorMode}
+          onToggleColorMode={handleToggleColorMode}
+          onEnter={handleEnterFromGate}
+          isClosing={gateClosing}
+          siteConfig={siteConfig}
+          editMode={isEditActive}
+          onUpdateSiteConfig={handleUpdateSiteConfig}
+        />
+      )}
+
+      {/* Không gian chính của Góc Nhỏ Lấp Lánh */}
+      <header className="w-full border-b border-[var(--border)] bg-[var(--surface)]/90 backdrop-blur-md sticky top-0 z-20 theme-transition">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 pt-4 pb-3 flex flex-col gap-3.5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <h1 className="font-serif-title text-2xl sm:text-3xl font-bold text-[var(--text)] flex items-center gap-2">
+                <span>✨</span>
+                <EditableText
+                  value={siteConfig.siteTitle}
+                  onSave={(val) =>
+                    handleUpdateSiteConfig({ siteTitle: val }, 'Đổi tên web')
+                  }
+                  editMode={isEditActive}
+                />
+              </h1>
+              {currentTabInfo && (
+                <span className="text-xs text-[var(--muted)] hidden xl:inline-flex items-center gap-1">
+                  <span>·</span>
+                  <EditableText
+                    value={currentTabInfo.whisper}
+                    onSave={(val) => {
+                      const nextTabs = siteConfig.tabs.map((t) =>
+                        t.id === currentTabInfo.id ? { ...t, whisper: val } : t
+                      );
+                      handleUpdateSiteConfig(
+                        { tabs: nextTabs },
+                        'Đổi câu dẫn tab'
+                      );
+                    }}
+                    editMode={isEditActive}
+                  />
+                </span>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              {/* Số dư Tiền tệ (Cánh hoa hoặc đơn vị tùy chỉnh) */}
+              <button
+                type="button"
+                onClick={() => setActiveTabId('mini-game')}
+                title={`Số dư ${siteConfig.currencyName}`}
+                className="sticker-chip text-xs inline-flex items-center gap-1.5 cursor-pointer tabular-nums"
+              >
+                <span>
+                  {siteConfig.currencyEmoji} {petalsBalance}{' '}
+                  {siteConfig.currencyName}
+                </span>
+              </button>
+
+              {/* Nút chuyển vai nhanh chỉ hiển thị khi AUTH_MODE === "demo" */}
+              {AUTH_MODE === 'demo' && (
+                <div
+                  className="inline-flex items-center rounded-full border border-[var(--border)] bg-[var(--bg)] p-1"
+                  role="group"
+                  aria-label="Chuyển vai trò thử nghiệm (Demo)"
+                >
+                  <span className="px-2 text-[11px] text-[var(--muted)] hidden sm:inline-flex items-center gap-1">
+                    <UserCheck className="w-3 h-3" />
+                    Thử vai:
+                  </span>
+                  {(['guest', 'user', 'creator'] as UserRole[]).map((r) => (
+                    <button
+                      key={r}
+                      type="button"
+                      onClick={() => handleDemoRoleSwitch(r)}
+                      className={`px-2.5 py-1 rounded-full text-[11px] transition-all cursor-pointer whitespace-nowrap ${
+                        currentUser.role === r
+                          ? 'bg-[var(--accent)] text-[#3a2b30] font-bold shadow-xs'
+                          : 'text-[var(--muted)] hover:text-[var(--text)]'
+                      }`}
+                    >
+                      {ROLE_LABELS[r]}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* Menu Tài khoản ở góc trên: Avatar + Tên + Huy hiệu vai trò + Đăng nhập / Đăng xuất */}
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setAccountMenuOpen((prev) => !prev)}
+                  className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-[var(--border)] bg-[var(--bg)] hover:border-[var(--accent)] text-xs cursor-pointer"
+                >
+                  <span className="w-6 h-6 rounded-full bg-[var(--accent)]/30 flex items-center justify-center text-xs">
+                    {currentUser.avatarEmoji}
+                  </span>
+                  <span className="font-bold text-[var(--text)] max-w-[110px] truncate hidden sm:inline">
+                    {currentUser.displayName}
+                  </span>
+                  <span className="sticker-chip text-[10px] py-0.5 px-2 inline-flex items-center gap-1">
+                    {currentUser.role === 'creator' &&
+                      currentUser.isSiteOwner && (
+                        <Crown className="w-2.5 h-2.5" />
+                      )}
+                    {currentUser.creatorStatus === 'pending'
+                      ? 'Creator (Chờ duyệt)'
+                      : currentUser.role === 'creator' &&
+                        currentUser.isSiteOwner
+                      ? 'Creator · Chủ web'
+                      : ROLE_LABELS[currentUser.role]}
+                  </span>
+                </button>
+
+                {accountMenuOpen && (
+                  <div className="absolute right-0 mt-2 w-72 rounded-2xl border-2 border-[var(--border)] bg-[var(--surface)] p-4 shadow-xl z-40 space-y-3">
+                    <div className="flex items-center gap-3 border-b border-[var(--border)] pb-3">
+                      <div className="w-10 h-10 rounded-2xl bg-[var(--accent)]/30 flex items-center justify-center text-lg">
+                        {currentUser.avatarEmoji}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-sm font-bold text-[var(--text)] truncate">
+                          {currentUser.displayName}
+                        </div>
+                        <div className="text-[11px] text-[var(--muted)] truncate">
+                          {currentUser.email || 'Chưa đăng nhập tài khoản'}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-[var(--muted)]">Huy hiệu vai trò:</span>
+                      <span className="sticker-chip text-[11px]">
+                        {currentUser.creatorStatus === 'pending'
+                          ? '⏳ Creator (Chờ duyệt)'
+                          : currentUser.role === 'creator' &&
+                            currentUser.isSiteOwner
+                          ? '👑 Creator (Chủ web)'
+                          : `✨ ${ROLE_LABELS[currentUser.role]}`}
+                      </span>
+                    </div>
+
+                    {currentUser.role === 'creator' && (
+                      <div className="p-2.5 rounded-xl bg-[var(--bg)] border border-[var(--border)] space-y-1.5 text-[11px]">
+                        <div className="text-[var(--muted)] font-semibold">
+                          Chế độ quyền Creator:
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              authService.setCreatorOwnerMode(
+                                true,
+                                'creator-lam-vong'
+                              );
+                              notifyToast(
+                                '👑 Đang ở quyền Chủ web: Có thể mở bảng "Cài đặt trang" và sửa mọi mục.'
+                              );
+                            }}
+                            className={`flex-1 py-1 rounded-lg text-[11px] cursor-pointer ${
+                              currentUser.isSiteOwner
+                                ? 'bg-[var(--accent)] text-[#3a2b30] font-bold'
+                                : 'border border-[var(--border)] text-[var(--muted)]'
+                            }`}
+                          >
+                            👑 Chủ web
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              authService.setCreatorOwnerMode(
+                                false,
+                                'creator-lam-vong'
+                              );
+                              notifyToast(
+                                '🎨 Đang ở quyền Creator thường (Lam Vũ): Chỉ sửa được mục của chính mình.'
+                              );
+                            }}
+                            className={`flex-1 py-1 rounded-lg text-[11px] cursor-pointer ${
+                              !currentUser.isSiteOwner
+                                ? 'bg-[var(--accent)] text-[#3a2b30] font-bold'
+                                : 'border border-[var(--border)] text-[var(--muted)]'
+                            }`}
+                          >
+                            🎨 Creator thường
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Nếu tài khoản Creator đang ở trạng thái chờ duyệt, cho phép chủ web bấm duyệt thử */}
+                    {currentUser.creatorStatus === 'pending' && (
+                      <div className="p-2.5 rounded-xl bg-[var(--bg)] border border-[var(--border)] space-y-2 text-[11px] text-[var(--muted)]">
+                        <p>
+                          Tài khoản Creator của bạn đang chờ chủ web duyệt. Trong lúc chờ bạn đang dùng quyền <strong>Người dùng</strong>.
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const approved = authService.approvePendingCreator();
+                            setCurrentUser(approved);
+                            notifyToast(
+                              '🎉 Đã duyệt tài khoản lên quyền Creator chính thức!'
+                            );
+                            setAccountMenuOpen(false);
+                          }}
+                          className="w-full py-1.5 rounded-full bg-[var(--accent)] text-[#3a2b30] font-bold cursor-pointer inline-flex items-center justify-center gap-1"
+                        >
+                          <CheckCircle2 className="w-3 h-3" />
+                          <span>Duyệt lên Creator ngay (Chủ web demo)</span>
+                        </button>
+                      </div>
+                    )}
+
+                    {currentUser.isDemoNote && (
+                      <p className="text-[10px] text-[var(--muted)] italic">
+                        🔒 {currentUser.isDemoNote}
+                      </p>
+                    )}
+
+                    <div className="pt-2 border-t border-[var(--border)] flex flex-col gap-2">
+                      {currentUser.role === 'guest' ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setAccountMenuOpen(false);
+                            setAuthPromptReason(null);
+                            setAuthModalOpen(true);
+                          }}
+                          className="w-full py-2 rounded-full text-xs font-bold bg-[var(--accent)] text-[#3a2b30] cursor-pointer inline-flex items-center justify-center gap-1.5"
+                        >
+                          <LogIn className="w-3.5 h-3.5" />
+                          <span>Đăng nhập / Đăng ký</span>
+                        </button>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setAccountMenuOpen(false);
+                              setAuthPromptReason(null);
+                              setAuthModalOpen(true);
+                            }}
+                            className="w-full py-1.5 rounded-full text-xs border border-[var(--border)] text-[var(--text)] hover:border-[var(--accent)] cursor-pointer"
+                          >
+                            Đổi tài khoản khác
+                          </button>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              await authService.signOut();
+                              setAccountMenuOpen(false);
+                              notifyToast('🌱 Đã đăng xuất về chế độ Khách.');
+                            }}
+                            className="w-full py-2 rounded-full text-xs font-bold border border-[var(--border)] bg-[var(--bg)] text-[var(--muted)] hover:text-[var(--text)] cursor-pointer inline-flex items-center justify-center gap-1.5"
+                          >
+                            <LogOut className="w-3.5 h-3.5" />
+                            <span>Đăng xuất</span>
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Nút mở Command Palette (Ctrl+K) */}
+              <button
+                type="button"
+                onClick={() => setPaletteOpen(true)}
+                title="Mở bảng điều hướng nhanh (Ctrl+K)"
+                className="px-3 py-1.5 rounded-full text-xs border border-[var(--border)] bg-[var(--bg)] text-[var(--muted)] hover:text-[var(--text)] hover:border-[var(--accent)] transition-colors cursor-pointer inline-flex items-center gap-1.5"
+              >
+                <Command className="w-3 h-3" />
+                <span className="hidden md:inline">Ctrl+K</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Thanh điều hướng các tab hiển thị (Cho phép bấm sửa trực tiếp tên tab khi đang bật Chế độ chỉnh sửa) */}
+          <nav
+            aria-label="Điều hướng sổ tay"
+            className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar"
+          >
+            {visibleTabs.map((tab) => {
+              const isActive = tab.id === activeTabId;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => {
+                    setActiveTabId(tab.id);
+                  }}
+                  className={`px-3.5 py-1.5 rounded-full text-xs sm:text-[13px] whitespace-nowrap shrink-0 bouncy-btn cursor-pointer flex items-center gap-1.5 ${
+                    isActive
+                      ? 'bg-[var(--accent)] text-[#3a2b30] font-bold shadow-xs'
+                      : 'bg-[var(--bg)]/70 text-[var(--muted)] border border-[var(--border)] hover:text-[var(--text)] hover:border-[var(--accent)] font-medium'
+                  }`}
+                >
+                  <span>{tab.emoji}</span>
+                  {isEditActive && isActive ? (
+                    <EditableText
+                      value={tab.label}
+                      onSave={(newLabel) => {
+                        const nextTabs = siteConfig.tabs.map((t) =>
+                          t.id === tab.id ? { ...t, label: newLabel } : t
+                        );
+                        handleUpdateSiteConfig(
+                          { tabs: nextTabs },
+                          `Đổi tên tab "${tab.label}"`
+                        );
+                      }}
+                      editMode={true}
+                    />
+                  ) : (
+                    <span>{tab.label}</span>
+                  )}
+                </button>
+              );
+            })}
+          </nav>
+        </div>
+      </header>
+
+      {/* Thông báo nhỏ */}
+      {dailyToast && (
+        <div className="max-w-7xl w-full mx-auto px-4 sm:px-6 pt-4">
+          <div className="px-4 py-2.5 rounded-2xl border border-[var(--accent)] bg-[var(--surface)] text-xs font-semibold text-[var(--text)] flex items-center justify-between shadow-sm">
+            <span>{dailyToast}</span>
+            <button
+              type="button"
+              onClick={() => setDailyToast(null)}
+              className="text-[var(--muted)] hover:text-[var(--text)] cursor-pointer"
+            >
+              Đóng
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Khu vực nội dung từng tab */}
+      <main
+        key={dataRevision}
+        className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-8 sm:py-10 pb-28"
+        aria-live="polite"
+      >
+        {activeTabId === 'char' && (
+          <CharTab
+            characters={libraryData.characters}
+            creators={libraryData.creators}
+            favoriteIds={favoriteIds}
+            notesMap={notesMap}
+            onToggleFavorite={handleToggleFavorite}
+            onSaveNote={handleSaveNote}
+            selectedTags={searchSelectedTags}
+            onToggleTag={handleToggleSearchTag}
+            selectedCreatorId={searchCreatorFilter}
+            onSelectCreatorFilter={setSearchCreatorFilter}
+            onResetFilters={handleResetSearchFilters}
+            unlockedCharIds={unlockedCharIds}
+            petalsBalance={petalsBalance}
+            onUnlockWithPetals={handleUnlockCharWithPetals}
+            onUnlockWithItems={handleUnlockCharWithItems}
+            onRequireAuth={handleRequireAuth}
+            onGoToMiniGame={() => setActiveTabId('mini-game')}
+            searchInputRef={searchInputRef}
+            currentUser={currentUser}
+            editMode={isEditActive}
+            onAddCharacter={handleAddCharacterByCreator}
+            onUpdateCharacter={handleUpdateCharacter}
+            onDeleteCharacter={handleDeleteCharacter}
+            onMoveCharacter={handleMoveCharacter}
+            currencyName={siteConfig.currencyName}
+            currencyEmoji={siteConfig.currencyEmoji}
+            customTexts={siteConfig.customTexts}
+            onUpdateCustomText={handleUpdateCustomText}
+          />
+        )}
+
+        {activeTabId === 'feedback' && (
+          <FeedbackTab
+            creators={libraryData.creators}
+            characters={libraryData.characters}
+            currentUser={currentUser}
+            onRequireAuth={handleRequireAuth}
+            editMode={isEditActive}
+            customTexts={siteConfig.customTexts}
+            onUpdateCustomText={handleUpdateCustomText}
+          />
+        )}
+
+        {activeTabId === 'nhac' && (
+          <MusicTab
+            playlist={playlist}
+            currentTrack={currentTrack}
+            isPlaying={isPlaying}
+            currentTime={currentTime}
+            duration={duration}
+            volume={volume}
+            isMuted={isMuted}
+            playMode={playMode}
+            onTogglePlay={toggleMusic}
+            onSelectTrack={handleSelectTrack}
+            onPrevTrack={handlePrevTrack}
+            onNextTrack={handleNextTrack}
+            onSeek={handleSeekTrack}
+            onVolumeChange={(v) => {
+              setIsMuted(false);
+              setVolume(v);
+            }}
+            onToggleMute={() => setIsMuted((m) => !m)}
+            onCyclePlayMode={handleCyclePlayMode}
+            onAddTrack={handleAddMusicTrack}
+            onUpdateTrack={handleUpdateMusicTrack}
+            onDeleteTrack={handleDeleteMusicTrack}
+            onMoveTrack={handleMoveMusicTrack}
+            onRestoreBuiltinTracks={handleRestoreBuiltinTracks}
+            editMode={isEditActive}
+            customTexts={siteConfig.customTexts}
+            onUpdateCustomText={handleUpdateCustomText}
+          />
+        )}
+
+        {activeTabId === 'commission' &&
+          canViewCreatorTabs && (
+            <CommissionTab
+              creators={libraryData.creators}
+              currentUser={currentUser}
+              onRequireAuth={handleRequireAuth}
+              editMode={isEditActive}
+              customTexts={siteConfig.customTexts}
+              onUpdateCustomText={handleUpdateCustomText}
+            />
+          )}
+
+        {activeTabId === 'lenh' && (
+          <SharedPromptsTab
+            creators={libraryData.creators}
+            characters={libraryData.characters}
+            currentUser={currentUser}
+            onRequireAuth={handleRequireAuth}
+            editMode={isEditActive}
+            customTexts={siteConfig.customTexts}
+            onUpdateCustomText={handleUpdateCustomText}
+          />
+        )}
+
+        {activeTabId === 'goc-yeu-thuong' && (
+          <LoveCornerTab
+            creators={libraryData.creators}
+            characters={libraryData.characters}
+            currentUser={currentUser}
+            onRequireAuth={handleRequireAuth}
+            editMode={isEditActive}
+            customTexts={siteConfig.customTexts}
+            onUpdateCustomText={handleUpdateCustomText}
+          />
+        )}
+
+        {activeTabId === 'request' &&
+          canViewCreatorTabs && (
+            <RequestTab
+              creators={libraryData.creators}
+              currentUser={currentUser}
+              onRequireAuth={handleRequireAuth}
+              editMode={isEditActive}
+              customTexts={siteConfig.customTexts}
+              onUpdateCustomText={handleUpdateCustomText}
+            />
+          )}
+
+        {activeTabId === 'mini-game' &&
+          (can('play_minigame', currentUser) ? (
+            <MiniGameTab
+              characters={libraryData.characters}
+              petalsBalance={petalsBalance}
+              onAddPetals={handleAddPetals}
+              currentUser={currentUser}
+              editMode={isEditActive}
+              currencyName={siteConfig.currencyName}
+              currencyEmoji={siteConfig.currencyEmoji}
+              customTexts={siteConfig.customTexts}
+              onUpdateCustomText={handleUpdateCustomText}
+            />
+          ) : (
+            renderGuestGatePrompt(
+              '🐟 Khu Vườn, Hồ Cá & Phòng Tri Kỷ',
+              'Mời bạn đăng nhập để mở Gacha mỗi ngày, trồng hoa, nuôi cá, chăm sóc thú cưng ở phòng tri kỷ và pha chế thức uống nhé 🌸'
+            )
+          ))}
+
+        {activeTabId === 'giveaway' && (
+          <GiveawayTab
+            creators={libraryData.creators}
+            currentUser={currentUser}
+            onRequireAuth={handleRequireAuth}
+            editMode={isEditActive}
+            customTexts={siteConfig.customTexts}
+            onUpdateCustomText={handleUpdateCustomText}
+          />
+        )}
+
+        {activeTabId === 'xep-hang' && (
+          <RankingTab
+            characters={libraryData.characters}
+            creators={libraryData.creators}
+            favoriteIds={favoriteIds}
+            onOpenCreatorProfile={handleOpenCreatorProfile}
+            currentUser={currentUser}
+            onRequireAuth={handleRequireAuth}
+            editMode={isEditActive}
+            customTexts={siteConfig.customTexts}
+            onUpdateCustomText={handleUpdateCustomText}
+          />
+        )}
+
+        {activeTabId === 'kho-docs' &&
+          (can('use_docs_vault', currentUser) ? (
+            <DocsVaultTab
+              editMode={isEditActive}
+              customTexts={siteConfig.customTexts}
+              onUpdateCustomText={handleUpdateCustomText}
+            />
+          ) : (
+            renderGuestGatePrompt(
+              '📒 Kho Docs & Sổ Tay Cá Nhân',
+              'Mời bạn đăng nhập để mở trình soạn thảo tài liệu, lưu trữ hướng dẫn và xuất file Markdown/TXT nhé 💌'
+            )
+          ))}
+
+        {activeTabId === 'kho-lenh' &&
+          canViewCreatorTabs && (
+            <PersonalPromptVaultTab
+              currentUser={currentUser}
+              onRequireAuth={handleRequireAuth}
+            />
+          )}
+
+        {activeTabId === 'tram-cuu-ho' && (
+          <RescueStationTab
+            currentUser={currentUser}
+            onRequireAuth={handleRequireAuth}
+            editMode={isEditActive}
+            customTexts={siteConfig.customTexts}
+            onUpdateCustomText={handleUpdateCustomText}
+          />
+        )}
+      </main>
+
+      {/* Chân trang ấm áp kèm nút Export / Import JSON toàn bộ dữ liệu */}
+      <footer className="w-full border-t border-[var(--border)] bg-[var(--surface)]/70 py-6 px-4 sm:px-6 text-xs text-[var(--muted)]">
+        <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
+          <div className="font-serif-title text-sm text-[var(--text)]/80">
+            <EditableText
+              value={siteConfig.footerText}
+              onSave={(val) =>
+                handleUpdateSiteConfig({ footerText: val }, 'Đổi lời chân trang')
+              }
+              editMode={isEditActive}
+            />
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={handleExportAllJson}
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full border border-[var(--border)] bg-[var(--bg)] hover:border-[var(--accent)] text-[var(--text)] transition-colors cursor-pointer font-semibold"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Export JSON</span>
+            </button>
+
+            <label className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full border border-[var(--border)] bg-[var(--bg)] hover:border-[var(--accent)] text-[var(--text)] transition-colors cursor-pointer font-semibold">
+              <Upload className="w-3.5 h-3.5" />
+              <span>Import JSON</span>
+              <input
+                ref={fileImportRef}
+                type="file"
+                accept="application/json,.json"
+                onChange={handleImportJsonFile}
+                className="hidden"
+              />
+            </label>
+          </div>
+        </div>
+      </footer>
+
+      {/* Cụm điều khiển ở góc dưới bên phải: Bật/tắt Sáng/Tối + 5 màu nhấn + Trình phát nhạc mở rộng thành bảng "Playlist" dễ thương */}
+      <CornerMusicWidget
+        playlist={playlist}
+        currentTrack={currentTrack}
+        isPlaying={isPlaying}
+        currentTime={currentTime}
+        duration={duration}
+        volume={volume}
+        isMuted={isMuted}
+        playMode={playMode}
+        onTogglePlay={toggleMusic}
+        onSelectTrack={handleSelectTrack}
+        onPrevTrack={handlePrevTrack}
+        onNextTrack={handleNextTrack}
+        onSeek={handleSeekTrack}
+        onVolumeChange={(v) => {
+          setIsMuted(false);
+          setVolume(v);
+        }}
+        onToggleMute={() => setIsMuted((m) => !m)}
+        onCyclePlayMode={handleCyclePlayMode}
+        onAddTrack={handleAddMusicTrack}
+        onUpdateTrack={handleUpdateMusicTrack}
+        onDeleteTrack={handleDeleteMusicTrack}
+        onMoveTrack={handleMoveMusicTrack}
+        onRestoreBuiltinTracks={handleRestoreBuiltinTracks}
+        colorMode={colorMode}
+        onToggleColorMode={handleToggleColorMode}
+        themes={activeThemesList}
+        activeThemeId={activeThemeId}
+        currentTheme={currentTheme}
+        onSelectTheme={setActiveThemeId}
+      />
+    </div>
+  );
+}
