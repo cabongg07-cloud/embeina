@@ -45,6 +45,15 @@ import {
   BUILTIN_SYNTH_TRACKS,
   inferTitleFromUrl,
 } from './musicService';
+import {
+  TagVoiceProfile,
+  TagPetProfile,
+  DEFAULT_TAG_VOICES,
+  DEFAULT_TAG_PETS,
+} from './tagCompanionSystem';
+
+export const DEFAULT_GACHA_DAILY_DESC =
+  'Mỗi ngày bạn có 1 lượt mở quà miễn phí (không phạt nếu bỏ lỡ ngày). Quà mở ra ngẫu nhiên 1 trong 4 loại: 🌱 Hạt giống Hoa (đưa về Vườn hoa), 🥚 Trứng Cá (thả vào Hồ cá), 🐾 Thú cưng (chăm bẵm cùng người thương), hoặc ☕ Thức uống (cất vào Quầy thức uống).';
 
 export type SiteSettingsKey =
   | 'texts'
@@ -53,7 +62,9 @@ export type SiteSettingsKey =
   | 'custom_tags'
   | 'web_playlist'
   | 'faqs'
-  | 'presets';
+  | 'presets'
+  | 'tag_voices'
+  | 'tag_pets';
 
 export interface NavTabConfig extends NavTab {
   visible: boolean;
@@ -77,6 +88,8 @@ export interface SiteConfig {
   footerText: string;
   currencyName: string;
   currencyEmoji: string;
+  coinCurrencyName: string;
+  coinCurrencyEmoji: string;
   tabs: NavTabConfig[];
   themes: ThemeConfig[];
   defaultColorMode: 'system' | ColorMode;
@@ -89,6 +102,8 @@ export interface SiteConfig {
   faqs: FaqItem[];
   presets: SitePresetsConfig;
   customTexts: Record<string, string>;
+  tagVoices: TagVoiceProfile[];
+  tagPets: TagPetProfile[];
 }
 
 export const SITE_CONFIG_KEY = 'site_settings_supabase_v1';
@@ -147,6 +162,8 @@ export function getDefaultSiteConfig(initialMusicUrls: string[] = []): SiteConfi
       'Cảm ơn bạn đã ghé thăm — chúc bạn luôn có những cuộc trò chuyện thật vui và ấm áp!',
     currencyName: 'Cánh hoa',
     currencyEmoji: '🌸',
+    coinCurrencyName: 'Xu',
+    coinCurrencyEmoji: '🪙',
     tabs: NAV_TABS.map((t) => ({ ...t, visible: true })),
     themes: THEMES.map((t) => ({
       ...t,
@@ -168,7 +185,11 @@ export function getDefaultSiteConfig(initialMusicUrls: string[] = []): SiteConfi
       rescueReports: [...INITIAL_RESCUE_REPORTS],
       backups: [...INITIAL_BACKUPS],
     },
-    customTexts: {},
+    customTexts: {
+      gacha_daily_desc: DEFAULT_GACHA_DAILY_DESC,
+    },
+    tagVoices: JSON.parse(JSON.stringify(DEFAULT_TAG_VOICES)),
+    tagPets: JSON.parse(JSON.stringify(DEFAULT_TAG_PETS)),
   };
 }
 
@@ -326,6 +347,8 @@ export async function fetchSiteSettingsFromSupabase(
     const webPlaylistVal = rowMap.get('web_playlist') || {};
     const faqsVal = rowMap.get('faqs') || {};
     const presetsVal = rowMap.get('presets') || {};
+    const tagVoicesVal = rowMap.get('tag_voices') || {};
+    const tagPetsVal = rowMap.get('tag_pets') || {};
 
     const rawMusicUrls = Array.isArray(webPlaylistVal.musicUrls)
       ? (webPlaylistVal.musicUrls as string[]).map((u) => String(u).trim()).filter(Boolean)
@@ -381,10 +404,20 @@ export async function fetchSiteSettingsFromSupabase(
         typeof textsVal.currencyEmoji === 'string' && textsVal.currencyEmoji.trim()
           ? textsVal.currencyEmoji
           : defaults.currencyEmoji,
-      customTexts:
-        textsVal.customTexts && typeof textsVal.customTexts === 'object'
+      coinCurrencyName:
+        typeof textsVal.coinCurrencyName === 'string' && textsVal.coinCurrencyName.trim()
+          ? textsVal.coinCurrencyName
+          : defaults.coinCurrencyName,
+      coinCurrencyEmoji:
+        typeof textsVal.coinCurrencyEmoji === 'string' && textsVal.coinCurrencyEmoji.trim()
+          ? textsVal.coinCurrencyEmoji
+          : defaults.coinCurrencyEmoji,
+      customTexts: {
+        gacha_daily_desc: DEFAULT_GACHA_DAILY_DESC,
+        ...(textsVal.customTexts && typeof textsVal.customTexts === 'object'
           ? (textsVal.customTexts as Record<string, string>)
-          : {},
+          : {}),
+      },
       tabs: normalizeMergedTabs(tabsVal.tabs),
       themes: normalizeThemes(themeVal.themes, defaults.themes),
       defaultColorMode:
@@ -442,6 +475,14 @@ export async function fetchSiteSettingsFromSupabase(
             ? (presetsVal.backups as BackupEntry[])
             : defaults.presets.backups,
       },
+      tagVoices:
+        Array.isArray(tagVoicesVal.items) && tagVoicesVal.items.length > 0
+          ? (tagVoicesVal.items as TagVoiceProfile[])
+          : defaults.tagVoices,
+      tagPets:
+        Array.isArray(tagPetsVal.items) && tagPetsVal.items.length > 0
+          ? (tagPetsVal.items as TagPetProfile[])
+          : defaults.tagPets,
     };
 
     currentSiteConfigState = nextConfig;
@@ -476,6 +517,8 @@ function buildSiteSettingsPayloadForKeys(
           footerText: cfg.footerText,
           currencyName: cfg.currencyName,
           currencyEmoji: cfg.currencyEmoji,
+          coinCurrencyName: cfg.coinCurrencyName,
+          coinCurrencyEmoji: cfg.coinCurrencyEmoji,
           customTexts: cfg.customTexts,
         },
       });
@@ -542,6 +585,20 @@ function buildSiteSettingsPayloadForKeys(
           backups: cfg.presets.backups,
         },
       });
+    } else if (key === 'tag_voices') {
+      rows.push({
+        key: 'tag_voices',
+        value: {
+          items: cfg.tagVoices,
+        },
+      });
+    } else if (key === 'tag_pets') {
+      rows.push({
+        key: 'tag_pets',
+        value: {
+          items: cfg.tagPets,
+        },
+      });
     }
   });
 
@@ -563,6 +620,8 @@ function detectChangedKeys(patch: Partial<SiteConfig>): SiteSettingsKey[] {
     'footerText' in patch ||
     'currencyName' in patch ||
     'currencyEmoji' in patch ||
+    'coinCurrencyName' in patch ||
+    'coinCurrencyEmoji' in patch ||
     'customTexts' in patch
   ) {
     keys.add('texts');
@@ -596,6 +655,14 @@ function detectChangedKeys(patch: Partial<SiteConfig>): SiteSettingsKey[] {
 
   if ('presets' in patch) {
     keys.add('presets');
+  }
+
+  if ('tagVoices' in patch) {
+    keys.add('tag_voices');
+  }
+
+  if ('tagPets' in patch) {
+    keys.add('tag_pets');
   }
 
   return Array.from(keys);
@@ -830,6 +897,8 @@ export async function resetSiteSettingsToDefaultsOnSupabase(
     'web_playlist',
     'faqs',
     'presets',
+    'tag_voices',
+    'tag_pets',
   ];
   const rows = buildSiteSettingsPayloadForKeys(defaults, allKeys);
 

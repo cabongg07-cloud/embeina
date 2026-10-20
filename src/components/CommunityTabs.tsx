@@ -20,6 +20,7 @@ import {
   fetchRequestsFromSupabase,
   insertRequestOnSupabase,
   updateRequestOnSupabase,
+  emitGameQuestAction,
 } from '../services/supabaseService';
 import { AuthUser, can } from '../services/authLayer';
 import { EditableText } from './EditableText';
@@ -90,7 +91,7 @@ export const LoveCornerTab: React.FC<LoveCornerTabProps> = ({
     e.preventDefault();
     if (!can('send_love_message', currentUser)) {
       onRequireAuth(
-        'Mời bạn đăng nhập để gửi lá thư yêu thương hoặc thả đèn lồng tới Creator & Nhân vật nhé 💌'
+        'Mời bạn đăng nhập để gửi lá thư yêu thương hoặc thả đèn lồng tới Chủ web & Nhân vật nhé 💌'
       );
       return;
     }
@@ -99,7 +100,7 @@ export const LoveCornerTab: React.FC<LoveCornerTabProps> = ({
     const [tType, tId] = targetValue.split(':') as ['creator' | 'character', string];
     const targetName =
       tType === 'creator'
-        ? creators.find((c) => c.id === tId)?.name || 'Creator'
+        ? 'Chủ web'
         : characters.find((c) => c.id === tId)?.name || 'Nhân vật';
 
     const newItem: LoveMessage = {
@@ -121,6 +122,7 @@ export const LoveCornerTab: React.FC<LoveCornerTabProps> = ({
     setMessages(next);
     onUpdateLoveMessages?.(next, 'Thêm lời nhắn Góc yêu thương');
     setMessageText('');
+    emitGameQuestAction('love_letter');
   };
 
   const handleHeartLove = (id: string) => {
@@ -153,7 +155,7 @@ export const LoveCornerTab: React.FC<LoveCornerTabProps> = ({
             <EditableText
               value={
                 customTexts['love_tab_desc'] ||
-                'Những bức thư tay xinh xắn và những chiếc đèn lồng thả trôi gửi trao lời cảm ơn ngọt ngào tới Creator cùng các nhân vật AI.'
+                'Những bức thư tay xinh xắn và những chiếc đèn lồng thả trôi gửi trao lời cảm ơn ngọt ngào tới Chủ web cùng các nhân vật AI.'
               }
               onSave={(val) => onUpdateCustomText?.('love_tab_desc', val)}
               editMode={canEdit}
@@ -197,7 +199,7 @@ export const LoveCornerTab: React.FC<LoveCornerTabProps> = ({
 
           <div className="space-y-1.5">
             <label className="block text-xs font-semibold text-[var(--muted)]">
-              Gửi đến Creator hoặc Nhân vật
+              Gửi đến Chủ web hoặc Nhân vật
             </label>
             <select
               value={targetValue}
@@ -211,12 +213,10 @@ export const LoveCornerTab: React.FC<LoveCornerTabProps> = ({
                   </option>
                 ))}
               </optgroup>
-              <optgroup label="Creator">
-                {creators.map((cr) => (
-                  <option key={cr.id} value={`creator:${cr.id}`}>
-                    Creator: {cr.name}
-                  </option>
-                ))}
+              <optgroup label="Chủ web">
+                <option value={`creator:${creators[0]?.id || 'owner'}`}>
+                  Chủ web
+                </option>
               </optgroup>
             </select>
           </div>
@@ -304,15 +304,10 @@ export const LoveCornerTab: React.FC<LoveCornerTabProps> = ({
               onChange={(e) => setFilterTargetId(e.target.value)}
               className="px-3.5 py-1.5 rounded-full text-xs bg-[var(--surface)] border border-[var(--border)] text-[var(--text)]"
             >
-              <option value="all">Tất cả Creator & Nhân vật</option>
+              <option value="all">Tất cả Chủ web & Nhân vật</option>
               {characters.map((ch) => (
                 <option key={ch.id} value={ch.id}>
                   Char: {ch.name}
-                </option>
-              ))}
-              {creators.map((cr) => (
-                <option key={cr.id} value={cr.id}>
-                  Creator: {cr.name}
                 </option>
               ))}
             </select>
@@ -429,7 +424,7 @@ export const RequestTab: React.FC<RequestTabProps> = ({
     e.preventDefault();
     if (!can('create_request', currentUser)) {
       onRequireAuth(
-        'Mời bạn đăng nhập để gửi ý tưởng Request cho Creator nhé 📮'
+        'Mời bạn đăng nhập để gửi ý tưởng Request cho Chủ web nhé 📮'
       );
       return;
     }
@@ -469,7 +464,7 @@ export const RequestTab: React.FC<RequestTabProps> = ({
     const item = requests.find((r) => r.id === reqId);
     if (!item) return;
 
-    const creatorName = creatorMap[item.creatorId]?.name || 'Creator';
+    const creatorName = currentUser.displayName || 'Chủ web';
     const isCreator = canManageInbox;
     const newReply = {
       id: `rep_${Date.now()}`,
@@ -526,7 +521,7 @@ export const RequestTab: React.FC<RequestTabProps> = ({
           <EditableText
             value={
               customTexts['request_tab_desc'] ||
-              'Gửi những mong ước về một nhân vật bạn hằng mong đợi. Các Creator có thể trả lời trực tiếp ngay dưới mỗi bức thư.'
+              'Gửi những mong ước về một nhân vật bạn hằng mong đợi. Chủ web có thể trả lời trực tiếp ngay dưới mỗi bức thư.'
             }
             onSave={(val) => onUpdateCustomText?.('request_tab_desc', val)}
             editMode={canEdit}
@@ -541,25 +536,8 @@ export const RequestTab: React.FC<RequestTabProps> = ({
           className="lg:col-span-4 soft-card p-6 space-y-4 h-fit"
         >
           <h3 className="font-serif-title text-2xl font-bold text-[var(--text)]">
-            ✨ Gửi Request cho Creator
+            ✨ Gửi Request cho Chủ web
           </h3>
-
-          <div className="space-y-1.5">
-            <label className="block text-xs font-semibold text-[var(--muted)]">
-              Chọn Creator bạn muốn gửi gắm
-            </label>
-            <select
-              value={creatorId}
-              onChange={(e) => setCreatorId(e.target.value)}
-              className="w-full px-3.5 py-2 text-xs bg-[var(--bg)] border border-[var(--border)] text-[var(--text)]"
-            >
-              {creators.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name} ({c.tags.slice(0, 2).join(', ')})
-                </option>
-              ))}
-            </select>
-          </div>
 
           <input
             type="text"
@@ -619,8 +597,6 @@ export const RequestTab: React.FC<RequestTabProps> = ({
                     </h4>
                     <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--muted)] mt-1">
                       <span>Người gửi: {req.requesterName}</span>
-                      <span aria-hidden="true">·</span>
-                      <span>Gửi tới: {creator?.name || 'Creator'}</span>
                       {req.tags.map((t) => (
                         <span key={t} className="sticker-chip text-[11px]">
                           ✨ {t}
@@ -646,7 +622,7 @@ export const RequestTab: React.FC<RequestTabProps> = ({
                 {canManageInbox && (
                   <div className="flex items-center gap-2 pt-1">
                     <span className="text-xs font-semibold text-[var(--muted)]">
-                      Quyền Creator:
+                      Quyền Chủ web:
                     </span>
                     {(
                       ['pending', 'answered', 'declined'] as RequestStatus[]
@@ -683,7 +659,7 @@ export const RequestTab: React.FC<RequestTabProps> = ({
                             <span>
                               {rep.authorName}{' '}
                               {rep.authorRole === 'creator'
-                                ? '✨ (Creator)'
+                                ? '✨ (Chủ web)'
                                 : '🌸 (Người gửi)'}
                             </span>
                           </div>
@@ -707,7 +683,7 @@ export const RequestTab: React.FC<RequestTabProps> = ({
                       }
                       placeholder={
                         canManageInbox
-                          ? 'Viết câu trả lời của Creator cho request này...'
+                          ? 'Viết câu trả lời của Chủ web cho request này...'
                           : 'Nhắn thêm vào cuộc trò chuyện nhỏ...'
                       }
                       className="flex-1 px-4 py-2 rounded-full text-xs bg-[var(--bg)] border border-[var(--border)] text-[var(--text)]"

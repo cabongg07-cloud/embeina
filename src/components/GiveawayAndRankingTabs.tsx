@@ -295,36 +295,15 @@ export const GiveawayTab: React.FC<GiveawayTabProps> = ({
           <h3 className="font-serif-title text-2xl text-[var(--text)] font-bold">
             ➕ Khởi tạo kỳ Giveaway mới
           </h3>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
             <input
               type="text"
               required
               value={newTitle}
               onChange={(e) => setNewTitle(e.target.value)}
               placeholder="Tên sự kiện Giveaway *"
-              className="px-3.5 py-2 text-xs bg-[var(--bg)] border border-[var(--border)] text-[var(--text)]"
+              className="w-full px-3.5 py-2 text-xs bg-[var(--bg)] border border-[var(--border)] text-[var(--text)]"
             />
-            {currentUser.isSiteOwner ? (
-              <select
-                value={newCreatorId}
-                onChange={(e) => setNewCreatorId(e.target.value)}
-                className="px-3.5 py-2 text-xs bg-[var(--bg)] border border-[var(--border)] text-[var(--text)]"
-              >
-                {creators.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    Creator tài trợ: {c.name}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <div className="px-3.5 py-2 text-xs rounded-xl bg-[var(--bg)] border border-[var(--border)] text-[var(--muted)] flex items-center">
-                Creator tài trợ:{' '}
-                <strong className="text-[var(--text)] ml-1">
-                  {creatorMap[currentUser.linkedCreatorId || '']?.name ||
-                    'Lâm Vọng Nguyệt'}
-                </strong>
-              </div>
-            )}
           </div>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <input
@@ -393,7 +372,7 @@ export const GiveawayTab: React.FC<GiveawayTabProps> = ({
                 {isEditor && canEditGa && (
                   <div className="pb-2 border-b border-dashed border-[var(--border)] flex items-center justify-between gap-2">
                     <span className="text-[11px] font-semibold text-[var(--muted)]">
-                      ✏️ Giveaway của {creator?.name || 'Creator'}
+                      ✏️ Giveaway của Chủ web
                     </span>
                     <ItemEditControls
                       canEdit={canEditGa}
@@ -494,8 +473,6 @@ export const GiveawayTab: React.FC<GiveawayTabProps> = ({
                       />
                     </h3>
                     <div className="flex items-center gap-2 text-xs text-[var(--muted)] mt-1">
-                      <span>Tài trợ bởi: {creator?.name || 'Góc Nhỏ'}</span>
-                      <span aria-hidden="true">·</span>
                       <span className="sticker-chip text-[11px] inline-flex items-center gap-1 tabular-nums">
                         <Clock className="w-3 h-3" />
                         <EditableText
@@ -913,18 +890,6 @@ export const RankingTab: React.FC<RankingTabProps> = ({
 
                   <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--muted)]">
                     <span>{entry.char.epithet}</span>
-                    {creator && (
-                      <>
-                        <span aria-hidden="true">·</span>
-                        <button
-                          type="button"
-                          onClick={() => onOpenCreatorProfile(creator.id)}
-                          className="font-semibold text-[var(--text)] hover:underline cursor-pointer"
-                        >
-                          {creator.name}
-                        </button>
-                      </>
-                    )}
                   </div>
                 </div>
               </div>

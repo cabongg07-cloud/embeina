@@ -188,10 +188,10 @@ export const SharedPromptsTab: React.FC<SharedPromptsTabProps> = ({
       );
       return;
     }
-    const creatorName = creatorMap[prompt.creatorId]?.name || 'Creator';
+    const creatorName = currentUser.displayName || 'Chủ web';
     const res = await insertPersonalPromptOnSupabase({
       title: prompt.title,
-      folder: 'Nhập từ Creator',
+      folder: 'Nhập từ Chủ web',
       tags: prompt.tags,
       content: prompt.content,
       starred: true,
@@ -240,10 +240,10 @@ export const SharedPromptsTab: React.FC<SharedPromptsTabProps> = ({
   };
 
   const headerTitle =
-    customTexts['prompts_tab_title'] || '🪄 Lệnh & Prompt Chia Sẻ Từ Creator';
+    customTexts['prompts_tab_title'] || '🪄 Lệnh & Prompt Chia Sẻ Từ Chủ Web';
   const headerDesc =
     customTexts['prompts_tab_desc'] ||
-    'Những câu thần chú ngôn từ được các tác giả chắt lọc để giữ hồn nhân vật và dẫn dắt mạch truyện thật mượt mà.';
+    'Những câu thần chú ngôn từ được Chủ web chắt lọc để giữ hồn nhân vật và dẫn dắt mạch truyện thật mượt mà.';
 
   return (
     <div className="space-y-8">
@@ -258,7 +258,7 @@ export const SharedPromptsTab: React.FC<SharedPromptsTabProps> = ({
                 onUpdateCustomText(
                   'prompts_tab_title',
                   val,
-                  '🪄 Lệnh & Prompt Chia Sẻ Từ Creator'
+                  '🪄 Lệnh & Prompt Chia Sẻ Từ Chủ Web'
                 )
               }
             />
@@ -306,7 +306,7 @@ export const SharedPromptsTab: React.FC<SharedPromptsTabProps> = ({
           <h3 className="font-serif-title text-2xl text-[var(--text)] font-bold">
             ➕ Chia sẻ lệnh / prompt mới lên thư viện
           </h3>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <input
               type="text"
               required
@@ -315,27 +315,6 @@ export const SharedPromptsTab: React.FC<SharedPromptsTabProps> = ({
               placeholder="Tiêu đề lệnh *"
               className="px-3.5 py-2 text-xs bg-[var(--bg)] border border-[var(--border)] text-[var(--text)]"
             />
-            {currentUser.isSiteOwner ? (
-              <select
-                value={newCreatorId}
-                onChange={(e) => setNewCreatorId(e.target.value)}
-                className="px-3.5 py-2 text-xs bg-[var(--bg)] border border-[var(--border)] text-[var(--text)]"
-              >
-                {creators.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    Creator: {c.name}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <div className="px-3.5 py-2 text-xs rounded-xl bg-[var(--bg)] border border-[var(--border)] text-[var(--muted)] flex items-center">
-                Tác giả:{' '}
-                <strong className="text-[var(--text)] ml-1">
-                  {creatorMap[currentUser.linkedCreatorId || '']?.name ||
-                    'Lâm Vọng Nguyệt'}
-                </strong>
-              </div>
-            )}
             <select
               value={newCharId}
               onChange={(e) => setNewCharId(e.target.value)}
@@ -461,7 +440,7 @@ export const SharedPromptsTab: React.FC<SharedPromptsTabProps> = ({
                 {isEditor && canEditPrompt && (
                   <div className="pb-2 border-b border-dashed border-[var(--border)] flex items-center justify-between gap-2">
                     <span className="text-[11px] font-semibold text-[var(--muted)]">
-                      ✏️ Lệnh của {creator?.name || 'Creator'}
+                      ✏️ Lệnh của Chủ web
                     </span>
                     <ItemEditControls
                       canEdit={canEditPrompt}
@@ -562,9 +541,6 @@ export const SharedPromptsTab: React.FC<SharedPromptsTabProps> = ({
                 </h3>
 
                 <div className="flex flex-wrap items-center gap-2 text-xs border-b border-[var(--border)] pb-3">
-                  {creator && (
-                    <span className="sticker-chip">🌸 {creator.name}</span>
-                  )}
                   {char && (
                     <span className="sticker-chip">💬 {char.name}</span>
                   )}
@@ -703,7 +679,7 @@ export const PersonalPromptVaultTab: React.FC<PersonalPromptVaultTabProps> = ({
       'Mặc định',
       'Quản lý trí nhớ',
       'Chuyển cảnh',
-      'Nhập từ Creator',
+      'Nhập từ Chủ web',
     ]);
     personalPrompts.forEach((p) => {
       if (p.folder) set.add(p.folder);
@@ -813,7 +789,7 @@ export const PersonalPromptVaultTab: React.FC<PersonalPromptVaultTabProps> = ({
   const handleImportShared = async (sp: SharedPrompt) => {
     const res = await insertPersonalPromptOnSupabase({
       title: sp.title,
-      folder: 'Nhập từ Creator',
+      folder: 'Nhập từ Chủ web',
       tags: sp.tags,
       content: sp.content,
       starred: true,
@@ -846,7 +822,7 @@ export const PersonalPromptVaultTab: React.FC<PersonalPromptVaultTabProps> = ({
             />
           </h2>
           <p className="text-sm text-[var(--muted)] leading-relaxed">
-            Ngăn kéo riêng lưu trên trình duyệt của bạn. Sắp xếp prompt theo thư mục, đánh dấu sao những câu lệnh hay dùng và chép nhanh một chạm.
+            Ngăn kéo riêng lưu trên tài khoản của bạn. Sắp xếp prompt theo thư mục, đánh dấu sao những câu lệnh hay dùng và chép nhanh một chạm.
           </p>
         </div>
 
@@ -856,7 +832,7 @@ export const PersonalPromptVaultTab: React.FC<PersonalPromptVaultTabProps> = ({
           className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full text-xs font-bold border border-[var(--accent)] bg-[var(--accent)]/20 text-[var(--text)] cursor-pointer whitespace-nowrap"
         >
           <BookmarkPlus className="w-3.5 h-3.5" />
-          <span>Nhập nhanh từ lệnh Creator</span>
+          <span>Nhập nhanh từ lệnh Chủ web</span>
         </button>
       </div>
 
@@ -864,7 +840,7 @@ export const PersonalPromptVaultTab: React.FC<PersonalPromptVaultTabProps> = ({
         <div className="soft-card p-6 space-y-4 border-2 border-[var(--accent)]">
           <div className="flex items-center justify-between">
             <h3 className="font-serif-title text-xl font-bold text-[var(--text)]">
-              Chọn lệnh Creator đã chia sẻ để nhập vào Kho cá nhân
+              Chọn lệnh Chủ web đã chia sẻ để nhập vào Kho cá nhân
             </h3>
             <button
               type="button"

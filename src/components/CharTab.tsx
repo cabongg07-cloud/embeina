@@ -42,7 +42,7 @@ interface CharTabProps {
   onUnlockWithPetals: (charId: string, price: number) => boolean;
   onUnlockWithItems: (charId: string) => void;
   onRequireAuth: (reason: string) => void;
-  onGoToMiniGame: () => void;
+  onGoToMiniGame: (zone?: string, targetKind?: string) => void;
   searchInputRef?: React.RefObject<HTMLInputElement | null>;
   currentUser: AuthUser;
   editMode?: boolean;
@@ -103,27 +103,21 @@ export const CharTab: React.FC<CharTabProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [onlyFavorites, setOnlyFavorites] = useState(false);
 
-  // Kiểm tra quyền Creator bằng can() để hiện nút ➕ "Thêm char"
+  // Kiểm tra quyền Chủ web bằng can() để hiện nút ➕ "Thêm char"
   const canCreateChar = can('manage_own_chars', currentUser);
   const canEditText = Boolean(editMode && can('edit', currentUser));
 
-  // Tìm tên Creator mặc định của tài khoản hiện tại
+  // Tìm thông tin mặc định của Chủ web
   const defaultCreatorObj = useMemo(() => {
     const linkedId = currentUser.linkedCreatorId || 'creator-lam-vong';
     return creators.find((c) => c.id === linkedId) || creators[0];
   }, [creators, currentUser.linkedCreatorId]);
 
-  // Trạng thái form ➕ "Thêm char"
+  // Trạng thái form ➕ "Thêm char" (mặc định Chủ web là người đăng)
   const [showAddForm, setShowAddForm] = useState(false);
   const [newName, setNewName] = useState('');
   const [newEpithet, setNewEpithet] = useState('');
   const [newImageUrl, setNewImageUrl] = useState('');
-  const [newCreatorId, setNewCreatorId] = useState(
-    defaultCreatorObj?.id || 'creator-lam-vong'
-  );
-  const [newCreatorName, setNewCreatorName] = useState(
-    currentUser.displayName || defaultCreatorObj?.name || 'Creator'
-  );
   const [newTagsList, setNewTagsList] = useState<string[]>(['Chữa lành']);
   const [newTagInput, setNewTagInput] = useState('');
   const [newChatUrl, setNewChatUrl] = useState('');
@@ -202,34 +196,7 @@ export const CharTab: React.FC<CharTabProps> = ({
     return Array.from(set);
   }, [characters, creatorCustomTags]);
 
-  // Đếm số lượng char theo từng Creator (gồm cả creatorId và creatorName tùy chỉnh)
-  const creatorFilterOptions = useMemo(() => {
-    const map = new Map<string, { id: string; name: string; count: number; creator?: Creator }>();
-    creators.forEach((cr) => {
-      map.set(cr.id, { id: cr.id, name: cr.name, count: 0, creator: cr });
-    });
-    characters.forEach((ch) => {
-      const existing = map.get(ch.creatorId);
-      if (existing) {
-        existing.count += 1;
-      } else {
-        const customId = ch.creatorId || `custom:${ch.creatorName || 'Creator'}`;
-        const prev = map.get(customId);
-        if (prev) {
-          prev.count += 1;
-        } else {
-          map.set(customId, {
-            id: customId,
-            name: ch.creatorName || 'Creator',
-            count: 1,
-          });
-        }
-      }
-    });
-    return Array.from(map.values());
-  }, [creators, characters]);
-
-  // Danh sách vật phẩm hiện có trên Supabase để gợi ý khi Creator chỉ định đúng tên vật phẩm mở khóa
+  // Danh sách vật phẩm hiện có trên Supabase để gợi ý khi Chủ web chỉ định đúng tên vật phẩm mở khóa
   const ownedItemsSuggestions = useMemo(() => {
     return supabaseInventory;
   }, [supabaseInventory]);
@@ -238,28 +205,14 @@ export const CharTab: React.FC<CharTabProps> = ({
     const q = searchQuery.trim().toLowerCase();
 
     return characters.filter((char) => {
-      const crName = (
-        char.creatorName ||
-        creatorMap[char.creatorId]?.name ||
-        ''
-      ).toLowerCase();
-
       if (q) {
         const matchName = char.name.toLowerCase().includes(q);
         const matchEpithet = char.epithet.toLowerCase().includes(q);
         const matchDesc = char.description.toLowerCase().includes(q);
-        const matchCreator = crName.includes(q);
-        if (!matchName && !matchEpithet && !matchDesc && !matchCreator) {
+        const matchTags = char.tags.some((t) => t.toLowerCase().includes(q));
+        if (!matchName && !matchEpithet && !matchDesc && !matchTags) {
           return false;
         }
-      }
-
-      if (
-        selectedCreatorId !== 'all' &&
-        char.creatorId !== selectedCreatorId &&
-        char.creatorName !== selectedCreatorId
-      ) {
-        return false;
       }
 
       if (selectedTags.length > 0) {
@@ -275,26 +228,10 @@ export const CharTab: React.FC<CharTabProps> = ({
 
       return true;
     });
-  }, [
-    characters,
-    creatorMap,
-    searchQuery,
-    selectedCreatorId,
-    selectedTags,
-    onlyFavorites,
-    favoriteIds,
-  ]);
-
-  const activeCreatorProfile = useMemo(() => {
-    if (selectedCreatorId === 'all') return null;
-    return creators.find((c) => c.id === selectedCreatorId) || null;
-  }, [creators, selectedCreatorId]);
+  }, [characters, searchQuery, selectedTags, onlyFavorites, favoriteIds]);
 
   const hasActiveFilters =
-    searchQuery.trim() !== '' ||
-    selectedCreatorId !== 'all' ||
-    selectedTags.length > 0 ||
-    onlyFavorites;
+    searchQuery.trim() !== '' || selectedTags.length > 0 || onlyFavorites;
 
   const handleClearAll = () => {
     setSearchQuery('');
@@ -323,10 +260,6 @@ export const CharTab: React.FC<CharTabProps> = ({
   };
 
   const handleOpenAddModal = () => {
-    setNewCreatorId(defaultCreatorObj?.id || 'creator-lam-vong');
-    setNewCreatorName(
-      currentUser.displayName || defaultCreatorObj?.name || 'Creator'
-    );
     setShowAddForm((prev) => !prev);
   };
 
@@ -351,8 +284,8 @@ export const CharTab: React.FC<CharTabProps> = ({
     onAddCharacter({
       name: newName.trim(),
       epithet: newEpithet.trim() || 'Người bạn mới nơi sổ tay',
-      creatorId: newCreatorId,
-      creatorName: newCreatorName.trim() || currentUser.displayName || 'Creator',
+      creatorId: currentUser.id || defaultCreatorObj?.id || 'owner',
+      creatorName: currentUser.displayName || 'Chủ web',
       tags: finalTags.length > 0 ? finalTags : ['Đời thường'],
       description: newDesc.trim(),
       openingLine:
@@ -389,30 +322,21 @@ export const CharTab: React.FC<CharTabProps> = ({
     setShowAddForm(false);
   };
 
-  // Kiểm tra Creator có quyền sửa/xóa một char không (Creator sửa & xóa được char của mình)
-  const checkCanManageChar = (char: CharacterItem): boolean => {
-    if (!can('manage_own_chars', currentUser)) return false;
-    if (canEditItem(currentUser, char.creatorId)) return true;
-    if (
-      char.creatorName &&
-      currentUser.displayName &&
-      char.creatorName.toLowerCase() === currentUser.displayName.toLowerCase()
-    ) {
-      return true;
-    }
-    return false;
+  // Kiểm tra Chủ web có quyền sửa/xóa nhân vật không
+  const checkCanManageChar = (_char: CharacterItem): boolean => {
+    return can('manage_own_chars', currentUser);
   };
 
   return (
     <div className="space-y-8">
-      {/* Tiêu đề & Nút ➕ "Thêm char" (chỉ Creator thấy, kiểm tra bằng can()) */}
+      {/* Tiêu đề & Nút ➕ "Thêm char" (chỉ Chủ web thấy) */}
       <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 border-b border-[var(--border)] pb-6">
         <div className="max-w-2xl space-y-2">
           <h2 className="font-serif-title text-2xl sm:text-4xl font-bold text-[var(--text)]">
             <EditableText
               value={
                 customTexts['char_tab_title'] ||
-                '✨ Kho Nhân Vật (Char) & Creator'
+                '✨ Kho Nhân Vật (Char)'
               }
               onSave={(val) => onUpdateCustomText?.('char_tab_title', val)}
               editMode={canEditText}
@@ -422,7 +346,7 @@ export const CharTab: React.FC<CharTabProps> = ({
             <EditableText
               value={
                 customTexts['char_tab_desc'] ||
-                'Tìm kiếm nhân vật theo tên, kết hợp nhiều nhãn dán tag hoặc bấm vào tên Creator trên thẻ để xem toàn bộ nhân vật của họ.'
+                'Tìm kiếm nhân vật theo tên, danh xưng, bối cảnh hoặc kết hợp nhiều nhãn dán tag để gặp người bạn tâm giao.'
               }
               onSave={(val) => onUpdateCustomText?.('char_tab_desc', val)}
               editMode={canEditText}
@@ -473,7 +397,7 @@ export const CharTab: React.FC<CharTabProps> = ({
             </button>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
                 1. Tên char *
@@ -501,39 +425,6 @@ export const CharTab: React.FC<CharTabProps> = ({
                 className="w-full px-3.5 py-2 rounded-2xl bg-[var(--bg)] border border-[var(--border)] text-[var(--text)] focus:outline-none focus:border-[var(--accent)]"
               />
             </div>
-
-            <div>
-              <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
-                3. Creator (Tự điền tên bạn)
-              </label>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={newCreatorName}
-                  onChange={(e) => setNewCreatorName(e.target.value)}
-                  className="flex-1 px-3.5 py-2 rounded-2xl bg-[var(--bg)] border border-[var(--border)] text-[var(--text)] focus:outline-none focus:border-[var(--accent)]"
-                />
-                {currentUser.isSiteOwner && (
-                  <select
-                    value={newCreatorId}
-                    onChange={(e) => {
-                      const cid = e.target.value;
-                      setNewCreatorId(cid);
-                      const found = creators.find((c) => c.id === cid);
-                      if (found) setNewCreatorName(found.name);
-                    }}
-                    className="px-2.5 py-2 rounded-2xl bg-[var(--bg)] border border-[var(--border)] text-[var(--text)]"
-                    title="Chọn hồ sơ Creator"
-                  >
-                    {creators.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                      </option>
-                    ))}
-                  </select>
-                )}
-              </div>
-            </div>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -551,7 +442,7 @@ export const CharTab: React.FC<CharTabProps> = ({
             </div>
             <div>
               <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
-                5. Link chat *
+                3. Link chat *
               </label>
               <input
                 type="url"
@@ -642,7 +533,7 @@ export const CharTab: React.FC<CharTabProps> = ({
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
-                6. Mô tả nhân vật *
+                5. Mô tả nhân vật *
               </label>
               <textarea
                 rows={3}
@@ -655,7 +546,7 @@ export const CharTab: React.FC<CharTabProps> = ({
             </div>
             <div>
               <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
-                7. Open Scene (Lời mở đầu của cảnh) *
+                6. Open Scene (Lời mở đầu của cảnh) *
               </label>
               <textarea
                 rows={3}
@@ -670,7 +561,7 @@ export const CharTab: React.FC<CharTabProps> = ({
 
           <div>
             <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
-              8. Ghi chú (Gợi ý cách roleplay, lưu ý của Creator...)
+              7. Ghi chú (Gợi ý cách roleplay, lưu ý của Chủ web...)
             </label>
             <input
               type="text"
@@ -681,12 +572,12 @@ export const CharTab: React.FC<CharTabProps> = ({
             />
           </div>
 
-          {/* 9. Trạng thái (Mở / Khóa) & Yêu cầu mở khóa bằng vật phẩm */}
+          {/* 8. Trạng thái (Mở / Khóa) & Yêu cầu mở khóa bằng vật phẩm */}
           <div className="p-4 rounded-2xl bg-[var(--bg)] border border-[var(--border)] space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
                 <span className="font-bold text-[var(--text)] block">
-                  9. Trạng thái nhân vật (Mở / Khóa bằng vật phẩm):
+                  8. Trạng thái nhân vật (Mở / Khóa bằng vật phẩm):
                 </span>
                 <span className="text-[11px] text-[var(--muted)]">
                   Khi chọn Khóa, người dùng cần thu thập đủ Hoa, Cá, Thức uống hoặc Thú cưng từ Mini game để mở khóa Link chat & Open Scene.
@@ -851,41 +742,24 @@ export const CharTab: React.FC<CharTabProps> = ({
         </form>
       )}
 
-      {/* Khung công cụ Tìm kiếm + Lọc theo Creator + Lọc nhiều Tag */}
+      {/* Khung công cụ Tìm kiếm theo tên & Lọc nhiều Tag */}
       <div className="soft-card p-5 sm:p-6 space-y-5">
         <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
           {/* Ô tìm theo tên / mô tả */}
-          <div className="md:col-span-6 relative">
+          <div className="md:col-span-9 relative">
             <Search className="w-4 h-4 text-[var(--muted)] absolute left-4 top-1/2 -translate-y-1/2 pointer-events-none" />
             <input
               ref={searchInputRef}
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Tìm theo tên nhân vật, danh xưng, Creator hoặc bối cảnh..."
+              placeholder="Tìm theo tên nhân vật, danh xưng, tag hoặc bối cảnh..."
               className="w-full pl-10 pr-4 py-2.5 rounded-full bg-[var(--bg)] border border-[var(--border)] text-sm text-[var(--text)] placeholder:text-[var(--muted)]/60 focus:outline-none focus:border-[var(--accent)] transition-colors"
             />
           </div>
 
-          {/* Chọn lọc theo Creator */}
-          <div className="md:col-span-4">
-            <select
-              value={selectedCreatorId}
-              onChange={(e) => onSelectCreatorFilter(e.target.value)}
-              aria-label="Lọc theo Creator"
-              className="w-full px-4 py-2.5 rounded-full bg-[var(--bg)] border border-[var(--border)] text-sm text-[var(--text)] focus:outline-none focus:border-[var(--accent)] transition-colors cursor-pointer"
-            >
-              <option value="all">✨ Tất cả Creator ({creators.length})</option>
-              {creatorFilterOptions.map((opt) => (
-                <option key={opt.id} value={opt.id}>
-                  {opt.name} ({opt.count} char)
-                </option>
-              ))}
-            </select>
-          </div>
-
           {/* Lọc Yêu thích */}
-          <div className="md:col-span-2 flex items-center">
+          <div className="md:col-span-3 flex items-center">
             <button
               type="button"
               onClick={() => setOnlyFavorites((prev) => !prev)}
@@ -904,48 +778,7 @@ export const CharTab: React.FC<CharTabProps> = ({
           </div>
         </div>
 
-        {/* Hàng nút nhanh chọn Creator */}
-        <div className="space-y-2">
-          <span className="text-xs font-bold text-[var(--muted)] flex items-center gap-1.5">
-            <User className="w-3.5 h-3.5 text-[var(--accent)]" />
-            <span>Chọn nhanh Creator (hoặc bấm vào tên Creator trên mỗi thẻ Char):</span>
-          </span>
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={() => onSelectCreatorFilter('all')}
-              className={`px-3 py-1 rounded-full text-xs border transition-all cursor-pointer ${
-                selectedCreatorId === 'all'
-                  ? 'border-[var(--accent)] bg-[var(--accent)] text-[#3a2b30] font-bold'
-                  : 'border-[var(--border)] bg-[var(--bg)] text-[var(--muted)] hover:text-[var(--text)]'
-              }`}
-            >
-              Tất cả ({characters.length})
-            </button>
-            {creatorFilterOptions.map((opt) => {
-              const active = selectedCreatorId === opt.id;
-              return (
-                <button
-                  key={opt.id}
-                  type="button"
-                  onClick={() =>
-                    onSelectCreatorFilter(active ? 'all' : opt.id)
-                  }
-                  className={`px-3 py-1 rounded-full text-xs border transition-all cursor-pointer inline-flex items-center gap-1.5 ${
-                    active
-                      ? 'border-[var(--accent)] bg-[var(--accent)] text-[#3a2b30] font-bold shadow-xs'
-                      : 'border-[var(--border)] bg-[var(--bg)] text-[var(--muted)] hover:text-[var(--text)] hover:border-[var(--accent)]'
-                  }`}
-                >
-                  <span>{opt.name}</span>
-                  <span className="text-[10px] opacity-75">({opt.count})</span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Bộ lọc nhiều Tag kèm số lượng & Chỗ thêm tag mới dành cho Creator */}
+        {/* Bộ lọc nhiều Tag kèm số lượng & Chỗ thêm tag mới dành cho Chủ web */}
         <div className="space-y-2.5 pt-2 border-t border-[var(--border)]">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2">
@@ -1076,63 +909,6 @@ export const CharTab: React.FC<CharTabProps> = ({
           </div>
         </div>
       </div>
-
-      {/* Nếu đang lọc theo một Creator cụ thể, hiển thị thẻ giới thiệu ngắn của Creator đó */}
-      {activeCreatorProfile && (
-        <div className="soft-card p-5 border-2 border-[var(--accent)]/60 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-          <div className="flex items-center gap-3.5">
-            {activeCreatorProfile.imageUrl ? (
-              <img
-                src={activeCreatorProfile.imageUrl}
-                alt={activeCreatorProfile.name}
-                className="w-12 h-12 rounded-2xl object-cover border border-[var(--border)]"
-              />
-            ) : (
-              <div
-                className="w-12 h-12 rounded-2xl flex items-center justify-center font-serif-title font-bold text-white"
-                style={{ backgroundColor: activeCreatorProfile.avatarTint }}
-              >
-                {activeCreatorProfile.avatarSymbol}
-              </div>
-            )}
-            <div className="space-y-1">
-              <div className="flex items-center gap-2 flex-wrap">
-                <h3 className="font-serif-title text-lg font-bold text-[var(--text)]">
-                  Creator: {activeCreatorProfile.name}
-                </h3>
-                <span className="text-xs text-[var(--muted)]">
-                  {activeCreatorProfile.handle}
-                </span>
-              </div>
-              <p className="text-xs text-[var(--muted)] max-w-2xl">
-                {activeCreatorProfile.bio}
-              </p>
-              <div className="flex flex-wrap gap-2 pt-1">
-                {activeCreatorProfile.socials.map((soc) => (
-                  <a
-                    key={soc.label}
-                    href={soc.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-[var(--text)] hover:text-[var(--accent)]"
-                  >
-                    <span>{soc.label}</span>
-                    <ExternalLink className="w-3 h-3" />
-                  </a>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          <button
-            type="button"
-            onClick={() => onSelectCreatorFilter('all')}
-            className="px-3.5 py-1.5 rounded-full text-xs font-bold border border-[var(--border)] bg-[var(--bg)] text-[var(--text)] hover:border-[var(--accent)] cursor-pointer shrink-0"
-          >
-            Xem tất cả Creator
-          </button>
-        </div>
-      )}
 
       {/* Danh sách Card Nhân vật */}
       {isLoadingChars ? (

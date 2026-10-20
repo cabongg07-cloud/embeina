@@ -13,18 +13,19 @@ import { supabase } from '../config/supabaseConfig';
 import { UserRole } from '../data/sampleData';
 import type { User as SupabaseUser } from '@supabase/supabase-js';
 
-export type DbProfileRole = 'user' | 'creator' | 'owner';
+export type DbProfileRole = 'user' | 'owner';
 
 export interface AuthUser {
   id: string;
   email: string;
   username?: string;
   displayName: string;
-  role: UserRole; // 'guest' | 'user' | 'creator' (trong đó 'creator' đại diện cho cả creator & owner trên UI)
-  profileRole: 'guest' | DbProfileRole; // Giá trị gốc từ bảng profiles.role
+  role: UserRole;
+  profileRole: 'guest' | DbProfileRole; // Giá trị gốc từ bảng profiles.role ('guest' | 'user' | 'owner')
+  profileLoaded: boolean; // true khi đã tải xong bảng profiles từ Supabase
   avatarEmoji: string;
   isSiteOwner?: boolean; // true khi profiles.role === 'owner'
-  linkedCreatorId?: string; // chính là user.id của tài khoản trên Supabase
+  linkedCreatorId?: string;
 }
 
 export interface PublicProfileRow {
@@ -83,7 +84,7 @@ const USER_ACTIONS: PermissionAction[] = [
   'save_backup_entry',
 ];
 
-const CREATOR_ACTIONS: PermissionAction[] = [
+const OWNER_ACTIONS: PermissionAction[] = [
   ...USER_ACTIONS,
   'view_creator_tabs',
   'manage_feedback',
@@ -94,10 +95,6 @@ const CREATOR_ACTIONS: PermissionAction[] = [
   'create_giveaway',
   'draw_giveaway_winner',
   'manage_rescue_status',
-];
-
-const OWNER_ACTIONS: PermissionAction[] = [
-  ...CREATOR_ACTIONS,
   'edit',
   'site_settings',
   'creator_edit_mode',
@@ -111,6 +108,7 @@ export const DEFAULT_GUEST_USER: AuthUser = {
   displayName: 'Khách ghé thăm',
   role: 'guest',
   profileRole: 'guest',
+  profileLoaded: false,
   avatarEmoji: '🌱',
   isSiteOwner: false,
 };
@@ -120,7 +118,7 @@ let currentUserState: AuthUser = DEFAULT_GUEST_USER;
 /**
  * Hàm kiểm tra quyền trung tâm `can(action, user?)` dùng trên toàn bộ ứng dụng.
  * GHI CHÚ BẢO MẬT: Ẩn giao diện chỉ cho gọn, bảo mật thật nằm ở RLS trên Supabase.
- * - Chỉ vai 'owner' mới có quyền 'edit' và 'site_settings' (Nút ✏️ Chỉnh sửa và Cài đặt trang).
+ * - Mọi công cụ quản lý (Thêm char, Chỉnh sửa, Commission, Request, Kho lệnh, Cài đặt trang) chỉ hiện với Chủ web (profiles.role = 'owner') sau khi profiles đã tải xong.
  */
 export function can(
   action: PermissionAction,
@@ -131,46 +129,32 @@ export function can(
     return false;
   }
 
-  if (resolvedUser.profileRole === 'user') {
-    return USER_ACTIONS.includes(action);
-  }
-
-  if (resolvedUser.profileRole === 'creator') {
-    return CREATOR_ACTIONS.includes(action);
-  }
-
-  if (resolvedUser.profileRole === 'owner') {
+  if (
+    resolvedUser.profileLoaded &&
+    resolvedUser.profileRole === 'owner'
+  ) {
     return OWNER_ACTIONS.includes(action);
   }
 
-  return false;
+  return USER_ACTIONS.includes(action);
 }
 
 /**
  * Kiểm tra xem người dùng hiện tại có được phép sửa/xóa một mục nội dung cụ thể không.
- * GHI CHÚ BẢO MẬT: Ẩn giao diện chỉ cho gọn, bảo mật thật nằm ở RLS trên Supabase.
+ * GHI CHÚ BẢO MẬT: Chỉ Chủ web (owner) mới có quyền sửa/xóa. Bảo mật thật nằm ở RLS trên Supabase.
  */
 export function canEditItem(
   user: AuthUser | null | undefined,
-  ownerCreatorId?: string | null,
+  _ownerCreatorId?: string | null,
   editMode = true
 ): boolean {
-  if (!user || user.profileRole === 'guest') {
+  if (!user || !user.profileLoaded || user.profileRole === 'guest') {
     return false;
   }
-  if (user.profileRole === 'owner' || user.isSiteOwner) {
+  if (user.profileRole === 'owner') {
     return editMode ? true : can('manage_own_chars', user);
   }
-  if (!can('manage_own_chars', user)) {
-    return false;
-  }
-  if (!ownerCreatorId) {
-    return false;
-  }
-  return (
-    ownerCreatorId === user.id ||
-    ownerCreatorId === user.linkedCreatorId
-  );
+  return false;
 }
 
 type AuthChangeListener = (user: AuthUser) => void;
@@ -191,7 +175,10 @@ async function buildAuthUserFromSession(
   sbUser: SupabaseUser | null
 ): Promise<AuthUser> {
   if (!sbUser) {
-    return DEFAULT_GUEST_USER;
+    return {
+      ...DEFAULT_GUEST_USER,
+      profileLoaded: true,
+    };
   }
 
   try {
@@ -202,17 +189,9 @@ async function buildAuthUserFromSession(
       .maybeSingle();
 
     const rawRole = String(profile?.role || 'user').toLowerCase();
-    const profileRole: DbProfileRole =
-      rawRole === 'owner'
-        ? 'owner'
-        : rawRole === 'creator'
-        ? 'creator'
-        : 'user';
-
-    const uiRole: UserRole =
-      profileRole === 'creator' || profileRole === 'owner'
-        ? 'creator'
-        : 'user';
+    // Chỉ có 1 người đăng nội dung là Chủ web (profiles.role = 'owner')
+    const profileRole: DbProfileRole = rawRole === 'owner' ? 'owner' : 'user';
+    const uiRole: UserRole = profileRole === 'owner' ? 'creator' : 'user';
 
     const username =
       profile?.username ||
@@ -232,12 +211,8 @@ async function buildAuthUserFromSession(
       displayName,
       role: uiRole,
       profileRole,
-      avatarEmoji:
-        profileRole === 'owner'
-          ? '👑'
-          : profileRole === 'creator'
-          ? '🎨'
-          : '🌸',
+      profileLoaded: true,
+      avatarEmoji: profileRole === 'owner' ? '👑' : '🌸',
       isSiteOwner: profileRole === 'owner',
       linkedCreatorId: sbUser.id,
     };
@@ -254,6 +229,7 @@ async function buildAuthUserFromSession(
       displayName: fallbackName,
       role: 'user',
       profileRole: 'user',
+      profileLoaded: true,
       avatarEmoji: '🌸',
       isSiteOwner: false,
       linkedCreatorId: sbUser.id,
@@ -274,7 +250,10 @@ function initSupabaseAuthListener() {
       notifyListeners(user);
     })
     .catch(() => {
-      notifyListeners(DEFAULT_GUEST_USER);
+      notifyListeners({
+        ...DEFAULT_GUEST_USER,
+        profileLoaded: true,
+      });
     });
 
   supabase.auth.onAuthStateChange(async (_event, session) => {

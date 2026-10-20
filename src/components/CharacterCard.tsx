@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   Heart,
   Link2,
@@ -47,7 +47,7 @@ interface CharacterCardProps {
   onUnlockWithPetals?: (charId: string, price: number) => boolean;
   onUnlockWithItems?: (charId: string) => void;
   onRequireAuth?: (reason: string) => void;
-  onGoToMiniGame?: () => void;
+  onGoToMiniGame?: (zone?: string, targetKind?: string) => void;
   isLoggedIn?: boolean;
   // Chế độ chỉnh sửa & quyền sở hữu của Creator
   editMode?: boolean;
@@ -121,9 +121,6 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
   const [editModalOpen, setEditModalOpen] = useState(false);
   const [editName, setEditName] = useState(character.name);
   const [editEpithet, setEditEpithet] = useState(character.epithet);
-  const [editCreatorName, setEditCreatorName] = useState(
-    character.creatorName || creator?.name || ''
-  );
   const [editImageUrl, setEditImageUrl] = useState(character.imageUrl || '');
   const [editAvatarSymbol, setEditAvatarSymbol] = useState(character.avatarSymbol);
   const [editTagsList, setEditTagsList] = useState<string[]>(character.tags);
@@ -174,6 +171,22 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
     !isUnlocked &&
     !loadedSecret;
 
+  // Đồng hồ cập nhật đếm ngược nếu có vật phẩm đang lớn trong kho đồ
+  const [cardNowMs, setCardNowMs] = useState<number>(() => Date.now());
+
+  useEffect(() => {
+    if (!requiresUnlock || !supabaseInventory || supabaseInventory.length === 0) return;
+    const hasGrowing = supabaseInventory.some(
+      (it) => it.readyAt && new Date(it.readyAt).getTime() > cardNowMs
+    );
+    if (!hasGrowing) return;
+
+    const interval = setInterval(() => {
+      setCardNowMs(Date.now());
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [requiresUnlock, supabaseInventory, cardNowMs]);
+
   // Kiểm tra trạng thái đủ / thiếu của từng yêu cầu vật phẩm trên bảng inventory (chỉ tính ready_at null hoặc đã qua)
   const requirementStatus = useMemo(() => {
     if (!requiresUnlock) {
@@ -181,9 +194,10 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
     }
     return checkSupabaseUnlockRequirements(
       effectiveRequirements,
-      supabaseInventory
+      supabaseInventory,
+      cardNowMs
     );
-  }, [requiresUnlock, effectiveRequirements, supabaseInventory]);
+  }, [requiresUnlock, effectiveRequirements, supabaseInventory, cardNowMs]);
 
   /**
    * Khi người dùng bấm vào nhân vật để xem Open Scene & Link Chat:
@@ -277,7 +291,6 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
   const openEditForm = async () => {
     setEditName(character.name);
     setEditEpithet(character.epithet);
-    setEditCreatorName(character.creatorName || creator?.name || '');
     setEditImageUrl(character.imageUrl || '');
     setEditAvatarSymbol(character.avatarSymbol);
     setEditTagsList(character.tags);
@@ -345,7 +358,7 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
     await onUpdateCharacter(character.id, {
       name: editName.trim(),
       epithet: editEpithet.trim() || 'Nhân vật sổ tay',
-      creatorName: editCreatorName.trim() || creator?.name || 'Creator',
+      creatorName: character.creatorName || creator?.name || 'Chủ web',
       imageUrl: editImageUrl.trim() || undefined,
       avatarSymbol:
         editAvatarSymbol.trim() || editName.trim().slice(0, 2).toUpperCase(),
@@ -389,7 +402,7 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
   };
 
   const displayCreatorName =
-    character.creatorName || creator?.name || 'Creator ẩn danh';
+    character.creatorName || creator?.name || 'Chủ web';
   const displayOpenScene = character.openScene || character.openingLine;
 
   return (
@@ -474,7 +487,7 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
             </button>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
             <div>
               <label className="block text-[11px] text-[var(--muted)] mb-1">
                 Tên char *
@@ -487,20 +500,6 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
                 className="w-full px-3 py-1.5 rounded-xl bg-[var(--surface)] border border-[var(--border)] text-[var(--text)]"
               />
             </div>
-            <div>
-              <label className="block text-[11px] text-[var(--muted)] mb-1">
-                Tên Creator
-              </label>
-              <input
-                type="text"
-                value={editCreatorName}
-                onChange={(e) => setEditCreatorName(e.target.value)}
-                className="w-full px-3 py-1.5 rounded-xl bg-[var(--surface)] border border-[var(--border)] text-[var(--text)]"
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
             <div>
               <label className="block text-[11px] text-[var(--muted)] mb-1">
                 Danh xưng / Phụ đề ngắn
@@ -643,7 +642,7 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
 
           <div>
             <label className="block text-[11px] text-[var(--muted)] mb-1">
-              Ghi chú của Creator
+              Ghi chú của Chủ web
             </label>
             <input
               type="text"
@@ -892,21 +891,7 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
           </button>
         </div>
 
-        {/* Creator badge (Bấm vào tên creator trên card thì lọc ra các char của creator đó) */}
-        <div className="flex items-center gap-1.5 text-xs text-[var(--muted)]">
-          <User className="w-3.5 h-3.5 text-[var(--accent)]" />
-          <span>Creator:</span>
-          <button
-            type="button"
-            onClick={() => onClickCreator?.(character.creatorId)}
-            title={`Lọc xem tất cả nhân vật của ${displayCreatorName}`}
-            className="text-[var(--text)] font-bold hover:text-[var(--accent)] underline decoration-[var(--border)] underline-offset-4 transition-colors cursor-pointer"
-          >
-            {displayCreatorName}
-          </button>
-        </div>
-
-        {/* Tags dạng nhãn dán bo tròn kèm nút thêm tag & xóa tag cho Creator */}
+        {/* Tags dạng nhãn dán bo tròn kèm nút thêm tag & xóa tag cho Chủ web */}
         <div className="flex flex-wrap items-center gap-1.5">
           {character.tags.map((tag) => (
             <span
@@ -1057,7 +1042,7 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
               <div className="px-3 py-2 rounded-xl bg-[var(--bg)]/60 border border-[var(--border)] text-[11px] text-[var(--muted)] flex items-start gap-2">
                 <StickyNote className="w-3.5 h-3.5 text-[var(--accent)] shrink-0 mt-0.5" />
                 <div>
-                  <strong className="text-[var(--text)]">Ghi chú Creator: </strong>
+                  <strong className="text-[var(--text)]">Ghi chú Chủ web: </strong>
                   <span>{character.creatorNote}</span>
                 </div>
               </div>
@@ -1150,16 +1135,17 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
                             : `❌ Còn thiếu (${detail.ownedReadyCount}/${detail.req.count})`}
                         </span>
                       </div>
-                      {!detail.isMet && detail.hintText && (
-                        <div className="text-[11px] text-[var(--muted)] flex items-center justify-between gap-2 pt-0.5">
+                      {!detail.isMet && (
+                        <div className="text-[11px] text-[var(--muted)] flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-[var(--border)]/40">
                           <span>{detail.hintText}</span>
                           {onGoToMiniGame && (
                             <button
                               type="button"
-                              onClick={onGoToMiniGame}
-                              className="underline font-bold text-[var(--text)] hover:text-[var(--accent)] shrink-0 cursor-pointer"
+                              onClick={() => onGoToMiniGame('market', detail.req.category)}
+                              className="px-2.5 py-1 rounded-full bg-[var(--accent)] text-[#3a2b30] font-bold text-[10px] hover:scale-105 transition-all cursor-pointer inline-flex items-center gap-1 shadow-2xs shrink-0"
+                              title={`Ghé Chợ nhỏ để mua ${catInfo.name}`}
                             >
-                              Đến Kho đồ / Gacha →
+                              <span>🛒 Mua nhanh ở Chợ</span>
                             </button>
                           )}
                         </div>

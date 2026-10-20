@@ -7,6 +7,15 @@
  */
 
 import { dataStore } from './dataLayer';
+import {
+  PetBehaviorStyle,
+  PersistedPetTrait,
+  selectPetTraitForCompanionTags,
+  persistTraitForPet,
+  getPersistedTraitForPet,
+  sanitizePetVibeNote,
+} from './tagCompanionSystem';
+import { getSiteConfig } from './siteSettings';
 
 export type ItemCategory = 'flower' | 'fish' | 'pet' | 'drink';
 export type ItemRarity = 'common' | 'rare' | 'legendary';
@@ -29,10 +38,13 @@ export interface GeneratedGameItem {
   visual: ItemVisualSeed;
   createdAt: string;
   description: string;
-  // Thuộc tính riêng cho Thú cưng (khớp vibe tag của char)
+  // Thuộc tính riêng cho Thú cưng (khớp vibe tag của char, lưu cố định theo từng thú)
   petSpecies?: string;
   matchedTag?: string;
   vibeReason?: string;
+  petPersonality?: string;
+  petBehaviorStyle?: PetBehaviorStyle;
+  petSound?: string;
   hungerFullUntil?: number; // timestamp ms khi thú cưng đang no
   // Thuộc tính riêng cho Hoa / Thức uống
   sweetnessNote?: string;
@@ -333,40 +345,15 @@ export const CATEGORY_LABELS: Record<ItemCategory, { name: string; emoji: string
 };
 
 /**
- * Tìm loài thú cưng và lời giải thích khớp với Vibe Tag của nhân vật đang đồng hành
+ * Tìm loài thú cưng, tính cách, hành vi và ghi chú vibe khớp với Tag của nhân vật đang đồng hành.
+ * TUYỆT ĐỐI KHÔNG nhắc tên nhân vật trong ghi chú dưới thú cưng.
  */
 export function resolvePetVibeForCharacter(
-  charName: string,
+  _charName: string,
   charTags: string[]
-): { species: string; matchedTag: string; vibeReason: string } {
-  for (const tag of charTags) {
-    const normalized = tag.trim().toLowerCase();
-    for (const mapping of TAG_TO_PET_VIBE_MAP) {
-      const matchedKeyword = mapping.tagKeywords.find(
-        (kw) =>
-          normalized.includes(kw.toLowerCase()) ||
-          kw.toLowerCase().includes(normalized)
-      );
-      if (matchedKeyword) {
-        const species = pickRandom(mapping.speciesList);
-        return {
-          species,
-          matchedTag: tag,
-          vibeReason: `Hợp với vibe "${tag}" của ${charName}: Bé ${species.toLowerCase()} có tính cách ${mapping.personality}.`,
-        };
-      }
-    }
-  }
-
-  // Nếu char có tag bất kỳ khác, vẫn ghép giải thích theo tag đầu tiên
-  const fallbackTag = charTags[0] || 'Dịu dàng';
-  const defaultMapping = TAG_TO_PET_VIBE_MAP[0];
-  const species = pickRandom(DEFAULT_PET_SPECIES);
-  return {
-    species,
-    matchedTag: fallbackTag,
-    vibeReason: `Hợp với vibe "${fallbackTag}" của ${charName}: Bé ${species.toLowerCase()} ${defaultMapping.personality}.`,
-  };
+): PersistedPetTrait {
+  const customPets = getSiteConfig().tagPets;
+  return selectPetTraitForCompanionTags(charTags, customPets);
 }
 
 /**
@@ -383,11 +370,10 @@ export function generateUniqueGameItem(
   const used = getUsedNamesSet();
   const rarity = options?.forceRarity || rollRarity();
 
-  let petInfo: { species: string; matchedTag: string; vibeReason: string } | null =
-    null;
+  let petInfo: PersistedPetTrait | null = null;
   if (category === 'pet') {
     petInfo = resolvePetVibeForCharacter(
-      options?.companionCharName || 'Người bạn tri kỷ',
+      options?.companionCharName || '',
       options?.companionCharTags || ['Dịu dàng']
     );
   }
@@ -406,7 +392,7 @@ export function generateUniqueGameItem(
         FISH_ADJECTIVES
       )} ${pickRandom(FISH_SUFFIXES)}`;
     } else if (category === 'pet') {
-      const sp = petInfo?.species || pickRandom(DEFAULT_PET_SPECIES);
+      const sp = petInfo?.petSpecies || pickRandom(DEFAULT_PET_SPECIES);
       candidateName = `${sp} ${pickRandom(PET_ADJECTIVES)} ${pickRandom(
         PET_SUFFIXES
       )}`;
@@ -443,22 +429,31 @@ export function generateUniqueGameItem(
   } else if (category === 'pet') {
     description =
       petInfo?.vibeReason ||
-      'Người bạn nhỏ đáng yêu thích đi dạo quanh căn phòng tri kỷ.';
+      'Bé thú cưng có tính cách điềm đạm, đáng yêu, hợp với không khí ấm áp nơi đây.';
   } else {
-    description = `Ly thức uống pha chế thủ công thơm dịu, rất hợp để nhâm nhi hoặc gửi tặng nhân vật bạn yêu quý.`;
+    description = `Ly thức uống pha chế thủ công thơm dịu, rất hợp để nhâm nhi hoặc gửi tặng người thương.`;
+  }
+
+  const itemId = `gitem_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+  if (category === 'pet' && petInfo) {
+    persistTraitForPet(itemId, candidateName, petInfo);
   }
 
   return {
-    id: `gitem_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    id: itemId,
     name: candidateName,
     category,
     rarity,
     visual,
     createdAt: new Date().toISOString(),
     description,
-    petSpecies: petInfo?.species,
+    petSpecies: petInfo?.petSpecies,
     matchedTag: petInfo?.matchedTag,
     vibeReason: petInfo?.vibeReason,
+    petPersonality: petInfo?.personality,
+    petBehaviorStyle: petInfo?.behaviorStyle,
+    petSound: petInfo?.sound,
     hungerFullUntil: category === 'pet' ? Date.now() + 1000 * 60 * 10 : undefined,
   };
 }
@@ -473,7 +468,30 @@ export function getInventoryItems(): GeneratedGameItem[] {
     null
   );
   if (existing && Array.isArray(existing)) {
-    return existing;
+    const customPets = getSiteConfig().tagPets;
+    return existing.map((item) => {
+      if (item.category !== 'pet') return item;
+      const savedTrait = getPersistedTraitForPet(item.id, item.name, customPets);
+      const cleanNote = sanitizePetVibeNote(
+        savedTrait?.vibeReason || item.vibeReason || item.description,
+        savedTrait?.matchedTag || item.matchedTag,
+        savedTrait?.petSpecies || item.petSpecies
+      );
+      return {
+        ...item,
+        petSpecies: savedTrait?.petSpecies || item.petSpecies || 'Mèo Bông',
+        matchedTag: savedTrait?.matchedTag || item.matchedTag || 'Dịu dàng',
+        vibeReason: cleanNote,
+        description: cleanNote,
+        petPersonality:
+          savedTrait?.personality ||
+          item.petPersonality ||
+          'hiền lành, điềm đạm, thích cuộn tròn bên cạnh lắng nghe',
+        petBehaviorStyle:
+          savedTrait?.behaviorStyle || item.petBehaviorStyle || 'gentle_sway',
+        petSound: savedTrait?.sound || item.petSound || 'Meo~ 🌸',
+      };
+    });
   }
 
   // Khởi tạo vài vật phẩm mẫu đầu tiên (đăng ký tên vào danh sách đã dùng)
@@ -483,7 +501,6 @@ export function getInventoryItems(): GeneratedGameItem[] {
     generateUniqueGameItem('drink', { forceRarity: 'common' }),
     generateUniqueGameItem('drink', { forceRarity: 'rare' }),
     generateUniqueGameItem('pet', {
-      companionCharName: 'Tần Vũ Ca',
       companionCharTags: ['Cổ trang', 'Chữa lành', 'Trầm lặng'],
       forceRarity: 'rare',
     }),

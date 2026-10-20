@@ -351,11 +351,41 @@ export const ProceduralItemSvg: React.FC<ProceduralItemSvgProps> = ({
     );
   }
 
-  // 3. VẼ THÚ CƯNG
+  // 3. VẼ THÚ CƯNG (Hình dáng & biểu cảm theo Loài thú và Tính cách Tag)
   if (item.category === 'pet') {
-    const sp = (item.petSpecies || '').toLowerCase();
+    const sp = (item.petSpecies || item.name || '').toLowerCase();
+    const behavior = item.petBehaviorStyle || 'gentle_sway';
+
     const isBunny = sp.includes('thỏ');
-    const isOwlOrBird = sp.includes('cú') || sp.includes('vẹt') || sp.includes('chim') || sp.includes('hạc') || sp.includes('thiên nga');
+    const isDeer = sp.includes('hươu');
+    const isWinged =
+      sp.includes('dơi') ||
+      sp.includes('rồng') ||
+      sp.includes('tinh linh') ||
+      sp.includes('bướm');
+    const isOwlOrBird =
+      sp.includes('cú') ||
+      sp.includes('vẹt') ||
+      sp.includes('chim') ||
+      sp.includes('hạc') ||
+      sp.includes('thiên nga') ||
+      sp.includes('quạ') ||
+      sp.includes('ưng') ||
+      sp.includes('khổng tước');
+    const isRoundEar =
+      sp.includes('cừu') ||
+      sp.includes('gấu') ||
+      sp.includes('hamster') ||
+      sp.includes('nhím') ||
+      sp.includes('rái cá') ||
+      sp.includes('chồn') ||
+      sp.includes('sóc') ||
+      sp.includes('capybara') ||
+      sp.includes('rùa');
+    const isDarkMystic = sp.includes('mèo đen') || sp.includes('báo đen') || sp.includes('dơi');
+
+    const bodyFill = isDarkMystic ? '#4a4458' : primaryColor;
+    const bellyFill = isDarkMystic ? '#7c7391' : secondaryColor;
 
     return (
       <svg
@@ -368,7 +398,35 @@ export const ProceduralItemSvg: React.FC<ProceduralItemSvgProps> = ({
         {/* Bóng dưới chân */}
         <ellipse cx="50" cy="84" rx="24" ry="5" fill="#cbbab0" opacity="0.45" />
 
-        {/* Tai thú cưng */}
+        {/* Đuôi bông phía sau (cho mèo, cáo, hồ ly, cún, sóc) */}
+        {!isOwlOrBird && !isBunny && (
+          <path
+            d="M70 68 Q88 58 84 44 Q78 40 72 56"
+            fill={bodyFill}
+            stroke={accentColor}
+            strokeWidth="1.5"
+          />
+        )}
+
+        {/* Đôi cánh nhỏ cho Dơi / Rồng / Tinh linh / Chim */}
+        {(isWinged || isOwlOrBird) && (
+          <g>
+            <path
+              d="M25 56 Q10 44 16 64 Q20 68 27 64"
+              fill={secondaryColor}
+              stroke={accentColor}
+              strokeWidth="1.4"
+            />
+            <path
+              d="M75 56 Q90 44 84 64 Q80 68 73 64"
+              fill={secondaryColor}
+              stroke={accentColor}
+              strokeWidth="1.4"
+            />
+          </g>
+        )}
+
+        {/* Tai hoặc Sừng thú cưng theo loài */}
         {isBunny ? (
           <g>
             <ellipse
@@ -377,7 +435,7 @@ export const ProceduralItemSvg: React.FC<ProceduralItemSvgProps> = ({
               rx="6"
               ry="16"
               transform="rotate(-10 38 25)"
-              fill={primaryColor}
+              fill={bodyFill}
               stroke={accentColor}
               strokeWidth="1.5"
             />
@@ -387,7 +445,7 @@ export const ProceduralItemSvg: React.FC<ProceduralItemSvgProps> = ({
               rx="3"
               ry="11"
               transform="rotate(-10 38 25)"
-              fill={secondaryColor}
+              fill={bellyFill}
             />
             <ellipse
               cx="62"
@@ -395,7 +453,7 @@ export const ProceduralItemSvg: React.FC<ProceduralItemSvgProps> = ({
               rx="6"
               ry="16"
               transform="rotate(10 62 25)"
-              fill={primaryColor}
+              fill={bodyFill}
               stroke={accentColor}
               strokeWidth="1.5"
             />
@@ -405,20 +463,45 @@ export const ProceduralItemSvg: React.FC<ProceduralItemSvgProps> = ({
               rx="3"
               ry="11"
               transform="rotate(10 62 25)"
-              fill={secondaryColor}
+              fill={bellyFill}
             />
+          </g>
+        ) : isDeer ? (
+          <g>
+            {/* Sừng hươu con */}
+            <path
+              d="M38 36 L34 22 M35 27 L30 25"
+              stroke="#b88b68"
+              strokeWidth="2.8"
+              strokeLinecap="round"
+            />
+            <path
+              d="M62 36 L66 22 M65 27 L70 25"
+              stroke="#b88b68"
+              strokeWidth="2.8"
+              strokeLinecap="round"
+            />
+            <ellipse cx="31" cy="39" rx="6" ry="3.5" transform="rotate(-20 31 39)" fill={bodyFill} />
+            <ellipse cx="69" cy="39" rx="6" ry="3.5" transform="rotate(20 69 39)" fill={bodyFill} />
+          </g>
+        ) : isRoundEar ? (
+          <g>
+            <circle cx="32" cy="36" r="7" fill={bodyFill} stroke={accentColor} strokeWidth="1.5" />
+            <circle cx="32" cy="36" r="3.5" fill={bellyFill} />
+            <circle cx="68" cy="36" r="7" fill={bodyFill} stroke={accentColor} strokeWidth="1.5" />
+            <circle cx="68" cy="36" r="3.5" fill={bellyFill} />
           </g>
         ) : !isOwlOrBird ? (
           <g>
             <polygon
               points="28,42 32,20 46,34"
-              fill={primaryColor}
+              fill={bodyFill}
               stroke={accentColor}
               strokeWidth="1.5"
             />
             <polygon
               points="72,42 68,20 54,34"
-              fill={primaryColor}
+              fill={bodyFill}
               stroke={accentColor}
               strokeWidth="1.5"
             />
@@ -431,17 +514,48 @@ export const ProceduralItemSvg: React.FC<ProceduralItemSvgProps> = ({
           cy="58"
           rx="26"
           ry="23"
-          fill={primaryColor}
+          fill={bodyFill}
           stroke={accentColor}
           strokeWidth="1.8"
         />
-        <ellipse cx="50" cy="63" rx="16" ry="13" fill={secondaryColor} />
+        <ellipse cx="50" cy="63" rx="16" ry="13" fill={bellyFill} />
 
-        {/* Đôi mắt & biểu cảm đáng yêu */}
-        <circle cx="40" cy="51" r="3.5" fill="#3a2e35" />
-        <circle cx="41" cy="49.8" r="1.2" fill="#ffffff" />
-        <circle cx="60" cy="51" r="3.5" fill="#3a2e35" />
-        <circle cx="61" cy="49.8" r="1.2" fill="#ffffff" />
+        {/* Dấu ấn trăng khuyết trên trán cho thú tính cách Bí ẩn / Kỳ ảo */}
+        {behavior === 'mystic_float' && (
+          <circle cx="50" cy="42" r="2.5" fill="#fae28c" />
+        )}
+
+        {/* Đôi mắt & biểu cảm theo tính cách (behaviorStyle) */}
+        {behavior === 'calm_slow' ? (
+          // Thú "Lạnh lùng / Trầm lặng": Mắt điềm tĩnh nửa vời
+          <g>
+            <circle cx="40" cy="51" r="3.3" fill={isDarkMystic ? '#fae28c' : '#3a2e35'} />
+            <circle cx="60" cy="51" r="3.3" fill={isDarkMystic ? '#fae28c' : '#3a2e35'} />
+            <line x1="36" y1="49" x2="44" y2="49" stroke={bodyFill} strokeWidth="2.2" />
+            <line x1="56" y1="49" x2="64" y2="49" stroke={bodyFill} strokeWidth="2.2" />
+          </g>
+        ) : behavior === 'playful_bouncy' ? (
+          // Thú "Hài hước / Tinh nghịch": Mắt nháy tinh nghịch vui nhộn
+          <g>
+            <path
+              d="M36 51 Q40 46 44 51"
+              fill="none"
+              stroke={isDarkMystic ? '#fae28c' : '#3a2e35'}
+              strokeWidth="2.2"
+              strokeLinecap="round"
+            />
+            <circle cx="60" cy="51" r="3.5" fill={isDarkMystic ? '#fae28c' : '#3a2e35'} />
+            <circle cx="61" cy="49.8" r="1.2" fill="#ffffff" />
+          </g>
+        ) : (
+          // Thú "Dịu dàng / Chữa lành / Năng động": Mắt tròn long lanh
+          <g>
+            <circle cx="40" cy="51" r="3.5" fill={isDarkMystic ? '#fae28c' : '#3a2e35'} />
+            <circle cx="41" cy="49.8" r="1.2" fill="#ffffff" />
+            <circle cx="60" cy="51" r="3.5" fill={isDarkMystic ? '#fae28c' : '#3a2e35'} />
+            <circle cx="61" cy="49.8" r="1.2" fill="#ffffff" />
+          </g>
+        )}
 
         {/* Má hồng */}
         <ellipse cx="34" cy="56" rx="4" ry="2.2" fill="#f28b9c" opacity="0.7" />
@@ -450,11 +564,21 @@ export const ProceduralItemSvg: React.FC<ProceduralItemSvgProps> = ({
         {/* Mũi / Mỏ */}
         {isOwlOrBird ? (
           <polygon points="47,53 53,53 50,58" fill="#f0b45b" />
+        ) : behavior === 'calm_slow' ? (
+          <line
+            x1="47"
+            y1="57"
+            x2="53"
+            y2="57"
+            stroke={isDarkMystic ? '#fae28c' : '#3a2e35'}
+            strokeWidth="1.8"
+            strokeLinecap="round"
+          />
         ) : (
           <path
             d="M46 56 Q50 59 54 56"
             fill="none"
-            stroke="#3a2e35"
+            stroke={isDarkMystic ? '#fae28c' : '#3a2e35'}
             strokeWidth="2"
             strokeLinecap="round"
           />

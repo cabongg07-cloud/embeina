@@ -56,7 +56,7 @@ export const DocsVaultTab: React.FC<DocsVaultTabProps> = ({
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const folders = useMemo(() => {
-    const set = new Set<string>(['Hướng dẫn Chat', 'Tài liệu Creator', 'Ghi chép riêng']);
+    const set = new Set<string>(['Hướng dẫn Chat', 'Tài liệu Chủ web', 'Ghi chép riêng']);
     docs.forEach((d) => {
       if (d.folder) set.add(d.folder);
     });

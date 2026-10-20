@@ -202,16 +202,9 @@ export const CommissionTab: React.FC<CommissionTabProps> = ({
     });
   };
 
-  const handleToggleCreatorOpen = async (infoId: string, creatorId: string) => {
+  const handleToggleCreatorOpen = async (infoId: string) => {
     if (!can('manage_commission_board', currentUser)) {
-      onRequireAuth('Chỉ Creator mới có thể mở hoặc đóng bảng Commission.');
-      return;
-    }
-    if (
-      !currentUser.isSiteOwner &&
-      currentUser.id !== creatorId &&
-      currentUser.linkedCreatorId !== creatorId
-    ) {
+      onRequireAuth('Chỉ Chủ web mới có thể mở hoặc đóng bảng Commission.');
       return;
     }
     const target = commInfos.find((c) => c.id === infoId);
@@ -242,7 +235,7 @@ export const CommissionTab: React.FC<CommissionTabProps> = ({
     e.preventDefault();
     if (!can('order_commission', currentUser)) {
       onRequireAuth(
-        'Bạn hãy đăng nhập tài khoản để gửi yêu cầu đặt Commission cho Creator nhé 🎀'
+        'Bạn hãy đăng nhập tài khoản để gửi yêu cầu đặt Commission cho Chủ web nhé 🎀'
       );
       return;
     }
@@ -280,7 +273,7 @@ export const CommissionTab: React.FC<CommissionTabProps> = ({
     customTexts['commission_title'] || '🎀 Bàn Đặt Commission Nhân Vật';
   const headerDesc =
     customTexts['commission_desc'] ||
-    'Gửi gắm ý tưởng riêng của bạn để các Creator chăm chút thành một nhân vật AI hoàn chỉnh.';
+    'Gửi gắm ý tưởng riêng của bạn để Chủ web chăm chút thành một nhân vật AI hoàn chỉnh.';
 
   return (
     <div className="space-y-12">
@@ -340,28 +333,7 @@ export const CommissionTab: React.FC<CommissionTabProps> = ({
           <h3 className="font-serif-title text-2xl font-bold text-[var(--text)]">
             ➕ Thêm Bảng Giá Commission Mới
           </h3>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-            {currentUser.isSiteOwner ? (
-              <select
-                value={boardCreatorId}
-                onChange={(e) => setBoardCreatorId(e.target.value)}
-                className="px-4 py-2 text-xs bg-[var(--bg)] border border-[var(--border)] text-[var(--text)]"
-              >
-                {creators.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    Creator: {c.name}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <div className="px-4 py-2 text-xs rounded-xl bg-[var(--bg)] border border-[var(--border)] text-[var(--muted)] flex items-center">
-                Creator của bạn:{' '}
-                <strong className="text-[var(--text)] ml-1">
-                  {creatorMap[currentUser.linkedCreatorId || '']?.name ||
-                    'Lâm Vọng Nguyệt'}
-                </strong>
-              </div>
-            )}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <input
               type="text"
               value={boardWaitTime}
@@ -413,10 +385,10 @@ export const CommissionTab: React.FC<CommissionTabProps> = ({
         </form>
       )}
 
-      {/* Bảng Commission từng Creator */}
+      {/* Bảng Commission của Chủ web */}
       <section className="space-y-5">
         <h3 className="font-serif-title text-2xl font-bold text-[var(--text)]">
-          1. Bảng giá & Trạng thái của từng Creator
+          1. Bảng giá & Trạng thái nhận đơn của Chủ web
         </h3>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -583,7 +555,7 @@ export const CommissionTab: React.FC<CommissionTabProps> = ({
                       <button
                         type="button"
                         onClick={() =>
-                          handleToggleCreatorOpen(info.id, info.creatorId)
+                          handleToggleCreatorOpen(info.id)
                         }
                         className="px-4 py-1.5 rounded-full text-xs font-bold bg-[var(--accent)] text-[#3a2b30] cursor-pointer whitespace-nowrap"
                       >
@@ -596,7 +568,7 @@ export const CommissionTab: React.FC<CommissionTabProps> = ({
                         onClick={() => {
                           if (!can('order_commission', currentUser)) {
                             onRequireAuth(
-                              'Mời bạn đăng nhập để đặt Commission cùng Creator nhé 🎀'
+                              'Mời bạn đăng nhập để đặt Commission cùng Chủ web nhé 🎀'
                             );
                             return;
                           }
@@ -716,27 +688,11 @@ export const CommissionTab: React.FC<CommissionTabProps> = ({
               2. Gửi yêu cầu đặt Commission
             </h3>
             <p className="text-xs text-[var(--muted)]">
-              Điền phác thảo nhân vật bạn mong muốn, Creator sẽ liên hệ lại để trao đổi chi tiết nhé!
+              Điền phác thảo nhân vật bạn mong muốn, Chủ web sẽ liên hệ lại để trao đổi chi tiết nhé!
             </p>
           </div>
 
           <form onSubmit={handleSubmitOrder} className="space-y-4">
-            <div className="space-y-1.5">
-              <label className="block text-xs font-semibold text-[var(--muted)]">
-                Chọn Creator nhận ủy thác
-              </label>
-              <select
-                value={selectedCreatorId}
-                onChange={(e) => setSelectedCreatorId(e.target.value)}
-                className="w-full px-3.5 py-2 text-xs sm:text-sm bg-[var(--bg)] border border-[var(--border)] text-[var(--text)] focus:outline-none focus:border-[var(--accent)]"
-              >
-                {creators.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name} ({c.handle})
-                  </option>
-                ))}
-              </select>
-            </div>
 
             <div className="space-y-1.5">
               <label className="block text-xs font-semibold text-[var(--muted)]">
@@ -830,12 +786,6 @@ export const CommissionTab: React.FC<CommissionTabProps> = ({
                     <div className="flex items-center gap-2 text-xs">
                       <span className="text-[var(--text)] font-bold">
                         Khách đặt: {order.requesterName}
-                      </span>
-                      <span aria-hidden="true" className="text-[var(--muted)]">
-                        ·
-                      </span>
-                      <span className="text-[var(--muted)]">
-                        Creator: {creator?.name || 'Góc Nhỏ'}
                       </span>
                     </div>
 

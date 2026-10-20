@@ -10,7 +10,6 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import {
   Download,
   Upload,
-  Command,
   LogOut,
   LogIn,
   Lock,
@@ -110,7 +109,7 @@ interface WebAudioSynthNodes {
 const ROLE_LABELS: Record<UserRole, string> = {
   guest: 'Khách',
   user: 'Người dùng',
-  creator: 'Creator',
+  creator: 'Chủ web',
 };
 
 function getInitialColorMode(defaultModeSetting?: ColorMode | 'system'): ColorMode {
@@ -171,8 +170,9 @@ export default function App() {
   const [authPromptReason, setAuthPromptReason] = useState<string | null>(null);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
 
-  // Trạng thái CHẾ ĐỘ CHỈNH SỬA (Chỉ dành cho vai `owner` qua can("edit", currentUser))
+  // Trạng thái CHẾ ĐỘ CHỈNH SỬA & Ngăn kéo Cài đặt trang (Chỉ dành cho vai `owner` qua can("edit", currentUser))
   const [editMode, setEditMode] = useState(false);
+  const [settingsDrawerOpen, setSettingsDrawerOpen] = useState(false);
   const [showEditGuideModal, setShowEditGuideModal] = useState(false);
 
   // Trạng thái Undo của site_settings
@@ -192,14 +192,19 @@ export default function App() {
     return unsubscribe;
   }, []);
 
-  // Bảo vệ nghiêm ngặt: Chỉ vai `owner` (can("edit", currentUser)) mới thấy và dùng được nút ✏️ Chỉnh sửa và Cài đặt trang
-  const hasEditPermission = can('edit', currentUser);
+  // Bảo vệ nghiêm ngặt: Chỉ khi đã đăng nhập, profiles đã tải xong và role === 'owner' mới có quyền chỉnh sửa & mở Cài đặt trang
+  const hasEditPermission = Boolean(
+    currentUser.profileLoaded &&
+      currentUser.profileRole === 'owner' &&
+      can('edit', currentUser)
+  );
   useEffect(() => {
-    if (!hasEditPermission && editMode) {
-      setEditMode(false);
-      setShowEditGuideModal(false);
+    if (!hasEditPermission) {
+      if (editMode) setEditMode(false);
+      if (settingsDrawerOpen) setSettingsDrawerOpen(false);
+      if (showEditGuideModal) setShowEditGuideModal(false);
     }
-  }, [hasEditPermission, editMode]);
+  }, [hasEditPermission, editMode, settingsDrawerOpen, showEditGuideModal]);
 
   const isEditActive = Boolean(editMode && hasEditPermission);
 
@@ -356,6 +361,14 @@ export default function App() {
     getSavedPlaylist([])
   );
 
+  // Khách (chưa đăng nhập) chỉ nghe Playlist của web
+  const isLoggedInUser = currentUser.profileRole !== 'guest';
+  useEffect(() => {
+    if (!isLoggedInUser && playlistSource !== 'web') {
+      setPlaylistSource('web');
+    }
+  }, [isLoggedInUser, playlistSource]);
+
   const webPlaylist = useMemo(() => {
     return siteConfig.webPlaylistTracks && siteConfig.webPlaylistTracks.length > 0
       ? siteConfig.webPlaylistTracks
@@ -363,10 +376,12 @@ export default function App() {
   }, [siteConfig.webPlaylistTracks]);
 
   const playlist = useMemo(() => {
-    return playlistSource === 'web' ? webPlaylist : personalPlaylist;
-  }, [playlistSource, webPlaylist, personalPlaylist]);
+    return playlistSource === 'web' || !isLoggedInUser
+      ? webPlaylist
+      : personalPlaylist;
+  }, [playlistSource, isLoggedInUser, webPlaylist, personalPlaylist]);
 
-  const canEditWebPlaylist = can('edit', currentUser);
+  const canEditWebPlaylist = hasEditPermission;
 
   const initialPlayerState = useMemo(
     () => getSavedPlayerState(playlist[0]?.id || BUILTIN_SYNTH_TRACKS[0].id),
@@ -651,20 +666,22 @@ export default function App() {
   const handleAddCharacterByCreator = useCallback(
     async (newChar: Omit<CharacterItem, 'id'>) => {
       if (!can('manage_own_chars', currentUser)) {
-        handleRequireAuth('Chỉ Creator mới có quyền thêm nhân vật mới.');
+        handleRequireAuth('Chỉ Chủ web mới có quyền thêm nhân vật mới.');
         return;
       }
       try {
         await createCharOnSupabase({
           creatorId: currentUser.id,
-          name: newChar.name,
-          imageUrl: newChar.imageUrl,
-          tags: newChar.tags,
-          description: newChar.description,
+          name: String(newChar.name || ''),
+          imageUrl: newChar.imageUrl ? String(newChar.imageUrl) : undefined,
+          tags: Array.isArray(newChar.tags) ? (newChar.tags as string[]) : [],
+          description: String(newChar.description || ''),
           locked: Boolean(newChar.isLocked),
-          requirements: newChar.unlockRequirements || [],
-          chatLink: newChar.chatUrl || '',
-          openScene: newChar.openScene || newChar.openingLine || '',
+          requirements: Array.isArray(newChar.unlockRequirements)
+            ? newChar.unlockRequirements
+            : [],
+          chatLink: String(newChar.chatUrl || ''),
+          openScene: String(newChar.openScene || newChar.openingLine || ''),
         });
         await refreshLibraryData();
         notifyToast(`✨ Đã thêm nhân vật "${newChar.name}" lên Supabase!`);
@@ -1231,23 +1248,50 @@ export default function App() {
   }, []);
 
   const handleAddMusicTrack = useCallback(
-    (newTrack: MusicTrack, playImmediately = true) => {
-      setPlaylist((prev) => {
-        const next = [newTrack, ...prev];
-        savePlaylist(next);
-        return next;
-      });
-      if (newTrack.sourceType === 'url' && newTrack.url && can('edit', currentUser)) {
+    (
+      newTrack: MusicTrack,
+      playImmediately = true,
+      targetPlaylist: 'web' | 'personal' = playlistSource
+    ) => {
+      // Quy tắc 5: Playlist web chỉ lưu được các link MP3 trực tiếp; file tải từ máy lên chỉ nghe được trên máy đó
+      if (newTrack.sourceType === 'indexeddb') {
+        setPersonalPlaylist((prev) => {
+          const next = [newTrack, ...prev];
+          savePlaylist(next);
+          return next;
+        });
+        setPlaylistSource('personal');
+        notifyToast(
+          `🎵 Đã lưu "${newTrack.title}" vào "Playlist của tôi" (File tải từ máy chỉ nghe được trên máy này nhé)!`,
+          5000
+        );
+      } else if (targetPlaylist === 'web' && can('edit', currentUser)) {
+        const nextWebTracks = [newTrack, ...webPlaylist];
         const nextUrls = Array.from(
-          new Set([newTrack.url, ...(siteConfig.musicUrls || [])])
+          new Set(
+            nextWebTracks
+              .filter((t) => t.sourceType === 'url' && t.url)
+              .map((t) => t.url!.trim())
+              .filter(Boolean)
+          )
         );
-        const updatedCfg = saveSiteConfig(
-          { musicUrls: nextUrls },
-          `Thêm bài nhạc "${newTrack.title}"`
+        handleUpdateSiteConfig(
+          {
+            musicUrls: nextUrls,
+            webPlaylistTracks: nextWebTracks,
+          },
+          `Thêm bài nhạc "${newTrack.title}" vào Playlist Web`
         );
-        setSiteConfig(updatedCfg);
+      } else {
+        setPersonalPlaylist((prev) => {
+          const next = [newTrack, ...prev];
+          savePlaylist(next);
+          return next;
+        });
+        setPlaylistSource('personal');
+        notifyToast(`🎵 Đã thêm "${newTrack.title}" vào Playlist của tôi!`);
       }
-      notifyToast(`🎵 Đã thêm "${newTrack.title}" vào Playlist!`);
+
       if (playImmediately) {
         setCurrentTrackId(newTrack.id);
         setCurrentTime(0);
@@ -1257,21 +1301,32 @@ export default function App() {
         playTrack(newTrack, 0);
       }
     },
-    [currentUser, siteConfig.musicUrls, notifyToast, playTrack]
+    [playlistSource, currentUser, webPlaylist, handleUpdateSiteConfig, notifyToast, playTrack]
   );
 
   const handleUpdateMusicTrack = useCallback(
     (trackId: string, patch: Partial<MusicTrack>) => {
-      setPlaylist((prev) => {
-        const next = prev.map((t) =>
+      if (playlistSource === 'web') {
+        if (!can('edit', currentUser)) return;
+        const nextWeb = webPlaylist.map((t) =>
           t.id === trackId ? { ...t, ...patch } : t
         );
-        savePlaylist(next);
-        return next;
-      });
-      notifyToast('✨ Đã cập nhật thông tin bài nhạc!');
+        handleUpdateSiteConfig(
+          { webPlaylistTracks: nextWeb },
+          'Sửa thông tin bài nhạc trong Playlist Web'
+        );
+      } else {
+        setPersonalPlaylist((prev) => {
+          const next = prev.map((t) =>
+            t.id === trackId ? { ...t, ...patch } : t
+          );
+          savePlaylist(next);
+          return next;
+        });
+        notifyToast('✨ Đã cập nhật thông tin bài nhạc!');
+      }
     },
-    [notifyToast]
+    [playlistSource, currentUser, webPlaylist, handleUpdateSiteConfig, notifyToast]
   );
 
   const handleDeleteMusicTrack = useCallback(
@@ -1281,61 +1336,147 @@ export default function App() {
       if (target.sourceType === 'indexeddb' && target.idbKey) {
         musicIdbStorage.deleteAudioFile(target.idbKey);
       }
-      setPlaylist((prev) => {
-        const filtered = prev.filter((t) => t.id !== trackId);
+      if (playlistSource === 'web') {
+        if (!can('edit', currentUser)) return;
+        const filtered = webPlaylist.filter((t) => t.id !== trackId);
         const finalList =
           filtered.length > 0 ? filtered : [...BUILTIN_SYNTH_TRACKS];
-        savePlaylist(finalList);
-        if (currentTrackId === trackId) {
-          const fallback = finalList[0];
-          setCurrentTrackId(fallback.id);
-          setCurrentTime(0);
-          currentTimeRef.current = 0;
-          savePlayerState({ currentTrackId: fallback.id, currentTime: 0 });
-          if (isPlaying) {
-            playTrack(fallback, 0);
-          }
-        }
-        return finalList;
-      });
-      notifyToast(`🗑️ Đã xóa "${target.title}" khỏi Playlist.`);
+        const nextUrls = finalList
+          .filter((t) => t.sourceType === 'url' && t.url)
+          .map((t) => t.url!.trim())
+          .filter(Boolean);
+        handleUpdateSiteConfig(
+          {
+            musicUrls: nextUrls,
+            webPlaylistTracks: finalList,
+          },
+          `Xóa bài "${target.title}" khỏi Playlist Web`
+        );
+      } else {
+        setPersonalPlaylist((prev) => {
+          const filtered = prev.filter((t) => t.id !== trackId);
+          const finalList =
+            filtered.length > 0 ? filtered : [...BUILTIN_SYNTH_TRACKS];
+          savePlaylist(finalList);
+          return finalList;
+        });
+        notifyToast(`🗑️ Đã xóa "${target.title}" khỏi Playlist của tôi.`);
+      }
     },
-    [playlist, currentTrackId, isPlaying, playTrack, notifyToast]
+    [
+      playlist,
+      playlistSource,
+      currentUser,
+      webPlaylist,
+      handleUpdateSiteConfig,
+      notifyToast,
+    ]
   );
 
   const handleMoveMusicTrack = useCallback(
     (trackId: string, direction: 'up' | 'down') => {
-      setPlaylist((prev) => {
-        const idx = prev.findIndex((t) => t.id === trackId);
-        if (idx < 0) return prev;
+      if (playlistSource === 'web') {
+        if (!can('edit', currentUser)) return;
+        const idx = webPlaylist.findIndex((t) => t.id === trackId);
+        if (idx < 0) return;
         const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
-        if (targetIdx < 0 || targetIdx >= prev.length) return prev;
-        const copy = [...prev];
+        if (targetIdx < 0 || targetIdx >= webPlaylist.length) return;
+        const copy = [...webPlaylist];
         const [item] = copy.splice(idx, 1);
         copy.splice(targetIdx, 0, item);
-        savePlaylist(copy);
-        return copy;
-      });
+        handleUpdateSiteConfig(
+          { webPlaylistTracks: copy },
+          'Đổi thứ tự bài trong Playlist Web'
+        );
+      } else {
+        setPersonalPlaylist((prev) => {
+          const idx = prev.findIndex((t) => t.id === trackId);
+          if (idx < 0) return prev;
+          const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
+          if (targetIdx < 0 || targetIdx >= prev.length) return prev;
+          const copy = [...prev];
+          const [item] = copy.splice(idx, 1);
+          copy.splice(targetIdx, 0, item);
+          savePlaylist(copy);
+          return copy;
+        });
+      }
     },
-    []
+    [playlistSource, currentUser, webPlaylist, handleUpdateSiteConfig]
+  );
+
+  const handleReorderMusicTracks = useCallback(
+    (fromIndex: number, toIndex: number) => {
+      if (fromIndex === toIndex) return;
+      if (playlistSource === 'web') {
+        if (!can('edit', currentUser)) return;
+        if (
+          fromIndex < 0 ||
+          fromIndex >= webPlaylist.length ||
+          toIndex < 0 ||
+          toIndex >= webPlaylist.length
+        ) {
+          return;
+        }
+        const copy = [...webPlaylist];
+        const [moved] = copy.splice(fromIndex, 1);
+        copy.splice(toIndex, 0, moved);
+        handleUpdateSiteConfig(
+          { webPlaylistTracks: copy },
+          'Kéo thả sắp xếp Playlist Web'
+        );
+      } else {
+        setPersonalPlaylist((prev) => {
+          if (
+            fromIndex < 0 ||
+            fromIndex >= prev.length ||
+            toIndex < 0 ||
+            toIndex >= prev.length
+          ) {
+            return prev;
+          }
+          const copy = [...prev];
+          const [moved] = copy.splice(fromIndex, 1);
+          copy.splice(toIndex, 0, moved);
+          savePlaylist(copy);
+          return copy;
+        });
+      }
+    },
+    [playlistSource, currentUser, webPlaylist, handleUpdateSiteConfig]
   );
 
   const handleRestoreBuiltinTracks = useCallback(() => {
-    setPlaylist((prev) => {
-      const existingIds = new Set(prev.map((t) => t.id));
+    if (playlistSource === 'web' && can('edit', currentUser)) {
+      const existingIds = new Set(webPlaylist.map((t) => t.id));
       const missing = BUILTIN_SYNTH_TRACKS.filter(
         (b) => !existingIds.has(b.id)
       );
       if (missing.length === 0) {
-        notifyToast('🎐 Cả 4 giai điệu hộp nhạc gốc đều đang có sẵn trong Playlist!');
-        return prev;
+        notifyToast('🎐 Cả 4 giai điệu hộp nhạc gốc đều đang có sẵn trong Playlist Web!');
+        return;
       }
-      const next = [...prev, ...missing];
-      savePlaylist(next);
-      notifyToast('✨ Đã khôi phục đầy đủ 4 giai điệu hộp nhạc gốc!');
-      return next;
-    });
-  }, [notifyToast]);
+      handleUpdateSiteConfig(
+        { webPlaylistTracks: [...webPlaylist, ...missing] },
+        'Khôi phục 4 giai điệu hộp nhạc gốc'
+      );
+    } else {
+      setPersonalPlaylist((prev) => {
+        const existingIds = new Set(prev.map((t) => t.id));
+        const missing = BUILTIN_SYNTH_TRACKS.filter(
+          (b) => !existingIds.has(b.id)
+        );
+        if (missing.length === 0) {
+          notifyToast('🎐 Cả 4 giai điệu hộp nhạc gốc đều đang có sẵn trong Playlist!');
+          return prev;
+        }
+        const next = [...prev, ...missing];
+        savePlaylist(next);
+        notifyToast('✨ Đã khôi phục đầy đủ 4 giai điệu hộp nhạc gốc!');
+        return next;
+      });
+    }
+  }, [playlistSource, currentUser, webPlaylist, handleUpdateSiteConfig, notifyToast]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -1377,38 +1518,38 @@ export default function App() {
   }, [paletteOpen, toggleMusic]);
 
   const handleExportAllJson = useCallback(() => {
-    const dump = dataStore.exportAll();
+    const dump = {
+      exportedAt: new Date().toISOString(),
+      siteConfig,
+    };
     const blob = new Blob([JSON.stringify(dump, null, 2)], {
       type: 'application/json;charset=utf-8',
     });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `goc-nho-lap-lanh-config-${new Date()
+    a.download = `goc-nho-lap-lanh-site-settings-${new Date()
       .toISOString()
       .slice(0, 10)}.json`;
     a.click();
     URL.revokeObjectURL(url);
-    notifyToast('✨ Đã xuất toàn bộ cấu hình & sổ tay ra file JSON!');
-  }, [notifyToast]);
+    notifyToast('✨ Đã xuất cấu hình trang (site_settings) ra file JSON!');
+  }, [siteConfig, notifyToast]);
 
   const handleImportJsonFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = () => {
+    reader.onload = async () => {
       try {
         const parsed = JSON.parse(String(reader.result));
-        const ok = dataStore.importAll(parsed);
-        if (ok) {
-          setLibraryData(ensureInitialLibraryData());
-          setSiteConfig(getSiteConfig());
-          setFavoriteIds(dataStore.get<string[]>(FAVORITES_STORAGE_KEY, []));
-          setNotesMap(dataStore.get<Record<string, string>>(NOTES_STORAGE_KEY, {}));
-          setPetalsBalance(dataStore.get<number>(PETALS_STORAGE_KEY, 45));
-          setUnlockedCharIds(dataStore.get<string[]>(UNLOCKED_CHARS_KEY, []));
+        const cfgToImport = (parsed?.siteConfig || parsed) as Partial<SiteConfig>;
+        if (cfgToImport && typeof cfgToImport === 'object') {
+          await handleUpdateSiteConfig(
+            cfgToImport,
+            'Nhập cấu hình từ file JSON'
+          );
           setDataRevision((r) => r + 1);
-          notifyToast('🌸 Đã nhập dữ liệu & cấu hình từ file JSON thành công!');
         }
       } catch {
         notifyToast('File JSON chưa đúng định dạng rồi.');
@@ -1480,11 +1621,13 @@ export default function App() {
         floatingParticlesEnabled={siteConfig.floatingParticlesEnabled}
       />
 
-      {/* Hệ thống Chế độ chỉnh sửa (Chỉ hiển thị khi can("edit", currentUser) === true) */}
+      {/* Hệ thống Chế độ chỉnh sửa (Chỉ hiển thị khi đã đăng nhập, profiles tải xong và role === 'owner') */}
       <EditModeSystem
         currentUser={currentUser}
         editMode={isEditActive}
         onToggleEditMode={handleToggleEditMode}
+        drawerOpen={settingsDrawerOpen}
+        onSetDrawerOpen={setSettingsDrawerOpen}
         siteConfig={siteConfig}
         onUpdateSiteConfig={handleUpdateSiteConfig}
         undoCount={undoCount}
@@ -1517,7 +1660,7 @@ export default function App() {
         }}
       />
 
-      {/* Command Palette (Ctrl + K) */}
+      {/* Command Palette (Phím tắt Ctrl + K chạy ngầm) */}
       <CommandPaletteModal
         isOpen={paletteOpen}
         onClose={() => setPaletteOpen(false)}
@@ -1548,11 +1691,12 @@ export default function App() {
 
       {/* Không gian chính của Góc Nhỏ Lấp Lánh */}
       <header className="w-full border-b border-[var(--border)] bg-[var(--surface)]/90 backdrop-blur-md sticky top-0 z-20 theme-transition">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 pt-4 pb-3 flex flex-col gap-3.5">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <h1 className="font-serif-title text-2xl sm:text-3xl font-bold text-[var(--text)] flex items-center gap-2">
-                <span>✨</span>
+        <div className="w-full px-3 sm:px-6 pt-3.5 pb-3 flex flex-col gap-3">
+          {/* Hàng trên cùng: Tên web bên trái — Cụm công cụ dồn sát MÉP PHẢI của màn hình */}
+          <div className="w-full flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <h1 className="font-serif-title text-xl sm:text-3xl font-bold text-[var(--text)] flex items-center gap-1.5 sm:gap-2 truncate">
+                <span className="shrink-0">✨</span>
                 <EditableText
                   value={siteConfig.siteTitle}
                   onSave={(val) =>
@@ -1562,7 +1706,7 @@ export default function App() {
                 />
               </h1>
               {currentTabInfo && (
-                <span className="text-xs text-[var(--muted)] hidden xl:inline-flex items-center gap-1">
+                <span className="text-xs text-[var(--muted)] hidden xl:inline-flex items-center gap-1 truncate">
                   <span>·</span>
                   <EditableText
                     value={currentTabInfo.whisper}
@@ -1581,79 +1725,53 @@ export default function App() {
               )}
             </div>
 
-            <div className="flex flex-wrap items-center gap-2">
+            {/* Cụm công cụ trên cùng luôn dồn sát MÉP PHẢI màn hình */}
+            <div className="ml-auto flex items-center justify-end gap-1.5 sm:gap-2 shrink-0">
               {/* Số dư Tiền tệ (Cánh hoa hoặc đơn vị tùy chỉnh) */}
               <button
                 type="button"
                 onClick={() => setActiveTabId('mini-game')}
                 title={`Số dư ${siteConfig.currencyName}`}
-                className="sticker-chip text-xs inline-flex items-center gap-1.5 cursor-pointer tabular-nums"
+                className="sticker-chip text-xs inline-flex items-center gap-1 cursor-pointer tabular-nums shrink-0"
               >
-                <span>
-                  {siteConfig.currencyEmoji} {petalsBalance}{' '}
+                <span>{siteConfig.currencyEmoji}</span>
+                <span>{petalsBalance}</span>
+                <span className="hidden sm:inline">
                   {siteConfig.currencyName}
                 </span>
               </button>
 
-              {/* Nút chuyển vai nhanh chỉ hiển thị khi AUTH_MODE === "demo" */}
-              {AUTH_MODE === 'demo' && (
-                <div
-                  className="inline-flex items-center rounded-full border border-[var(--border)] bg-[var(--bg)] p-1"
-                  role="group"
-                  aria-label="Chuyển vai trò thử nghiệm (Demo)"
-                >
-                  <span className="px-2 text-[11px] text-[var(--muted)] hidden sm:inline-flex items-center gap-1">
-                    <UserCheck className="w-3 h-3" />
-                    Thử vai:
-                  </span>
-                  {(['guest', 'user', 'creator'] as UserRole[]).map((r) => (
-                    <button
-                      key={r}
-                      type="button"
-                      onClick={() => handleDemoRoleSwitch(r)}
-                      className={`px-2.5 py-1 rounded-full text-[11px] transition-all cursor-pointer whitespace-nowrap ${
-                        currentUser.role === r
-                          ? 'bg-[var(--accent)] text-[#3a2b30] font-bold shadow-xs'
-                          : 'text-[var(--muted)] hover:text-[var(--text)]'
-                      }`}
-                    >
-                      {ROLE_LABELS[r]}
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              {/* Menu Tài khoản ở góc trên: Avatar + Tên + Huy hiệu vai trò + Đăng nhập / Đăng xuất */}
-              <div className="relative">
+              {/* Menu Tài khoản kèm huy hiệu vai trò (Khách / Người dùng / Chủ web) */}
+              <div className="relative shrink-0">
                 <button
                   type="button"
                   onClick={() => setAccountMenuOpen((prev) => !prev)}
-                  className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-[var(--border)] bg-[var(--bg)] hover:border-[var(--accent)] text-xs cursor-pointer"
+                  className="inline-flex items-center gap-1.5 sm:gap-2 px-2.5 sm:px-3 py-1.5 rounded-full border border-[var(--border)] bg-[var(--bg)] hover:border-[var(--accent)] text-xs cursor-pointer"
                 >
-                  <span className="w-6 h-6 rounded-full bg-[var(--accent)]/30 flex items-center justify-center text-xs">
+                  <span className="w-6 h-6 rounded-full bg-[var(--accent)]/30 flex items-center justify-center text-xs shrink-0">
                     {currentUser.avatarEmoji}
                   </span>
                   <span className="font-bold text-[var(--text)] max-w-[110px] truncate hidden sm:inline">
                     {currentUser.displayName}
                   </span>
-                  <span className="sticker-chip text-[10px] py-0.5 px-2 inline-flex items-center gap-1">
-                    {currentUser.role === 'creator' &&
-                      currentUser.isSiteOwner && (
+                  <span className="sticker-chip text-[10px] py-0.5 px-2 inline-flex items-center gap-1 shrink-0">
+                    {currentUser.profileLoaded &&
+                      currentUser.profileRole === 'owner' && (
                         <Crown className="w-2.5 h-2.5" />
                       )}
-                    {currentUser.creatorStatus === 'pending'
-                      ? 'Creator (Chờ duyệt)'
-                      : currentUser.role === 'creator' &&
-                        currentUser.isSiteOwner
-                      ? 'Creator · Chủ web'
-                      : ROLE_LABELS[currentUser.role]}
+                    {currentUser.profileLoaded &&
+                    currentUser.profileRole === 'owner'
+                      ? 'Chủ web'
+                      : currentUser.role === 'guest'
+                      ? 'Khách'
+                      : 'Người dùng'}
                   </span>
                 </button>
 
                 {accountMenuOpen && (
-                  <div className="absolute right-0 mt-2 w-72 rounded-2xl border-2 border-[var(--border)] bg-[var(--surface)] p-4 shadow-xl z-40 space-y-3">
+                  <div className="absolute right-0 mt-2 w-72 max-w-[calc(100vw-1.5rem)] rounded-2xl border-2 border-[var(--border)] bg-[var(--surface)] p-4 shadow-xl z-40 space-y-3">
                     <div className="flex items-center gap-3 border-b border-[var(--border)] pb-3">
-                      <div className="w-10 h-10 rounded-2xl bg-[var(--accent)]/30 flex items-center justify-center text-lg">
+                      <div className="w-10 h-10 rounded-2xl bg-[var(--accent)]/30 flex items-center justify-center text-lg shrink-0">
                         {currentUser.avatarEmoji}
                       </div>
                       <div className="min-w-0">
@@ -1667,96 +1785,31 @@ export default function App() {
                     </div>
 
                     <div className="flex items-center justify-between text-xs">
-                      <span className="text-[var(--muted)]">Huy hiệu vai trò:</span>
+                      <span className="text-[var(--muted)]">Vai trò:</span>
                       <span className="sticker-chip text-[11px]">
-                        {currentUser.creatorStatus === 'pending'
-                          ? '⏳ Creator (Chờ duyệt)'
-                          : currentUser.role === 'creator' &&
-                            currentUser.isSiteOwner
-                          ? '👑 Creator (Chủ web)'
-                          : `✨ ${ROLE_LABELS[currentUser.role]}`}
+                        {currentUser.profileLoaded &&
+                        currentUser.profileRole === 'owner'
+                          ? '👑 Chủ web'
+                          : currentUser.role === 'guest'
+                          ? '🌱 Khách'
+                          : '🌸 Người dùng'}
                       </span>
                     </div>
 
-                    {currentUser.role === 'creator' && (
-                      <div className="p-2.5 rounded-xl bg-[var(--bg)] border border-[var(--border)] space-y-1.5 text-[11px]">
-                        <div className="text-[var(--muted)] font-semibold">
-                          Chế độ quyền Creator:
-                        </div>
-                        <div className="flex items-center gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              authService.setCreatorOwnerMode(
-                                true,
-                                'creator-lam-vong'
-                              );
-                              notifyToast(
-                                '👑 Đang ở quyền Chủ web: Có thể mở bảng "Cài đặt trang" và sửa mọi mục.'
-                              );
-                            }}
-                            className={`flex-1 py-1 rounded-lg text-[11px] cursor-pointer ${
-                              currentUser.isSiteOwner
-                                ? 'bg-[var(--accent)] text-[#3a2b30] font-bold'
-                                : 'border border-[var(--border)] text-[var(--muted)]'
-                            }`}
-                          >
-                            👑 Chủ web
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              authService.setCreatorOwnerMode(
-                                false,
-                                'creator-lam-vong'
-                              );
-                              notifyToast(
-                                '🎨 Đang ở quyền Creator thường (Lam Vũ): Chỉ sửa được mục của chính mình.'
-                              );
-                            }}
-                            className={`flex-1 py-1 rounded-lg text-[11px] cursor-pointer ${
-                              !currentUser.isSiteOwner
-                                ? 'bg-[var(--accent)] text-[#3a2b30] font-bold'
-                                : 'border border-[var(--border)] text-[var(--muted)]'
-                            }`}
-                          >
-                            🎨 Creator thường
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Nếu tài khoản Creator đang ở trạng thái chờ duyệt, cho phép chủ web bấm duyệt thử */}
-                    {currentUser.creatorStatus === 'pending' && (
-                      <div className="p-2.5 rounded-xl bg-[var(--bg)] border border-[var(--border)] space-y-2 text-[11px] text-[var(--muted)]">
-                        <p>
-                          Tài khoản Creator của bạn đang chờ chủ web duyệt. Trong lúc chờ bạn đang dùng quyền <strong>Người dùng</strong>.
-                        </p>
+                    <div className="pt-2 border-t border-[var(--border)] flex flex-col gap-2">
+                      {hasEditPermission && (
                         <button
                           type="button"
                           onClick={() => {
-                            const approved = authService.approvePendingCreator();
-                            setCurrentUser(approved);
-                            notifyToast(
-                              '🎉 Đã duyệt tài khoản lên quyền Creator chính thức!'
-                            );
                             setAccountMenuOpen(false);
+                            setSettingsDrawerOpen(true);
                           }}
-                          className="w-full py-1.5 rounded-full bg-[var(--accent)] text-[#3a2b30] font-bold cursor-pointer inline-flex items-center justify-center gap-1"
+                          className="w-full py-2 rounded-full text-xs font-bold border border-[var(--accent)] bg-[var(--accent)]/20 text-[var(--text)] hover:bg-[var(--accent)]/35 cursor-pointer inline-flex items-center justify-center gap-1.5"
                         >
-                          <CheckCircle2 className="w-3 h-3" />
-                          <span>Duyệt lên Creator ngay (Chủ web demo)</span>
+                          <span>⚙️ Cài đặt trang</span>
                         </button>
-                      </div>
-                    )}
+                      )}
 
-                    {currentUser.isDemoNote && (
-                      <p className="text-[10px] text-[var(--muted)] italic">
-                        🔒 {currentUser.isDemoNote}
-                      </p>
-                    )}
-
-                    <div className="pt-2 border-t border-[var(--border)] flex flex-col gap-2">
                       {currentUser.role === 'guest' ? (
                         <button
                           type="button"
@@ -1771,51 +1824,40 @@ export default function App() {
                           <span>Đăng nhập / Đăng ký</span>
                         </button>
                       ) : (
-                        <>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setAccountMenuOpen(false);
-                              setAuthPromptReason(null);
-                              setAuthModalOpen(true);
-                            }}
-                            className="w-full py-1.5 rounded-full text-xs border border-[var(--border)] text-[var(--text)] hover:border-[var(--accent)] cursor-pointer"
-                          >
-                            Đổi tài khoản khác
-                          </button>
-                          <button
-                            type="button"
-                            onClick={async () => {
-                              await authService.signOut();
-                              setAccountMenuOpen(false);
-                              notifyToast('🌱 Đã đăng xuất về chế độ Khách.');
-                            }}
-                            className="w-full py-2 rounded-full text-xs font-bold border border-[var(--border)] bg-[var(--bg)] text-[var(--muted)] hover:text-[var(--text)] cursor-pointer inline-flex items-center justify-center gap-1.5"
-                          >
-                            <LogOut className="w-3.5 h-3.5" />
-                            <span>Đăng xuất</span>
-                          </button>
-                        </>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            await authService.signOut();
+                            setAccountMenuOpen(false);
+                            notifyToast('🌱 Đã đăng xuất về chế độ Khách.');
+                          }}
+                          className="w-full py-2 rounded-full text-xs font-bold border border-[var(--border)] bg-[var(--bg)] text-[var(--muted)] hover:text-[var(--text)] cursor-pointer inline-flex items-center justify-center gap-1.5"
+                        >
+                          <LogOut className="w-3.5 h-3.5" />
+                          <span>Đăng xuất</span>
+                        </button>
                       )}
                     </div>
                   </div>
                 )}
               </div>
 
-              {/* Nút mở Command Palette (Ctrl+K) */}
-              <button
-                type="button"
-                onClick={() => setPaletteOpen(true)}
-                title="Mở bảng điều hướng nhanh (Ctrl+K)"
-                className="px-3 py-1.5 rounded-full text-xs border border-[var(--border)] bg-[var(--bg)] text-[var(--muted)] hover:text-[var(--text)] hover:border-[var(--accent)] transition-colors cursor-pointer inline-flex items-center gap-1.5"
-              >
-                <Command className="w-3 h-3" />
-                <span className="hidden md:inline">Ctrl+K</span>
-              </button>
+              {/* Nút "⚙️ Cài đặt trang" đặt đúng vị trí Ctrl+K cũ — CHỈ render khi đã đăng nhập, profiles đã tải xong và role === 'owner' */}
+              {hasEditPermission && (
+                <button
+                  type="button"
+                  onClick={() => setSettingsDrawerOpen(true)}
+                  title="Mở bảng Cài đặt trang dành cho Chủ web"
+                  className="px-3 py-1.5 rounded-full text-xs border border-[var(--border)] bg-[var(--bg)] text-[var(--text)] hover:border-[var(--accent)] font-semibold transition-colors cursor-pointer inline-flex items-center gap-1.5 shrink-0"
+                >
+                  <span>⚙️</span>
+                  <span className="hidden sm:inline">Cài đặt trang</span>
+                </button>
+              )}
             </div>
           </div>
 
-          {/* Thanh điều hướng các tab hiển thị (Cho phép bấm sửa trực tiếp tên tab khi đang bật Chế độ chỉnh sửa) */}
+          {/* Thanh điều hướng các tab hiển thị (Cho phép bấm sửa trực tiếp tên tab khi đang bật Chế độ chỉnh sửa của Owner) */}
           <nav
             aria-label="Điều hướng sổ tay"
             className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar"
@@ -1912,6 +1954,15 @@ export default function App() {
             currencyEmoji={siteConfig.currencyEmoji}
             customTexts={siteConfig.customTexts}
             onUpdateCustomText={handleUpdateCustomText}
+            customTags={siteConfig.customTags}
+            onUpdateCustomTags={(nextTags) =>
+              handleUpdateSiteConfig(
+                { customTags: nextTags },
+                'Cập nhật tag tùy chỉnh'
+              )
+            }
+            supabaseInventory={supabaseInventory}
+            isLoadingChars={isLoadingChars}
           />
         )}
 
@@ -1937,6 +1988,10 @@ export default function App() {
             volume={volume}
             isMuted={isMuted}
             playMode={playMode}
+            playlistSource={playlistSource}
+            onSwitchPlaylistSource={setPlaylistSource}
+            canEditWebPlaylist={canEditWebPlaylist}
+            isLoggedIn={isLoggedInUser}
             onTogglePlay={toggleMusic}
             onSelectTrack={handleSelectTrack}
             onPrevTrack={handlePrevTrack}
@@ -1952,6 +2007,7 @@ export default function App() {
             onUpdateTrack={handleUpdateMusicTrack}
             onDeleteTrack={handleDeleteMusicTrack}
             onMoveTrack={handleMoveMusicTrack}
+            onReorderTracks={handleReorderMusicTracks}
             onRestoreBuiltinTracks={handleRestoreBuiltinTracks}
             editMode={isEditActive}
             customTexts={siteConfig.customTexts}
@@ -1992,6 +2048,18 @@ export default function App() {
             editMode={isEditActive}
             customTexts={siteConfig.customTexts}
             onUpdateCustomText={handleUpdateCustomText}
+            loveMessages={siteConfig.presets.loveMessages}
+            onUpdateLoveMessages={(nextMsgs, label) =>
+              handleUpdateSiteConfig(
+                {
+                  presets: {
+                    ...siteConfig.presets,
+                    loveMessages: nextMsgs,
+                  },
+                },
+                label || 'Cập nhật Góc yêu thương'
+              )
+            }
           />
         )}
 
@@ -2019,6 +2087,9 @@ export default function App() {
               currencyEmoji={siteConfig.currencyEmoji}
               customTexts={siteConfig.customTexts}
               onUpdateCustomText={handleUpdateCustomText}
+              onInventoryChange={() => {
+                refreshUserInventoryAndUnlocks();
+              }}
             />
           ) : (
             renderGuestGatePrompt(
@@ -2035,6 +2106,18 @@ export default function App() {
             editMode={isEditActive}
             customTexts={siteConfig.customTexts}
             onUpdateCustomText={handleUpdateCustomText}
+            giveaways={siteConfig.presets.giveaways}
+            onUpdateGiveaways={(nextGiveaways, label) =>
+              handleUpdateSiteConfig(
+                {
+                  presets: {
+                    ...siteConfig.presets,
+                    giveaways: nextGiveaways,
+                  },
+                },
+                label || 'Cập nhật Giveaway'
+              )
+            }
           />
         )}
 
@@ -2058,6 +2141,18 @@ export default function App() {
               editMode={isEditActive}
               customTexts={siteConfig.customTexts}
               onUpdateCustomText={handleUpdateCustomText}
+              docArticles={siteConfig.presets.docs}
+              onUpdateDocArticles={(nextDocs, label) =>
+                handleUpdateSiteConfig(
+                  {
+                    presets: {
+                      ...siteConfig.presets,
+                      docs: nextDocs,
+                    },
+                  },
+                  label || 'Cập nhật Kho Docs'
+                )
+              }
             />
           ) : (
             renderGuestGatePrompt(
@@ -2071,6 +2166,9 @@ export default function App() {
             <PersonalPromptVaultTab
               currentUser={currentUser}
               onRequireAuth={handleRequireAuth}
+              editMode={isEditActive}
+              customTexts={siteConfig.customTexts}
+              onUpdateCustomText={handleUpdateCustomText}
             />
           )}
 
@@ -2081,6 +2179,37 @@ export default function App() {
             editMode={isEditActive}
             customTexts={siteConfig.customTexts}
             onUpdateCustomText={handleUpdateCustomText}
+            rescueFaqs={siteConfig.faqs}
+            onUpdateFaqs={(nextFaqs, label) =>
+              handleUpdateSiteConfig(
+                { faqs: nextFaqs },
+                label || 'Cập nhật câu hỏi FAQ'
+              )
+            }
+            rescueTickets={siteConfig.presets.rescueReports}
+            onUpdateRescueTickets={(nextTickets, label) =>
+              handleUpdateSiteConfig(
+                {
+                  presets: {
+                    ...siteConfig.presets,
+                    rescueReports: nextTickets,
+                  },
+                },
+                label || 'Cập nhật Trạm cứu hộ'
+              )
+            }
+            backupEntries={siteConfig.presets.backups}
+            onUpdateBackups={(nextBackups, label) =>
+              handleUpdateSiteConfig(
+                {
+                  presets: {
+                    ...siteConfig.presets,
+                    backups: nextBackups,
+                  },
+                },
+                label || 'Cập nhật Sổ lưu trữ dự phòng'
+              )
+            }
           />
         )}
       </main>
@@ -2098,28 +2227,30 @@ export default function App() {
             />
           </div>
 
-          <div className="flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              onClick={handleExportAllJson}
-              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full border border-[var(--border)] bg-[var(--bg)] hover:border-[var(--accent)] text-[var(--text)] transition-colors cursor-pointer font-semibold"
-            >
-              <Download className="w-3.5 h-3.5" />
-              <span>Export JSON</span>
-            </button>
+          {hasEditPermission && (
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={handleExportAllJson}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full border border-[var(--border)] bg-[var(--bg)] hover:border-[var(--accent)] text-[var(--text)] transition-colors cursor-pointer font-semibold"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Export JSON</span>
+              </button>
 
-            <label className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full border border-[var(--border)] bg-[var(--bg)] hover:border-[var(--accent)] text-[var(--text)] transition-colors cursor-pointer font-semibold">
-              <Upload className="w-3.5 h-3.5" />
-              <span>Import JSON</span>
-              <input
-                ref={fileImportRef}
-                type="file"
-                accept="application/json,.json"
-                onChange={handleImportJsonFile}
-                className="hidden"
-              />
-            </label>
-          </div>
+              <label className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full border border-[var(--border)] bg-[var(--bg)] hover:border-[var(--accent)] text-[var(--text)] transition-colors cursor-pointer font-semibold">
+                <Upload className="w-3.5 h-3.5" />
+                <span>Import JSON</span>
+                <input
+                  ref={fileImportRef}
+                  type="file"
+                  accept="application/json,.json"
+                  onChange={handleImportJsonFile}
+                  className="hidden"
+                />
+              </label>
+            </div>
+          )}
         </div>
       </footer>
 
@@ -2133,6 +2264,10 @@ export default function App() {
         volume={volume}
         isMuted={isMuted}
         playMode={playMode}
+        playlistSource={playlistSource}
+        onSwitchPlaylistSource={setPlaylistSource}
+        canEditWebPlaylist={canEditWebPlaylist}
+        isLoggedIn={isLoggedInUser}
         onTogglePlay={toggleMusic}
         onSelectTrack={handleSelectTrack}
         onPrevTrack={handlePrevTrack}
@@ -2148,6 +2283,7 @@ export default function App() {
         onUpdateTrack={handleUpdateMusicTrack}
         onDeleteTrack={handleDeleteMusicTrack}
         onMoveTrack={handleMoveMusicTrack}
+        onReorderTracks={handleReorderMusicTracks}
         onRestoreBuiltinTracks={handleRestoreBuiltinTracks}
         colorMode={colorMode}
         onToggleColorMode={handleToggleColorMode}

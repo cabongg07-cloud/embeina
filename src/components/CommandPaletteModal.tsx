@@ -63,7 +63,7 @@ export const CommandPaletteModal: React.FC<CommandPaletteModalProps> = ({
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Gõ tên tab để di chuyển nhanh (Creator, Tìm char, Mini game, Kho Docs...)"
+            placeholder="Gõ tên tab để di chuyển nhanh (Tìm char, Mini game, Kho Docs...)"
             className="w-full text-xs sm:text-sm bg-transparent text-[var(--text)] focus:outline-none font-light"
           />
           <button

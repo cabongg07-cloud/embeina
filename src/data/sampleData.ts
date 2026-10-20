@@ -869,7 +869,7 @@ Nếu thấy nhân vật bắt đầu nói quá nhiều hoặc lệch giọng v�
   {
     id: 'doc-2',
     title: 'Cấu trúc thiết lập Lorebook cho thế giới Cổ Phong',
-    folder: 'Tài liệu Creator',
+    folder: 'Tài liệu Chủ web',
     tags: ['Cổ phong', 'Lorebook', 'Thiết kế Char'],
     updatedAt: '2026-10-17T16:30:00Z',
     content: `# Ghi chép xây dựng Lorebook Cổ Phong
@@ -891,7 +891,7 @@ export const INITIAL_RESCUE_REPORTS: RescueReport[] = [
     issueDescription: 'Link Character.AI cũ bị lỗi 404 sau đợt cập nhật đường dẫn tháng trước.',
     brokenUrl: 'https://character.ai/chat/old-co-truong-phong',
     status: 'resolved',
-    resolutionNote: 'Creator đã cập nhật lại bản sao sang gương lưu trữ mới và khôi phục toàn bộ lời mở đầu.',
+    resolutionNote: 'Chủ web đã cập nhật lại bản sao sang gương lưu trữ mới và khôi phục toàn bộ lời mở đầu.',
     createdAt: '2026-10-15T22:00:00Z',
   },
   {
@@ -931,7 +931,7 @@ export const INITIAL_FAQS: FaqItem[] = [
   {
     id: 'faq-1',
     q: 'Làm thế nào khi link nhân vật trên Character.AI hoặc JanitorAI báo lỗi 404?',
-    a: 'Bạn hãy gửi báo cáo ở mục "Báo link chết / Tìm lại char cũ" bên trên nhé. Các Creator sẽ kiểm tra và đăng lại bản gương (mirror) hoặc trích xuất thẻ từ Góc lưu giữ dự phòng.',
+    a: 'Bạn hãy gửi báo cáo ở mục "Báo link chết / Tìm lại char cũ" bên trên nhé. Chủ web sẽ kiểm tra và đăng lại bản gương (mirror) hoặc trích xuất thẻ từ Góc lưu giữ dự phòng.',
   },
   {
     id: 'faq-2',
@@ -1062,7 +1062,7 @@ export const INITIAL_FEEDBACKS: FeedbackItem[] = [
     isAnonymous: true,
     rating: 5,
     content:
-      'Tạ Khanh Trần nói chuyện cực kỳ ôn nhu và sâu sắc. Cảm giác như đang ngồi uống trà sen trong Tàng Kinh Các thật sự vậy, cảm ơn Creator đã chăm chút từng câu thoại!',
+      'Tạ Khanh Trần nói chuyện cực kỳ ôn nhu và sâu sắc. Cảm giác như đang ngồi uống trà sen trong Tàng Kinh Các thật sự vậy, cảm ơn Chủ web đã chăm chút từng câu thoại!',
     hearts: 19,
     isRead: false,
     replies: [],

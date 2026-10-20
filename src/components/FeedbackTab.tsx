@@ -66,20 +66,17 @@ export const FeedbackTab: React.FC<FeedbackTabProps> = ({
   const canManage = can('manage_feedback', currentUser);
   const canEdit = Boolean(editMode && can('edit', currentUser));
 
-  // Chế độ xem: 'public' (Tất cả công khai), 'mine' (Feedback của tôi), 'creator_inbox' (Hộp feedback của Creator)
+  // Chế độ xem: 'public' (Tất cả công khai), 'mine' (Feedback của tôi), 'creator_inbox' (Hộp thư Chủ web)
   const [viewMode, setViewMode] = useState<'public' | 'mine' | 'creator_inbox'>(
     'public'
   );
-  const [targetFilter, setTargetFilter] = useState<'all' | FeedbackTargetType>(
+  const [targetFilter, setTargetFilter] = useState<'all' | 'web' | 'character'>(
     'all'
   );
 
-  // Trạng thái form viết feedback
+  // Trạng thái form viết feedback (chỉ gửi cho web hoặc một char)
   const [showWriteForm, setShowWriteForm] = useState(false);
-  const [targetType, setTargetType] = useState<FeedbackTargetType>('web');
-  const [selectedCreatorId, setSelectedCreatorId] = useState<string>(
-    creators[0]?.id || ''
-  );
+  const [targetType, setTargetType] = useState<'web' | 'character'>('web');
   const [selectedCharId, setSelectedCharId] = useState<string>(
     characters[0]?.id || ''
   );
@@ -89,25 +86,17 @@ export const FeedbackTab: React.FC<FeedbackTabProps> = ({
   const [isAnonymous, setIsAnonymous] = useState<boolean>(false);
   const [submitToast, setSubmitToast] = useState<string | null>(null);
 
-  // Trả lời ngắn của Creator
+  // Trả lời ngắn của Chủ web
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
 
   // Lọc danh sách hiển thị theo chế độ xem
   const displayedFeedbacks = useMemo(() => {
-    const myCreatorId = currentUser.linkedCreatorId || 'creator-lam-vong';
-
     return feedbacks.filter((fb) => {
       if (viewMode === 'mine') {
         return fb.authorId === currentUser.id;
       }
       if (viewMode === 'creator_inbox') {
-        if (currentUser.isSiteOwner) {
-          return true;
-        }
-        return (
-          fb.creatorId === myCreatorId ||
-          (fb.targetType === 'creator' && fb.targetId === myCreatorId)
-        );
+        return true;
       }
       if (targetFilter !== 'all' && fb.targetType !== targetFilter) {
         return false;
@@ -116,23 +105,16 @@ export const FeedbackTab: React.FC<FeedbackTabProps> = ({
     });
   }, [feedbacks, viewMode, targetFilter, currentUser]);
 
-  // Đếm số feedback chưa đọc trong hộp thư của Creator
+  // Đếm số feedback chưa đọc trong hộp thư của Chủ web
   const unreadCreatorCount = useMemo(() => {
     if (!canManage) return 0;
-    const myCreatorId = currentUser.linkedCreatorId || 'creator-lam-vong';
-    return feedbacks.filter((fb) => {
-      const belongs =
-        currentUser.isSiteOwner ||
-        fb.creatorId === myCreatorId ||
-        (fb.targetType === 'creator' && fb.targetId === myCreatorId);
-      return belongs && !fb.isRead;
-    }).length;
-  }, [feedbacks, canManage, currentUser]);
+    return feedbacks.filter((fb) => !fb.isRead).length;
+  }, [feedbacks, canManage]);
 
   const handleClickWriteFeedback = () => {
     if (!canWrite) {
       onRequireAuth(
-        'Mời bạn đăng nhập để viết Feedback đánh giá sao cho Web, Creator hoặc Nhân vật yêu thích nhé ⭐💌'
+        'Mời bạn đăng nhập để viết Feedback đánh giá sao cho Web hoặc Nhân vật yêu thích nhé ⭐💌'
       );
       return;
     }
@@ -153,12 +135,7 @@ export const FeedbackTab: React.FC<FeedbackTabProps> = ({
     let targetName = 'Góc Nhỏ Lấp Lánh (Toàn trang)';
     let creatorId: string | undefined = undefined;
 
-    if (targetType === 'creator') {
-      const cr = creators.find((c) => c.id === selectedCreatorId) || creators[0];
-      targetId = cr?.id || 'creator';
-      targetName = cr?.name || 'Creator';
-      creatorId = cr?.id;
-    } else if (targetType === 'character') {
+    if (targetType === 'character') {
       const ch =
         characters.find((c) => c.id === selectedCharId) || characters[0];
       targetId = ch?.id || 'character';
@@ -244,7 +221,7 @@ export const FeedbackTab: React.FC<FeedbackTabProps> = ({
 
     const newReply = {
       id: `fbrep_${Date.now()}`,
-      authorName: currentUser.displayName || 'Creator',
+      authorName: currentUser.displayName || 'Chủ web',
       content: text,
       createdAt: new Date().toISOString(),
     };
@@ -292,7 +269,7 @@ export const FeedbackTab: React.FC<FeedbackTabProps> = ({
             <EditableText
               value={
                 customTexts['feedback_tab_desc'] ||
-                'Nơi lắng nghe những cảm nhận, góp ý và đánh giá 1–5 ⭐ dành cho Góc Nhỏ Lấp Lánh, các Creator và từng nhân vật AI.'
+                'Nơi lắng nghe những cảm nhận, góp ý và đánh giá 1–5 ⭐ dành cho Góc Nhỏ Lấp Lánh và từng nhân vật AI.'
               }
               onSave={(val) => onUpdateCustomText?.('feedback_tab_desc', val)}
               editMode={canEdit}
@@ -347,16 +324,15 @@ export const FeedbackTab: React.FC<FeedbackTabProps> = ({
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {/* Chọn đối tượng nhận feedback */}
+            {/* Chọn đối tượng nhận feedback: chỉ gửi cho Web hoặc một Char */}
             <div>
               <label className="block text-[11px] font-bold text-[var(--muted)] mb-1.5">
                 Bạn muốn gửi Feedback cho:
               </label>
-              <div className="grid grid-cols-3 gap-1.5 p-1 rounded-2xl bg-[var(--bg)] border border-[var(--border)]">
+              <div className="grid grid-cols-2 gap-1.5 p-1 rounded-2xl bg-[var(--bg)] border border-[var(--border)]">
                 {(
                   [
                     { id: 'web', label: '🌐 Trang web' },
-                    { id: 'creator', label: '✨ Creator' },
                     { id: 'character', label: '🌸 Nhân vật' },
                   ] as const
                 ).map((opt) => (
@@ -376,27 +352,8 @@ export const FeedbackTab: React.FC<FeedbackTabProps> = ({
               </div>
             </div>
 
-            {/* Chọn Creator hoặc Char cụ thể nếu có */}
+            {/* Chọn Char cụ thể nếu có */}
             <div>
-              {targetType === 'creator' && (
-                <>
-                  <label className="block text-[11px] font-bold text-[var(--muted)] mb-1.5">
-                    Chọn Creator nhận:
-                  </label>
-                  <select
-                    value={selectedCreatorId}
-                    onChange={(e) => setSelectedCreatorId(e.target.value)}
-                    className="w-full px-3.5 py-2 rounded-2xl bg-[var(--bg)] border border-[var(--border)] text-xs text-[var(--text)]"
-                  >
-                    {creators.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name} ({c.handle})
-                      </option>
-                    ))}
-                  </select>
-                </>
-              )}
-
               {targetType === 'character' && (
                 <>
                   <label className="block text-[11px] font-bold text-[var(--muted)] mb-1.5">
@@ -545,7 +502,7 @@ export const FeedbackTab: React.FC<FeedbackTabProps> = ({
               }`}
             >
               <Inbox className="w-3.5 h-3.5" />
-              <span>Hộp thư Creator</span>
+              <span>Hộp thư Chủ web</span>
               {unreadCreatorCount > 0 && (
                 <span className="px-1.5 py-0.2 rounded-full bg-rose-500 text-white text-[10px]">
                   {unreadCreatorCount} mới
@@ -561,7 +518,6 @@ export const FeedbackTab: React.FC<FeedbackTabProps> = ({
               [
                 { id: 'all', label: 'Tất cả' },
                 { id: 'web', label: '🌐 Web' },
-                { id: 'creator', label: '✨ Creator' },
                 { id: 'character', label: '🌸 Char' },
               ] as const
             ).map((f) => (
@@ -596,11 +552,9 @@ export const FeedbackTab: React.FC<FeedbackTabProps> = ({
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           {displayedFeedbacks.map((fb) => {
             const typeBadge =
-              fb.targetType === 'web'
-                ? '🌐 Gửi cho Web'
-                : fb.targetType === 'creator'
-                ? '✨ Gửi cho Creator'
-                : '🌸 Gửi cho Char';
+              fb.targetType === 'character'
+                ? '🌸 Gửi cho Char'
+                : '🌐 Gửi cho Web';
 
             return (
               <article
@@ -666,7 +620,7 @@ export const FeedbackTab: React.FC<FeedbackTabProps> = ({
                     “{fb.content}”
                   </p>
 
-                  {/* Phản hồi từ Creator */}
+                  {/* Phản hồi từ Chủ web */}
                   {fb.replies && fb.replies.length > 0 && (
                     <div className="space-y-2 pt-2">
                       {fb.replies.map((rep) => (
@@ -675,7 +629,7 @@ export const FeedbackTab: React.FC<FeedbackTabProps> = ({
                           className="p-3 rounded-2xl bg-[var(--bg)] border-l-3 border-[var(--accent)] text-xs space-y-1"
                         >
                           <div className="font-bold text-[var(--text)] flex items-center gap-1.5">
-                            <span>💌 Phản hồi từ {rep.authorName}:</span>
+                            <span>💌 Phản hồi từ {rep.authorName.replace(/Creator/g, 'Chủ web')}:</span>
                           </div>
                           <p className="text-[var(--muted)] leading-relaxed">
                             {rep.content}

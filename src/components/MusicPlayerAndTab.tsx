@@ -167,91 +167,101 @@ export const AddMusicPanel: React.FC<AddMusicPanelProps> = ({
       return;
     }
 
-    setSelectedFile(file);
-    if (!fileTitleInput.trim()) {
-      const cleanName = file.name
-        .replace(/\.(mp3|m4a|wav|ogg)$/i, '')
-        .replace(/[-_]+/g, ' ')
-        .trim();
-      setFileTitleInput(cleanName || 'Bản Nhạc Từ Máy');
-    }
-  };
+      setSelectedFile(file);
+      if (!fileTitleInput.trim()) {
+        const cleanName = file.name
+          .replace(/\.(mp3|m4a|wav|ogg)$/i, '')
+          .replace(/[-_]+/g, ' ')
+          .trim();
+        setFileTitleInput(cleanName || 'Bản Nhạc Từ Máy');
+      }
 
-  const handleSubmitFile = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setFileError(null);
-
-    if (!selectedFile) {
-      setFileError('Bạn hãy chọn một file nhạc (.mp3, .m4a, .wav, .ogg) từ máy trước nhé 🌸');
-      return;
-    }
-
-    setUploadingFile(true);
-    try {
-      const idbKey = `idb-audio-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-
-      // Đo thời lượng file trước khi lưu nếu có thể
-      const tempObjUrl = URL.createObjectURL(selectedFile);
-      const duration = await new Promise<number | undefined>((resolve) => {
-        const tempAudio = new Audio();
-        const timer = window.setTimeout(() => resolve(undefined), 3500);
-        tempAudio.onloadedmetadata = () => {
-          window.clearTimeout(timer);
-          resolve(
-            Number.isFinite(tempAudio.duration) && tempAudio.duration > 0
-              ? Math.round(tempAudio.duration)
-              : undefined
-          );
-        };
-        tempAudio.onerror = () => {
-          window.clearTimeout(timer);
-          resolve(undefined);
-        };
-        tempAudio.src = tempObjUrl;
-      });
-      URL.revokeObjectURL(tempObjUrl);
-
-      // GHI CHÚ: Lưu file âm thanh vào IndexedDB (không dùng localStorage vì quá nặng).
-      // File tải lên chỉ nằm trên trình duyệt của người đó, sau này sẽ chuyển sang Supabase Storage / Firebase Storage.
-      const saved = await musicIdbStorage.saveAudioFile(idbKey, selectedFile);
-      if (!saved) {
+      if (playlistSource === 'web' && canEditWebPlaylist) {
         setFileError(
-          'Trình duyệt không thể lưu file vào bộ nhớ IndexedDB. Bạn kiểm tra dung lượng trống trên trình duyệt nhé!'
+          '⚠️ Playlist của web chỉ nhận link MP3 trực tiếp (vì file tải từ máy lên chỉ lưu trên trình duyệt của máy đó, người khác truy cập web sẽ không nghe được). Bạn hãy chuyển sang mục "a. Dán link MP3" để dán link .mp3 trực tiếp nhé!'
         );
-        setUploadingFile(false);
+      }
+    };
+
+    const handleSubmitFile = async (e: React.FormEvent) => {
+      e.preventDefault();
+      setFileError(null);
+
+      if (playlistSource === 'web' && canEditWebPlaylist) {
+        setFileError(
+          '⚠️ Không thể thêm file từ máy vào Playlist của web vì file tải từ máy chỉ nghe được trên máy đó. Bạn hãy bấm sang mục "a. Dán link MP3" và dán link .mp3 trực tiếp để lưu lên site_settings cho mọi người cùng nghe nhé!'
+        );
         return;
       }
 
-      const ext = (selectedFile.name.split('.').pop() || 'mp3').toLowerCase();
-      const newTrack: MusicTrack = {
-        id: `track-idb-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        title: fileTitleInput.trim() || selectedFile.name,
-        artist: `Tải lên từ máy (.${ext}) · Chỉ nghe trên máy này 💾`,
-        coverUrl: fileCoverInput.trim() || undefined,
-        sourceType: 'indexeddb',
-        idbKey,
-        duration,
-        fileSize: selectedFile.size,
-        fileExt: ext,
-        isWebTrack: false,
-        createdAt: new Date().toISOString(),
-      };
-
-      // Playlist web chỉ lưu được các link MP3; file tải từ máy luôn lưu vào Playlist cá nhân trên máy đó
-      onAddTrack(newTrack, true, 'personal');
-      setSelectedFile(null);
-      setFileTitleInput('');
-      setFileCoverInput('');
-      if (fileInputRef.current) {
-        fileInputRef.current.value = '';
+      if (!selectedFile) {
+        setFileError('Bạn hãy chọn một file nhạc (.mp3, .m4a, .wav, .ogg) từ máy trước nhé 🌸');
+        return;
       }
-      if (onClose) onClose();
-    } catch {
-      setFileError('Có lỗi nhỏ khi đọc file nhạc từ máy. Bạn thử chọn lại file nhé!');
-    } finally {
-      setUploadingFile(false);
-    }
-  };
+
+      setUploadingFile(true);
+      try {
+        const idbKey = `idb-audio-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
+        // Đo thời lượng file trước khi lưu nếu có thể
+        const tempObjUrl = URL.createObjectURL(selectedFile);
+        const duration = await new Promise<number | undefined>((resolve) => {
+          const tempAudio = new Audio();
+          const timer = window.setTimeout(() => resolve(undefined), 3500);
+          tempAudio.onloadedmetadata = () => {
+            window.clearTimeout(timer);
+            resolve(
+              Number.isFinite(tempAudio.duration) && tempAudio.duration > 0
+                ? Math.round(tempAudio.duration)
+                : undefined
+            );
+          };
+          tempAudio.onerror = () => {
+            window.clearTimeout(timer);
+            resolve(undefined);
+          };
+          tempAudio.src = tempObjUrl;
+        });
+        URL.revokeObjectURL(tempObjUrl);
+
+        const saved = await musicIdbStorage.saveAudioFile(idbKey, selectedFile);
+        if (!saved) {
+          setFileError(
+            'Trình duyệt không thể lưu file vào bộ nhớ IndexedDB. Bạn kiểm tra dung lượng trống trên trình duyệt nhé!'
+          );
+          setUploadingFile(false);
+          return;
+        }
+
+        const ext = (selectedFile.name.split('.').pop() || 'mp3').toLowerCase();
+        const newTrack: MusicTrack = {
+          id: `track-idb-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          title: fileTitleInput.trim() || selectedFile.name,
+          artist: `Tải lên từ máy (.${ext}) · Chỉ nghe trên máy này 💾`,
+          coverUrl: fileCoverInput.trim() || undefined,
+          sourceType: 'indexeddb',
+          idbKey,
+          duration,
+          fileSize: selectedFile.size,
+          fileExt: ext,
+          isWebTrack: false,
+          createdAt: new Date().toISOString(),
+        };
+
+        onAddTrack(newTrack, true, 'personal');
+        setSelectedFile(null);
+        setFileTitleInput('');
+        setFileCoverInput('');
+        if (fileInputRef.current) {
+          fileInputRef.current.value = '';
+        }
+        if (onClose) onClose();
+      } catch {
+        setFileError('Có lỗi nhỏ khi đọc file nhạc từ máy. Bạn thử chọn lại file nhé!');
+      } finally {
+        setUploadingFile(false);
+      }
+    };
 
   return (
     <div
@@ -489,9 +499,31 @@ export const AddMusicPanel: React.FC<AddMusicPanelProps> = ({
           <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/40 text-[11px] text-[var(--text)] flex items-start gap-2 leading-relaxed">
             <HardDrive className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
             <span>
-              <strong>Lưu ý quan trọng:</strong> Playlist của web chỉ lưu được các <strong>link MP3 trực tiếp</strong> lên Supabase để mọi người cùng nghe. File tải từ máy lên (lưu bằng IndexedDB) <strong>chỉ nghe được trên chính máy/trình duyệt này của bạn</strong> và sẽ được thêm vào <strong>"Playlist của tôi"</strong> nhé!
+              {playlistSource === 'web' && canEditWebPlaylist ? (
+                <>
+                  <strong>Lưu ý cho Chủ web:</strong> Playlist của web{' '}
+                  <strong>chỉ nhận link MP3 trực tiếp</strong> (vì file tải từ máy lên chỉ lưu cục bộ trên máy đó, người khác vào web không nghe được). Bạn hãy bấm nút bên dưới để chuyển sang dán link <code>.mp3</code> trực tiếp nhé!
+                </>
+              ) : (
+                <>
+                  <strong>Lưu ý quan trọng:</strong> File tải từ máy lên (lưu trên trình duyệt máy này) <strong>chỉ nghe được trên chính thiết bị của bạn</strong> và được lưu trong <strong>&quot;Playlist của tôi&quot;</strong> nhé!
+                </>
+              )}
             </span>
           </div>
+
+          {playlistSource === 'web' && canEditWebPlaylist && (
+            <button
+              type="button"
+              onClick={() => {
+                setMode('url');
+                setFileError(null);
+              }}
+              className="w-full py-2 rounded-xl border border-[var(--accent)] bg-[var(--accent)]/20 text-[var(--text)] font-bold text-xs cursor-pointer hover:bg-[var(--accent)]/30"
+            >
+              👉 Chuyển sang dán link MP3 trực tiếp cho Playlist Web
+            </button>
+          )}
 
           {fileError && (
             <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/40 text-[11px] text-[var(--text)] flex items-start gap-1.5">
@@ -502,15 +534,19 @@ export const AddMusicPanel: React.FC<AddMusicPanelProps> = ({
 
           <button
             type="submit"
-            disabled={uploadingFile || !selectedFile}
+            disabled={
+              uploadingFile ||
+              !selectedFile ||
+              (playlistSource === 'web' && canEditWebPlaylist)
+            }
             className="w-full py-2.5 rounded-full bg-[var(--accent)] text-[#3a2b30] font-bold bouncy-btn cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1.5"
           >
             {uploadingFile ? (
-              <span>⏳ Đang lưu nhạc vào IndexedDB...</span>
+              <span>⏳ Đang lưu nhạc vào máy...</span>
             ) : (
               <>
                 <Upload className="w-3.5 h-3.5" />
-                <span>Lưu file vào Playlist & Phát ngay</span>
+                <span>Lưu file vào Playlist của tôi &amp; Phát ngay</span>
               </>
             )}
           </button>
@@ -535,6 +571,7 @@ interface CornerMusicWidgetProps {
   playlistSource: 'web' | 'personal';
   onSwitchPlaylistSource: (source: 'web' | 'personal') => void;
   canEditWebPlaylist: boolean;
+  isLoggedIn?: boolean;
   onTogglePlay: () => void;
   onSelectTrack: (trackId: string) => void;
   onPrevTrack: () => void;
@@ -551,6 +588,7 @@ interface CornerMusicWidgetProps {
   onUpdateTrack: (trackId: string, patch: Partial<MusicTrack>) => void;
   onDeleteTrack: (trackId: string) => void;
   onMoveTrack: (trackId: string, direction: 'up' | 'down') => void;
+  onReorderTracks?: (fromIndex: number, toIndex: number) => void;
   onRestoreBuiltinTracks: () => void;
   // Tích hợp cùng nút Sáng/Tối & 5 màu nhấn ở góc phải
   colorMode: ColorMode;
@@ -573,6 +611,7 @@ export const CornerMusicWidget: React.FC<CornerMusicWidgetProps> = ({
   playlistSource,
   onSwitchPlaylistSource,
   canEditWebPlaylist,
+  isLoggedIn = false,
   onTogglePlay,
   onSelectTrack,
   onPrevTrack,
@@ -585,6 +624,7 @@ export const CornerMusicWidget: React.FC<CornerMusicWidgetProps> = ({
   onUpdateTrack,
   onDeleteTrack,
   onMoveTrack,
+  onReorderTracks,
   onRestoreBuiltinTracks,
   colorMode,
   onToggleColorMode,
@@ -599,6 +639,12 @@ export const CornerMusicWidget: React.FC<CornerMusicWidgetProps> = ({
   const [hoveredCornerTheme, setHoveredCornerTheme] = useState<string | null>(
     null
   );
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+
+  const canModifyCurrentPlaylist =
+    playlistSource === 'web'
+      ? canEditWebPlaylist
+      : Boolean(isLoggedIn && playlistSource === 'personal');
 
   // State sửa nhanh bài nhạc trong Playlist
   const [editingTrackId, setEditingTrackId] = useState<string | null>(null);
@@ -690,18 +736,20 @@ export const CornerMusicWidget: React.FC<CornerMusicWidgetProps> = ({
             </div>
 
             <div className="flex items-center gap-1 shrink-0">
-              <button
-                type="button"
-                onClick={() => setShowAddMusic((prev) => !prev)}
-                className={`px-2.5 py-1 rounded-full text-[11px] font-bold transition-all cursor-pointer inline-flex items-center gap-1 ${
-                  showAddMusic
-                    ? 'bg-[var(--text)] text-[var(--bg)]'
-                    : 'bg-[var(--accent)] text-[#3a2b30]'
-                }`}
-              >
-                <Plus className="w-3 h-3" />
-                <span>Thêm nhạc</span>
-              </button>
+              {canModifyCurrentPlaylist && (
+                <button
+                  type="button"
+                  onClick={() => setShowAddMusic((prev) => !prev)}
+                  className={`px-2.5 py-1 rounded-full text-[11px] font-bold transition-all cursor-pointer inline-flex items-center gap-1 ${
+                    showAddMusic
+                      ? 'bg-[var(--text)] text-[var(--bg)]'
+                      : 'bg-[var(--accent)] text-[#3a2b30]'
+                  }`}
+                >
+                  <Plus className="w-3 h-3" />
+                  <span>Thêm nhạc</span>
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => setPlaylistOpen(false)}
@@ -715,34 +763,49 @@ export const CornerMusicWidget: React.FC<CornerMusicWidgetProps> = ({
 
           {/* Khu vực cuộn bên trong Playlist */}
           <div className="p-4 space-y-3.5 overflow-y-auto flex-1">
-            {/* Thanh chuyển đổi giữa "Playlist của web" và "Playlist của tôi" */}
-            <div className="grid grid-cols-2 gap-1.5 p-1 rounded-2xl bg-[var(--bg)] border border-[var(--border)] text-xs">
-              <button
-                type="button"
-                onClick={() => onSwitchPlaylistSource('web')}
-                className={`py-1.5 px-2.5 rounded-xl font-bold transition-all cursor-pointer ${
-                  playlistSource === 'web'
-                    ? 'bg-[var(--accent)] text-[#3a2b30] shadow-2xs'
-                    : 'text-[var(--muted)] hover:text-[var(--text)]'
-                }`}
-              >
-                🌐 Playlist của web
-              </button>
-              <button
-                type="button"
-                onClick={() => onSwitchPlaylistSource('personal')}
-                className={`py-1.5 px-2.5 rounded-xl font-bold transition-all cursor-pointer ${
-                  playlistSource === 'personal'
-                    ? 'bg-[var(--accent)] text-[#3a2b30] shadow-2xs'
-                    : 'text-[var(--muted)] hover:text-[var(--text)]'
-                }`}
-              >
-                💖 Nghe nhạc của tôi
-              </button>
-            </div>
+            {/* Thanh chuyển đổi giữa "Playlist của web" và "Playlist của tôi" (Khách chỉ nghe Playlist của web) */}
+            {isLoggedIn ? (
+              <div className="grid grid-cols-2 gap-1.5 p-1 rounded-2xl bg-[var(--bg)] border border-[var(--border)] text-xs">
+                <button
+                  type="button"
+                  onClick={() => {
+                    onSwitchPlaylistSource('web');
+                    setShowAddMusic(false);
+                  }}
+                  className={`py-1.5 px-2.5 rounded-xl font-bold transition-all cursor-pointer ${
+                    playlistSource === 'web'
+                      ? 'bg-[var(--accent)] text-[#3a2b30] shadow-2xs'
+                      : 'text-[var(--muted)] hover:text-[var(--text)]'
+                  }`}
+                >
+                  🌐 Playlist của web
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onSwitchPlaylistSource('personal');
+                    setShowAddMusic(false);
+                  }}
+                  className={`py-1.5 px-2.5 rounded-xl font-bold transition-all cursor-pointer ${
+                    playlistSource === 'personal'
+                      ? 'bg-[var(--accent)] text-[#3a2b30] shadow-2xs'
+                      : 'text-[var(--muted)] hover:text-[var(--text)]'
+                  }`}
+                >
+                  💖 Playlist của tôi
+                </button>
+              </div>
+            ) : (
+              <div className="px-3 py-1.5 rounded-2xl bg-[var(--bg)] border border-[var(--border)] text-xs font-bold text-[var(--text)] flex items-center justify-between">
+                <span>🌐 Playlist của web</span>
+                <span className="text-[10px] font-normal text-[var(--muted)]">
+                  Nghe chung toàn trang
+                </span>
+              </div>
+            )}
 
-            {/* Khung Thêm Nhạc (khi bấm ➕ Thêm nhạc) */}
-            {showAddMusic && (
+            {/* Khung Thêm Nhạc (chỉ hiện khi có quyền thêm vào playlist đang chọn) */}
+            {showAddMusic && canModifyCurrentPlaylist && (
               <AddMusicPanel
                 compact
                 playlistSource={playlistSource}
@@ -906,15 +969,17 @@ export const CornerMusicWidget: React.FC<CornerMusicWidgetProps> = ({
             <div className="space-y-1.5">
               <div className="flex items-center justify-between text-[11px] font-bold text-[var(--muted)] px-1">
                 <span>DANH SÁCH BÀI HÁT ({playlist.length})</span>
-                <button
-                  type="button"
-                  onClick={onRestoreBuiltinTracks}
-                  title="Khôi phục 4 giai điệu hộp nhạc mặc định"
-                  className="text-[10px] text-[var(--muted)] hover:text-[var(--text)] inline-flex items-center gap-1 cursor-pointer"
-                >
-                  <RotateCcw className="w-3 h-3" />
-                  <span>Khôi phục nhạc gốc</span>
-                </button>
+                {canModifyCurrentPlaylist && (
+                  <button
+                    type="button"
+                    onClick={onRestoreBuiltinTracks}
+                    title="Khôi phục 4 giai điệu hộp nhạc mặc định"
+                    className="text-[10px] text-[var(--muted)] hover:text-[var(--text)] inline-flex items-center gap-1 cursor-pointer"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    <span>Khôi phục nhạc gốc</span>
+                  </button>
+                )}
               </div>
 
               <div className="space-y-1.5 max-h-52 overflow-y-auto pr-0.5">
@@ -925,6 +990,24 @@ export const CornerMusicWidget: React.FC<CornerMusicWidgetProps> = ({
                   return (
                     <div
                       key={track.id}
+                      draggable={canModifyCurrentPlaylist && !isEditing}
+                      onDragStart={() => {
+                        if (canModifyCurrentPlaylist) setDragIndex(idx);
+                      }}
+                      onDragOver={(e) => {
+                        if (canModifyCurrentPlaylist) e.preventDefault();
+                      }}
+                      onDrop={() => {
+                        if (
+                          canModifyCurrentPlaylist &&
+                          dragIndex !== null &&
+                          dragIndex !== idx
+                        ) {
+                          onReorderTracks?.(dragIndex, idx);
+                        }
+                        setDragIndex(null);
+                      }}
+                      onDragEnd={() => setDragIndex(null)}
                       className={`p-2 rounded-2xl border transition-all ${
                         isCurrent
                           ? 'border-[var(--accent)] bg-[var(--accent)]/15'
@@ -1006,14 +1089,13 @@ export const CornerMusicWidget: React.FC<CornerMusicWidgetProps> = ({
                             </div>
                           </button>
 
-                          {(playlistSource === 'personal' ||
-                            canEditWebPlaylist) && (
+                          {canModifyCurrentPlaylist && (
                             <div className="flex items-center gap-0.5 shrink-0">
                               <button
                                 type="button"
                                 disabled={idx === 0}
                                 onClick={() => onMoveTrack(track.id, 'up')}
-                                title="Đưa lên"
+                                title="Đưa lên (hoặc kéo thả bài)"
                                 className="p-1 text-[var(--muted)] hover:text-[var(--text)] disabled:opacity-30 cursor-pointer"
                               >
                                 <ArrowUp className="w-3 h-3" />
@@ -1022,7 +1104,7 @@ export const CornerMusicWidget: React.FC<CornerMusicWidgetProps> = ({
                                 type="button"
                                 disabled={idx === playlist.length - 1}
                                 onClick={() => onMoveTrack(track.id, 'down')}
-                                title="Đưa xuống"
+                                title="Đưa xuống (hoặc kéo thả bài)"
                                 className="p-1 text-[var(--muted)] hover:text-[var(--text)] disabled:opacity-30 cursor-pointer"
                               >
                                 <ArrowDown className="w-3 h-3" />
@@ -1178,6 +1260,7 @@ interface MusicTabProps {
   playlistSource: 'web' | 'personal';
   onSwitchPlaylistSource: (source: 'web' | 'personal') => void;
   canEditWebPlaylist: boolean;
+  isLoggedIn?: boolean;
   onTogglePlay: () => void;
   onSelectTrack: (trackId: string) => void;
   onPrevTrack: () => void;
@@ -1194,6 +1277,7 @@ interface MusicTabProps {
   onUpdateTrack: (trackId: string, patch: Partial<MusicTrack>) => void;
   onDeleteTrack: (trackId: string) => void;
   onMoveTrack: (trackId: string, direction: 'up' | 'down') => void;
+  onReorderTracks?: (fromIndex: number, toIndex: number) => void;
   onRestoreBuiltinTracks: () => void;
   editMode?: boolean;
   customTexts?: Record<string, string>;
@@ -1212,6 +1296,7 @@ export const MusicTab: React.FC<MusicTabProps> = ({
   playlistSource,
   onSwitchPlaylistSource,
   canEditWebPlaylist,
+  isLoggedIn = false,
   onTogglePlay,
   onSelectTrack,
   onPrevTrack,
@@ -1224,6 +1309,7 @@ export const MusicTab: React.FC<MusicTabProps> = ({
   onUpdateTrack,
   onDeleteTrack,
   onMoveTrack,
+  onReorderTracks,
   onRestoreBuiltinTracks,
   editMode = false,
   customTexts = {},
@@ -1236,6 +1322,12 @@ export const MusicTab: React.FC<MusicTabProps> = ({
   const [editTitle, setEditTitle] = useState('');
   const [editArtist, setEditArtist] = useState('');
   const [editCover, setEditCover] = useState('');
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+
+  const canModifyCurrentPlaylist =
+    playlistSource === 'web'
+      ? canEditWebPlaylist
+      : Boolean(isLoggedIn && playlistSource === 'personal');
 
   const filteredTracks =
     sourceFilter === 'all'
@@ -1306,34 +1398,40 @@ export const MusicTab: React.FC<MusicTabProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2 text-xs">
-          <div className="inline-flex p-1 rounded-2xl bg-[var(--bg)] border border-[var(--border)]">
-            <button
-              type="button"
-              onClick={() => onSwitchPlaylistSource('web')}
-              className={`px-3 py-1.5 rounded-xl font-bold transition-all cursor-pointer ${
-                playlistSource === 'web'
-                  ? 'bg-[var(--accent)] text-[#3a2b30]'
-                  : 'text-[var(--muted)] hover:text-[var(--text)]'
-              }`}
-            >
+          {isLoggedIn ? (
+            <div className="inline-flex p-1 rounded-2xl bg-[var(--bg)] border border-[var(--border)]">
+              <button
+                type="button"
+                onClick={() => onSwitchPlaylistSource('web')}
+                className={`px-3 py-1.5 rounded-xl font-bold transition-all cursor-pointer ${
+                  playlistSource === 'web'
+                    ? 'bg-[var(--accent)] text-[#3a2b30]'
+                    : 'text-[var(--muted)] hover:text-[var(--text)]'
+                }`}
+              >
+                🌐 Playlist của Web
+              </button>
+              <button
+                type="button"
+                onClick={() => onSwitchPlaylistSource('personal')}
+                className={`px-3 py-1.5 rounded-xl font-bold transition-all cursor-pointer ${
+                  playlistSource === 'personal'
+                    ? 'bg-[var(--accent)] text-[#3a2b30]'
+                    : 'text-[var(--muted)] hover:text-[var(--text)]'
+                }`}
+              >
+                💖 Playlist của tôi
+              </button>
+            </div>
+          ) : (
+            <div className="px-3.5 py-2 rounded-2xl border border-[var(--border)] bg-[var(--bg)] font-bold text-[var(--text)]">
               🌐 Playlist của Web
-            </button>
-            <button
-              type="button"
-              onClick={() => onSwitchPlaylistSource('personal')}
-              className={`px-3 py-1.5 rounded-xl font-bold transition-all cursor-pointer ${
-                playlistSource === 'personal'
-                  ? 'bg-[var(--accent)] text-[#3a2b30]'
-                  : 'text-[var(--muted)] hover:text-[var(--text)]'
-              }`}
-            >
-              💖 Playlist của tôi
-            </button>
-          </div>
+            </div>
+          )}
           <div className="px-3.5 py-2 rounded-2xl border border-[var(--border)] bg-[var(--bg)] font-semibold text-[var(--text)]">
             🎶 Tổng số bài: <strong>{playlist.length}</strong>
           </div>
-          {(playlistSource === 'personal' || canEditWebPlaylist) && (
+          {canModifyCurrentPlaylist && (
             <button
               type="button"
               onClick={onRestoreBuiltinTracks}
@@ -1485,12 +1583,31 @@ export const MusicTab: React.FC<MusicTabProps> = ({
             </div>
           </div>
 
-          {/* Khung ➕ Thêm nhạc (2 cách: Dán link MP3 trực tiếp & Tải file từ máy lên) */}
-          <AddMusicPanel
-            onAddTrack={onAddTrack}
-            playlistSource={playlistSource}
-            canEditWebPlaylist={canEditWebPlaylist}
-          />
+          {/* Khung ➕ Thêm nhạc: Chỉ hiển thị cho Chủ web khi ở Playlist Web, hoặc cho Người dùng đã đăng nhập khi ở Playlist của tôi */}
+          {canModifyCurrentPlaylist ? (
+            <AddMusicPanel
+              onAddTrack={onAddTrack}
+              playlistSource={playlistSource}
+              canEditWebPlaylist={canEditWebPlaylist}
+            />
+          ) : isLoggedIn ? (
+            <div className="soft-card p-5 space-y-3 text-xs">
+              <div className="font-bold text-sm text-[var(--text)] flex items-center gap-1.5">
+                <Music className="w-4 h-4 text-[var(--accent)]" />
+                <span>🌐 Đang nghe Playlist chung của Web</span>
+              </div>
+              <p className="text-[var(--muted)] leading-relaxed">
+                Playlist của web do Chủ web tuyển chọn để mọi người cùng thưởng thức. Bạn có thể chuyển sang <strong>💖 Playlist của tôi</strong> để tự thêm nhạc yêu thích lưu trên máy của riêng bạn nhé!
+              </p>
+              <button
+                type="button"
+                onClick={() => onSwitchPlaylistSource('personal')}
+                className="px-4 py-2 rounded-full bg-[var(--accent)] text-[#3a2b30] font-bold cursor-pointer inline-flex items-center gap-1.5"
+              >
+                <span>💖 Mở Playlist của tôi</span>
+              </button>
+            </div>
+          ) : null}
         </div>
 
         {/* CỘT PHẢI: Danh sách Playlist chi tiết */}
@@ -1501,7 +1618,9 @@ export const MusicTab: React.FC<MusicTabProps> = ({
                 Danh Sách Bài Hát Trong Playlist ({filteredTracks.length})
               </h2>
               <p className="text-xs text-[var(--muted)]">
-                Bấm vào bài bất kỳ để phát ngay · Sắp xếp thứ tự hoặc chỉnh sửa tên bài, ảnh bìa
+                {canModifyCurrentPlaylist
+                  ? 'Bấm vào bài bất kỳ để phát ngay · Kéo thả hoặc bấm mũi tên để đổi thứ tự, sửa tên bài, ảnh bìa'
+                  : 'Bấm vào bài bất kỳ để thưởng thức giai điệu'}
               </p>
             </div>
 
@@ -1512,7 +1631,9 @@ export const MusicTab: React.FC<MusicTabProps> = ({
                   { id: 'all', label: 'Tất cả' },
                   { id: 'builtin-synth', label: '🎐 Hộp nhạc' },
                   { id: 'url', label: '🔗 Link MP3' },
-                  { id: 'indexeddb', label: '💾 Từ máy' },
+                  ...(playlistSource === 'personal'
+                    ? [{ id: 'indexeddb' as const, label: '💾 Từ máy' }]
+                    : []),
                 ] as const
               ).map((tab) => (
                 <button
@@ -1534,9 +1655,6 @@ export const MusicTab: React.FC<MusicTabProps> = ({
           {filteredTracks.length === 0 ? (
             <div className="p-8 text-center text-xs text-[var(--muted)] space-y-2">
               <p>Chưa có bài nhạc nào trong mục lọc này 🌸</p>
-              <p>
-                Bạn hãy dùng khung <strong>➕ Thêm bài nhạc mới</strong> bên trái để dán link MP3 hoặc tải file từ máy lên nhé!
-              </p>
             </div>
           ) : (
             <div className="space-y-2.5">
@@ -1548,6 +1666,24 @@ export const MusicTab: React.FC<MusicTabProps> = ({
                 return (
                   <div
                     key={track.id}
+                    draggable={canModifyCurrentPlaylist && !isEditing}
+                    onDragStart={() => {
+                      if (canModifyCurrentPlaylist) setDragIndex(idxInFull);
+                    }}
+                    onDragOver={(e) => {
+                      if (canModifyCurrentPlaylist) e.preventDefault();
+                    }}
+                    onDrop={() => {
+                      if (
+                        canModifyCurrentPlaylist &&
+                        dragIndex !== null &&
+                        dragIndex !== idxInFull
+                      ) {
+                        onReorderTracks?.(dragIndex, idxInFull);
+                      }
+                      setDragIndex(null);
+                    }}
+                    onDragEnd={() => setDragIndex(null)}
                     className={`p-3.5 rounded-2xl border transition-all ${
                       isCurrent
                         ? 'border-2 border-[var(--accent)] bg-[var(--accent)]/15'
@@ -1672,14 +1808,13 @@ export const MusicTab: React.FC<MusicTabProps> = ({
                           </div>
                         </button>
 
-                        {(playlistSource === 'personal' ||
-                          canEditWebPlaylist) && (
+                        {canModifyCurrentPlaylist && (
                           <div className="flex items-center gap-1 shrink-0">
                             <button
                               type="button"
                               disabled={idxInFull <= 0}
                               onClick={() => onMoveTrack(track.id, 'up')}
-                              title="Đưa lên"
+                              title="Đưa lên (hoặc kéo thả)"
                               className="p-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] text-[var(--muted)] hover:text-[var(--text)] disabled:opacity-30 cursor-pointer"
                             >
                               <ArrowUp className="w-3.5 h-3.5" />
@@ -1688,7 +1823,7 @@ export const MusicTab: React.FC<MusicTabProps> = ({
                               type="button"
                               disabled={idxInFull >= playlist.length - 1}
                               onClick={() => onMoveTrack(track.id, 'down')}
-                              title="Đưa xuống"
+                              title="Đưa xuống (hoặc kéo thả)"
                               className="p-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] text-[var(--muted)] hover:text-[var(--text)] disabled:opacity-30 cursor-pointer"
                             >
                               <ArrowDown className="w-3.5 h-3.5" />

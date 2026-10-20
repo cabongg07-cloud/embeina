@@ -211,7 +211,7 @@ export async function fetchCharsAndCreatorsFromSupabase(): Promise<{
 
   const creators: Creator[] = Array.from(creatorIdsSet).map((cid, idx) => {
     const prof = profileMap.get(cid);
-    const displayName = prof?.display_name || 'Creator';
+    const displayName = prof?.display_name || 'Chủ web';
     const charListForCreator = charRows.filter((c) => c.creator_id === cid);
     const collectedTags = Array.from(
       new Set(charListForCreator.flatMap((c) => c.tags || []))
@@ -238,7 +238,7 @@ export async function fetchCharsAndCreatorsFromSupabase(): Promise<{
 
   const characters: CharacterItem[] = charRows.map((row, idx) => {
     const creatorProf = profileMap.get(row.creator_id);
-    const creatorName = creatorProf?.display_name || 'Creator';
+    const creatorName = creatorProf?.display_name || 'Chủ web';
     const reqs = parseSupabaseRequirements(row.requirements);
     const isLocked = Boolean(row.locked);
 
@@ -563,10 +563,29 @@ export function checkSupabaseUnlockRequirements(
     let hintText = '';
     if (!isMet) {
       if (ownedPendingCount > 0) {
-        hintText = `⏳ Bạn đang có ${ownedPendingCount} vật phẩm cùng loại đang đếm ngược chờ nở/lớn trong Kho đồ. Hãy đợi đếm ngược xong nhé!`;
+        let minMs: number | null = null;
+        pendingPool.forEach((entry) => {
+          if (entry.category !== req.category) return;
+          if (specific && entry.name.trim().toLowerCase() !== specific) return;
+          if (entry.readyAt) {
+            const diff = new Date(entry.readyAt).getTime() - nowMs;
+            if (diff > 0) {
+              if (minMs === null || diff < minMs) minMs = diff;
+            }
+          }
+        });
+        if (minMs !== null && minMs > 0) {
+          const totalSec = Math.ceil(minMs / 1000);
+          const mins = Math.floor(totalSec / 60);
+          const secs = totalSec % 60;
+          const formatted = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+          hintText = `🌱 Đang lớn, còn ${formatted}`;
+        } else {
+          hintText = `🌱 Đang lớn (${ownedPendingCount} vật phẩm sắp sẵn sàng)`;
+        }
       } else {
         hintText =
-          '🌸 Hãy mở Gacha mỗi ngày ở tab Mini game để sưu tầm thêm vật phẩm vào Kho đồ nhé!';
+          '🌸 Chưa có vật phẩm này trong Kho đồ. Bạn có thể ghé Chợ nhỏ để mua nhanh nhé!';
       }
     }
 
@@ -1094,7 +1113,7 @@ export async function insertSharedPromptOnSupabase(
 ): Promise<{ ok: boolean; message?: string }> {
   try {
     const { data: sessionData } = await supabase.auth.getSession();
-    const uid = sessionData.session?.user?.id || prompt.creatorId;
+    const uid = String(sessionData.session?.user?.id || prompt.creatorId || '');
     await insertCommandVaultOnSupabase(uid, {
       vaultType: 'shared',
       ...prompt,
@@ -1215,6 +1234,8 @@ export async function fetchMyDailyRollToday(): Promise<boolean> {
 export async function rollGachaOnSupabase(): Promise<{
   ok: boolean;
   error?: string;
+  errorCode?: string;
+  message: string;
   item?: DbInventoryRow;
 }> {
   try {
@@ -1224,6 +1245,7 @@ export async function rollGachaOnSupabase(): Promise<{
     if (latest) {
       return {
         ok: true,
+        message: 'Đã nhận quà Gacha thành công!',
         item: {
           id: latest.id,
           user_id: '',
@@ -1240,6 +1262,7 @@ export async function rollGachaOnSupabase(): Promise<{
     if (raw && typeof raw === 'object') {
       return {
         ok: true,
+        message: 'Đã nhận quà Gacha thành công!',
         item: {
           id: String(raw.id || `gacha_${Date.now()}`),
           user_id: String(raw.user_id || ''),
@@ -1251,14 +1274,21 @@ export async function rollGachaOnSupabase(): Promise<{
         },
       };
     }
-    return { ok: true };
+    return { ok: true, message: 'Đã nhận quà Gacha thành công!' };
   } catch (err) {
+    const msg =
+      err instanceof Error
+        ? err.message
+        : 'Hôm nay bạn đã nhận rồi, mai quay lại nhé';
+    const isAlreadyRolled =
+      msg.includes('already_rolled') || msg.includes('Hôm nay bạn đã nhận rồi');
     return {
       ok: false,
-      error:
-        err instanceof Error
-          ? err.message
-          : 'Hôm nay bạn đã nhận rồi, mai quay lại nhé',
+      error: msg,
+      errorCode: isAlreadyRolled ? 'already_rolled' : 'roll_failed',
+      message: isAlreadyRolled
+        ? 'Hôm nay bạn đã nhận rồi, mai quay lại nhé'
+        : msg,
     };
   }
 }
@@ -1456,6 +1486,895 @@ export async function updateFeedbackEnvelopeOnSupabase(
 
   if (error) {
     throw new Error(error.message || 'Không thể cập nhật Feedback.');
+  }
+}
+
+// ============================================================================
+// 7) DANH SÁCH THÀNH VIÊN CHO CHỦ WEB (RPC `admin_list_users`)
+// - Chỉ owner gọi được; trả về id, username, display_name, email, role, created_at
+// - Nếu RPC báo lỗi `not_allowed` thì trả về notAllowed = true để ẩn mục này
+// - Tuyệt đối KHÔNG lưu danh sách này vào localStorage
+// ============================================================================
+export interface AdminListedUser {
+  id: string;
+  username: string;
+  display_name: string;
+  email: string;
+  role: string;
+  created_at: string;
+}
+
+export async function fetchAdminListUsersFromSupabase(): Promise<{
+  ok: boolean;
+  notAllowed?: boolean;
+  error?: string;
+  users: AdminListedUser[];
+}> {
+  try {
+    const { data, error } = await supabase.rpc('admin_list_users');
+    if (error) {
+      const errText = `${error.message || ''} ${error.details || ''} ${error.code || ''}`.toLowerCase();
+      if (
+        errText.includes('not_allowed') ||
+        errText.includes('permission denied') ||
+        errText.includes('forbidden') ||
+        errText.includes('42501')
+      ) {
+        return {
+          ok: false,
+          notAllowed: true,
+          error: 'not_allowed',
+          users: [],
+        };
+      }
+      return {
+        ok: false,
+        error: error.message || 'Không thể tải danh sách thành viên.',
+        users: [],
+      };
+    }
+
+    if (!Array.isArray(data)) {
+      return { ok: true, users: [] };
+    }
+
+    const users: AdminListedUser[] = data.map((row: Record<string, unknown>) => ({
+      id: String(row.id || ''),
+      username: String(row.username || ''),
+      display_name: String(row.display_name || row.username || 'Người dùng'),
+      email: String(row.email || ''),
+      role: String(row.role || 'user').toLowerCase(),
+      created_at: String(row.created_at || ''),
+    }));
+
+    return { ok: true, users };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err || '');
+    if (msg.toLowerCase().includes('not_allowed')) {
+      return {
+        ok: false,
+        notAllowed: true,
+        error: 'not_allowed',
+        users: [],
+      };
+    }
+    return {
+      ok: false,
+      error: msg || 'Không thể tải danh sách thành viên.',
+      users: [],
+    };
+  }
+}
+
+// ============================================================================
+// 15) CHỢ NHỎ & NHIỆM VỤ HÀNG NGÀY (TIỀN TỆ "XU" TRÊN PROFILES.COINS)
+// ============================================================================
+
+export interface MarketPriceRow {
+  kind: ItemCategory;
+  buy_price: number;
+  sell_price: number;
+  enabled: boolean;
+}
+
+export const DEFAULT_MARKET_PRICES: MarketPriceRow[] = [
+  { kind: 'flower', buy_price: 5, sell_price: 2, enabled: true },
+  { kind: 'fish', buy_price: 8, sell_price: 3, enabled: true },
+  { kind: 'drink', buy_price: 4, sell_price: 2, enabled: true },
+  { kind: 'pet', buy_price: 20, sell_price: 8, enabled: true },
+];
+
+export interface QuestPoolRow {
+  id: string | number;
+  title: string;
+  reward: number;
+  active: boolean;
+}
+
+export interface DailyQuestItem {
+  index: number;
+  id?: string | number;
+  title: string;
+  reward: number;
+  completed: boolean;
+}
+
+export interface DailyQuestsResult {
+  ok: boolean;
+  quests: DailyQuestItem[];
+  resetsAt: string;
+  coins?: number;
+  error?: string;
+}
+
+/**
+ * Đọc số Xu hiện tại từ cột `profiles.coins` trên Supabase (KHÔNG lưu Xu trong localStorage)
+ */
+export async function fetchMyCoinsFromSupabase(): Promise<number> {
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    const uid = sessionData.session?.user?.id;
+    if (!uid) return 0;
+
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('coins')
+      .eq('id', uid)
+      .maybeSingle();
+
+    if (error || !data) return 0;
+    return typeof data.coins === 'number' ? data.coins : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Đọc bảng `market_prices` (kind, buy_price, sell_price, enabled)
+ */
+export async function fetchMarketPricesFromSupabase(): Promise<MarketPriceRow[]> {
+  try {
+    const { data, error } = await supabase
+      .from('market_prices')
+      .select('kind, buy_price, sell_price, enabled');
+
+    if (error || !Array.isArray(data) || data.length === 0) {
+      return DEFAULT_MARKET_PRICES;
+    }
+
+    const order: ItemCategory[] = ['flower', 'fish', 'drink', 'pet'];
+    const map = new Map<string, MarketPriceRow>();
+
+    data.forEach((row: Record<string, unknown>) => {
+      const kind = String(row.kind || 'flower').toLowerCase() as ItemCategory;
+      map.set(kind, {
+        kind,
+        buy_price: Math.max(0, Number(row.buy_price) || 0),
+        sell_price: Math.max(0, Number(row.sell_price) || 0),
+        enabled: row.enabled !== false,
+      });
+    });
+
+    return order.map((k) => map.get(k) || DEFAULT_MARKET_PRICES.find((d) => d.kind === k)!);
+  } catch {
+    return DEFAULT_MARKET_PRICES;
+  }
+}
+
+/**
+ * Cập nhật giá mua, giá bán hoặc bật/tắt một món trong `market_prices` (Dành cho Chủ web)
+ */
+export async function updateMarketPriceOnSupabase(
+  row: MarketPriceRow
+): Promise<{ ok: boolean; message: string }> {
+  try {
+    const { error } = await supabase
+      .from('market_prices')
+      .upsert(
+        {
+          kind: row.kind,
+          buy_price: Math.max(0, Math.floor(row.buy_price)),
+          sell_price: Math.max(0, Math.floor(row.sell_price)),
+          enabled: Boolean(row.enabled),
+        },
+        { onConflict: 'kind' }
+      );
+
+    if (error) {
+      return { ok: false, message: error.message || 'Không thể lưu giá Chợ nhỏ.' };
+    }
+    return { ok: true, message: 'Đã lưu giá vật phẩm Chợ nhỏ!' };
+  } catch (err) {
+    return {
+      ok: false,
+      message: err instanceof Error ? err.message : 'Có lỗi khi cập nhật giá.',
+    };
+  }
+}
+
+/**
+ * Đọc bảng `quest_pool` (id, title, reward, active) (Dành cho Chủ web)
+ */
+export async function fetchQuestPoolFromSupabase(): Promise<QuestPoolRow[]> {
+  try {
+    const { data, error } = await supabase
+      .from('quest_pool')
+      .select('id, title, reward, active')
+      .order('id', { ascending: true });
+
+    if (error || !Array.isArray(data)) {
+      return [];
+    }
+
+    return data.map((r: Record<string, unknown>) => ({
+      id: r.id as string | number,
+      title: String(r.title || ''),
+      reward: Math.max(0, Number(r.reward) || 5),
+      active: r.active !== false,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Thêm nhiệm vụ mới vào `quest_pool`
+ */
+export async function createQuestPoolRow(params: {
+  title: string;
+  reward: number;
+  active?: boolean;
+}): Promise<boolean> {
+  try {
+    const { error } = await supabase.from('quest_pool').insert({
+      title: params.title.trim(),
+      reward: Math.max(1, Math.floor(params.reward)),
+      active: params.active ?? true,
+    });
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Cập nhật nhiệm vụ trong `quest_pool`
+ */
+export async function updateQuestPoolRow(
+  id: string | number,
+  patch: Partial<Omit<QuestPoolRow, 'id'>>
+): Promise<boolean> {
+  try {
+    const payload: Record<string, unknown> = {};
+    if (patch.title !== undefined) payload.title = patch.title.trim();
+    if (patch.reward !== undefined) payload.reward = Math.max(1, Math.floor(patch.reward));
+    if (patch.active !== undefined) payload.active = Boolean(patch.active);
+
+    const { error } = await supabase
+      .from('quest_pool')
+      .update(payload)
+      .eq('id', id);
+
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Xóa nhiệm vụ khỏi `quest_pool`
+ */
+export async function deleteQuestPoolRow(id: string | number): Promise<boolean> {
+  try {
+    const { error } = await supabase.from('quest_pool').delete().eq('id', id);
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Tính thời điểm nửa đêm kế tiếp (UTC / Ngày mới) làm fallback nếu rpc không trả về resets_at
+ */
+function getNextMidnightIso(): string {
+  const now = new Date();
+  const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0));
+  return next.toISOString();
+}
+
+/**
+ * Gọi RPC `get_daily_quests()` để lấy 3 nhiệm vụ hôm nay và thời gian đếm ngược resets_at
+ */
+export async function fetchDailyQuestsFromSupabase(): Promise<DailyQuestsResult> {
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    if (!sessionData.session?.user?.id) {
+      return {
+        ok: false,
+        quests: [],
+        resetsAt: getNextMidnightIso(),
+        error: 'not_logged_in',
+      };
+    }
+
+    const { data, error } = await supabase.rpc('get_daily_quests');
+
+    if (error) {
+      return {
+        ok: false,
+        quests: [],
+        resetsAt: getNextMidnightIso(),
+        error: error.message || 'Lỗi khi tải nhiệm vụ.',
+      };
+    }
+
+    let rawList: Record<string, unknown>[] = [];
+    let resetsAt = getNextMidnightIso();
+    let coins: number | undefined;
+
+    if (Array.isArray(data)) {
+      if (data.length === 1 && data[0] && typeof data[0] === 'object' && Array.isArray(data[0].quests)) {
+        rawList = data[0].quests as Record<string, unknown>[];
+        if (typeof data[0].resets_at === 'string') resetsAt = data[0].resets_at;
+        if (typeof data[0].coins === 'number') coins = data[0].coins;
+      } else {
+        rawList = data as Record<string, unknown>[];
+        if (rawList[0] && typeof rawList[0].resets_at === 'string') {
+          resetsAt = rawList[0].resets_at as string;
+        }
+      }
+    } else if (data && typeof data === 'object') {
+      const obj = data as Record<string, unknown>;
+      if (Array.isArray(obj.quests)) {
+        rawList = obj.quests as Record<string, unknown>[];
+      } else if (Array.isArray(obj.items)) {
+        rawList = obj.items as Record<string, unknown>[];
+      } else if (Array.isArray(obj.daily_quests)) {
+        rawList = obj.daily_quests as Record<string, unknown>[];
+      }
+      if (typeof obj.resets_at === 'string') resetsAt = obj.resets_at;
+      if (typeof obj.coins === 'number') coins = obj.coins;
+    }
+
+    const quests: DailyQuestItem[] = rawList.map((item, idx) => {
+      const rawIndex =
+        typeof item.index === 'number'
+          ? item.index
+          : typeof item.quest_index === 'number'
+          ? item.quest_index
+          : typeof item.p_index === 'number'
+          ? item.p_index
+          : idx;
+
+      const isCompleted = Boolean(
+        item.completed ?? item.done ?? item.is_completed ?? item.claimed ?? item.is_done
+      );
+
+      return {
+        index: rawIndex,
+        id: (item.id as string | number) ?? `quest_${rawIndex}`,
+        title: String(item.title || item.name || `Nhiệm vụ #${idx + 1}`),
+        reward: Math.max(1, Number(item.reward ?? item.reward_coins ?? 5)),
+        completed: isCompleted,
+      };
+    });
+
+    return {
+      ok: true,
+      quests,
+      resetsAt,
+      coins,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      quests: [],
+      resetsAt: getNextMidnightIso(),
+      error: err instanceof Error ? err.message : 'Có lỗi khi tải nhiệm vụ.',
+    };
+  }
+}
+
+export const getDailyQuestsViaRpc = fetchDailyQuestsFromSupabase;
+
+/**
+ * Gọi RPC `claim_daily_coins()`:
+ * Nút "Nhận quà mỗi ngày (+10 Xu)".
+ * Lỗi `already_claimed` thì báo "Hôm nay bạn nhận rồi, mai quay lại nhé".
+ */
+export async function claimDailyCoinsViaRpc(): Promise<{
+  ok: boolean;
+  alreadyClaimed?: boolean;
+  notLoggedIn?: boolean;
+  coins?: number;
+  reward?: number;
+  message: string;
+}> {
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    if (!sessionData.session?.user?.id) {
+      return {
+        ok: false,
+        notLoggedIn: true,
+        message: 'Mời bạn đăng nhập để điểm danh nhận quà mỗi ngày nhé 🌸',
+      };
+    }
+
+    const { data, error } = await supabase.rpc('claim_daily_coins');
+
+    if (error) {
+      const msg = `${error.message || ''} ${error.details || ''} ${error.hint || ''}`.toLowerCase();
+      if (msg.includes('already_claimed') || msg.includes('hôm nay bạn nhận rồi') || msg.includes('already')) {
+        return {
+          ok: false,
+          alreadyClaimed: true,
+          message: 'Hôm nay bạn nhận rồi, mai quay lại nhé',
+        };
+      }
+      if (msg.includes('not_logged_in') || msg.includes('permission denied') || error.code === '42501') {
+        return {
+          ok: false,
+          notLoggedIn: true,
+          message: 'Mời bạn đăng nhập để điểm danh nhận quà mỗi ngày nhé 🌸',
+        };
+      }
+      return {
+        ok: false,
+        message: error.message || 'Không thể nhận quà lúc này, bạn thử lại sau nhé.',
+      };
+    }
+
+    let newCoins: number | undefined;
+    let reward = 10;
+    if (typeof data === 'number') {
+      newCoins = data;
+    } else if (data && typeof data === 'object') {
+      const obj = data as Record<string, unknown>;
+      if (obj.already_claimed) {
+        return {
+          ok: false,
+          alreadyClaimed: true,
+          message: 'Hôm nay bạn nhận rồi, mai quay lại nhé',
+        };
+      }
+      if (typeof obj.coins === 'number') newCoins = obj.coins;
+      if (typeof obj.reward === 'number') reward = obj.reward;
+    }
+
+    if (newCoins === undefined) {
+      newCoins = await fetchMyCoinsFromSupabase();
+    }
+
+    return {
+      ok: true,
+      coins: newCoins,
+      reward,
+      message: `🎉 Điểm danh thành công! Bạn nhận được +${reward} Xu.`,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err || '');
+    if (msg.toLowerCase().includes('already_claimed')) {
+      return {
+        ok: false,
+        alreadyClaimed: true,
+        message: 'Hôm nay bạn nhận rồi, mai quay lại nhé',
+      };
+    }
+    return {
+      ok: false,
+      message: msg || 'Không thể điểm danh lúc này.',
+    };
+  }
+}
+
+/**
+ * Gọi RPC `complete_quest(p_index)`
+ * Lỗi `already_done` thì bỏ qua nhẹ nhàng.
+ */
+export async function completeQuestViaRpc(
+  p_index: number
+): Promise<{
+  ok: boolean;
+  alreadyDone?: boolean;
+  notLoggedIn?: boolean;
+  reward?: number;
+  coins?: number;
+  message?: string;
+}> {
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    if (!sessionData.session?.user?.id) {
+      return {
+        ok: false,
+        notLoggedIn: true,
+        message: 'Mời bạn đăng nhập để nhận thưởng nhiệm vụ nhé 🌸',
+      };
+    }
+
+    const { data, error } = await supabase.rpc('complete_quest', {
+      p_index,
+    });
+
+    if (error) {
+      const msg = `${error.message || ''} ${error.details || ''} ${error.hint || ''}`.toLowerCase();
+      if (msg.includes('already_done') || msg.includes('already') || msg.includes('đã hoàn thành')) {
+        return {
+          ok: true,
+          alreadyDone: true,
+          message: 'Nhiệm vụ này đã hoàn thành rồi.',
+        };
+      }
+      if (msg.includes('not_logged_in') || error.code === '42501') {
+        return {
+          ok: false,
+          notLoggedIn: true,
+          message: 'Mời bạn đăng nhập để nhận thưởng nhé 🌸',
+        };
+      }
+      return {
+        ok: false,
+        message: error.message || 'Không thể hoàn thành nhiệm vụ.',
+      };
+    }
+
+    let coins: number | undefined;
+    let reward = 5;
+
+    if (typeof data === 'number') {
+      coins = data;
+    } else if (data && typeof data === 'object') {
+      const obj = data as Record<string, unknown>;
+      if (obj.already_done) {
+        return {
+          ok: true,
+          alreadyDone: true,
+          message: 'Nhiệm vụ này đã hoàn thành rồi.',
+        };
+      }
+      if (typeof obj.coins === 'number') coins = obj.coins;
+      if (typeof obj.reward === 'number') reward = obj.reward;
+    }
+
+    if (coins === undefined) {
+      coins = await fetchMyCoinsFromSupabase();
+    }
+
+    return {
+      ok: true,
+      alreadyDone: false,
+      reward,
+      coins,
+      message: `✨ Đã hoàn thành nhiệm vụ! Nhận +${reward} Xu.`,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err || '');
+    if (msg.toLowerCase().includes('already_done')) {
+      return {
+        ok: true,
+        alreadyDone: true,
+        message: 'Nhiệm vụ này đã hoàn thành.',
+      };
+    }
+    return {
+      ok: false,
+      message: msg || 'Không thể hoàn thành nhiệm vụ.',
+    };
+  }
+}
+
+/**
+ * Gọi RPC `buy_item(p_kind)`:
+ * Thành công: trả về vật phẩm với tên do server cấp, hoa/cá cần 30 phút để lớn (ready_at).
+ * Lỗi `not_enough_coins`: báo "Chưa đủ Xu, làm nhiệm vụ để kiếm thêm nhé".
+ */
+export async function buyItemViaRpc(
+  kind: ItemCategory
+): Promise<{
+  ok: boolean;
+  notEnoughCoins?: boolean;
+  notLoggedIn?: boolean;
+  disabled?: boolean;
+  item?: DbInventoryRow;
+  coins?: number;
+  message: string;
+}> {
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    if (!sessionData.session?.user?.id) {
+      return {
+        ok: false,
+        notLoggedIn: true,
+        message: 'Mời bạn đăng nhập để mua vật phẩm tại Chợ nhỏ nhé 🌸',
+      };
+    }
+
+    const { data, error } = await supabase.rpc('buy_item', {
+      p_kind: kind,
+    });
+
+    if (error) {
+      const msg = `${error.message || ''} ${error.details || ''} ${error.hint || ''}`.toLowerCase();
+      if (
+        msg.includes('not_enough_coins') ||
+        msg.includes('insufficient') ||
+        msg.includes('không đủ xu') ||
+        msg.includes('chưa đủ xu')
+      ) {
+        return {
+          ok: false,
+          notEnoughCoins: true,
+          message: 'Chưa đủ Xu, làm nhiệm vụ để kiếm thêm nhé',
+        };
+      }
+      if (msg.includes('not_logged_in') || error.code === '42501') {
+        return {
+          ok: false,
+          notLoggedIn: true,
+          message: 'Mời bạn đăng nhập để mua vật phẩm tại Chợ nhỏ nhé 🌸',
+        };
+      }
+      if (msg.includes('disabled') || msg.includes('ngưng') || msg.includes('not available')) {
+        return {
+          ok: false,
+          disabled: true,
+          message: 'Món này hiện đang tạm ngưng bán tại Chợ nhỏ.',
+        };
+      }
+      return {
+        ok: false,
+        message: error.message || 'Chưa thể mua vật phẩm lúc này.',
+      };
+    }
+
+    let updatedCoins: number | undefined;
+    let createdItem: DbInventoryRow | undefined;
+
+    if (data && typeof data === 'object') {
+      const obj = data as Record<string, unknown>;
+      if (obj.not_enough_coins) {
+        return {
+          ok: false,
+          notEnoughCoins: true,
+          message: 'Chưa đủ Xu, làm nhiệm vụ để kiếm thêm nhé',
+        };
+      }
+      if (typeof obj.coins === 'number') updatedCoins = obj.coins;
+      if (obj.item && typeof obj.item === 'object') {
+        const it = obj.item as Record<string, unknown>;
+        createdItem = {
+          id: String(it.id || `item_${Date.now()}`),
+          user_id: String(it.user_id || ''),
+          item_type: String(it.kind || it.item_type || kind),
+          item_name: String(it.name || it.item_name || 'Vật phẩm Chợ nhỏ'),
+          rarity: String(it.rarity || 'common'),
+          ready_at: it.ready_at ? String(it.ready_at) : null,
+          created_at: String(it.created_at || new Date().toISOString()),
+          count: Number(it.count) || 1,
+        };
+      } else if (obj.name || obj.item_name || obj.id) {
+        createdItem = {
+          id: String(obj.id || `item_${Date.now()}`),
+          user_id: String(obj.user_id || ''),
+          item_type: String(obj.kind || obj.item_type || kind),
+          item_name: String(obj.name || obj.item_name || 'Vật phẩm Chợ nhỏ'),
+          rarity: String(obj.rarity || 'common'),
+          ready_at: obj.ready_at ? String(obj.ready_at) : null,
+          created_at: String(obj.created_at || new Date().toISOString()),
+          count: Number(obj.count) || 1,
+        };
+      }
+    }
+
+    // Nếu RPC không trả trực tiếp item, ta tải lại kho đồ và lấy item mới nhất
+    if (!createdItem) {
+      const inv = await fetchMyInventoryFromSupabase();
+      createdItem = inv[0];
+    }
+
+    if (updatedCoins === undefined) {
+      updatedCoins = await fetchMyCoinsFromSupabase();
+    }
+
+    return {
+      ok: true,
+      coins: updatedCoins,
+      item: createdItem,
+      message: `✨ Chúc mừng bạn đã mua thành công "${createdItem?.item_name || 'Vật phẩm'}"!`,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err || '');
+    if (msg.toLowerCase().includes('not_enough_coins')) {
+      return {
+        ok: false,
+        notEnoughCoins: true,
+        message: 'Chưa đủ Xu, làm nhiệm vụ để kiếm thêm nhé',
+      };
+    }
+    return {
+      ok: false,
+      message: msg || 'Chưa thể mua vật phẩm lúc này.',
+    };
+  }
+}
+
+/**
+ * Gọi RPC `sell_item(p_item)` để bán lại vật phẩm trong kho lấy Xu
+ */
+export async function sellItemViaRpc(
+  itemId: string
+): Promise<{
+  ok: boolean;
+  notLoggedIn?: boolean;
+  coins?: number;
+  message: string;
+}> {
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    if (!sessionData.session?.user?.id) {
+      return {
+        ok: false,
+        notLoggedIn: true,
+        message: 'Mời bạn đăng nhập để bán vật phẩm nhé 🌸',
+      };
+    }
+
+    const { data, error } = await supabase.rpc('sell_item', {
+      p_item: itemId,
+    });
+
+    if (error) {
+      return {
+        ok: false,
+        message: error.message || 'Không thể bán vật phẩm lúc này.',
+      };
+    }
+
+    let updatedCoins: number | undefined;
+    if (typeof data === 'number') {
+      updatedCoins = data;
+    } else if (data && typeof data === 'object') {
+      const obj = data as Record<string, unknown>;
+      if (typeof obj.coins === 'number') updatedCoins = obj.coins;
+    }
+
+    if (updatedCoins === undefined) {
+      updatedCoins = await fetchMyCoinsFromSupabase();
+    }
+
+    return {
+      ok: true,
+      coins: updatedCoins,
+      message: '✨ Đã bán vật phẩm và nhận Xu thành công!',
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      message: err instanceof Error ? err.message : 'Có lỗi khi bán vật phẩm.',
+    };
+  }
+}
+
+// ============================================================================
+// HỆ THỐNG PHÁT SỰ KIỆN HÀNH ĐỘNG GAME ĐỂ TỰ ĐỘNG HOÀN THÀNH NHIỆM VỤ
+// ============================================================================
+
+export type GameQuestAction =
+  | 'water'
+  | 'fish'
+  | 'gift_drink'
+  | 'gift_flower'
+  | 'chat_companion'
+  | 'feed_pet'
+  | 'gacha'
+  | 'love_letter'
+  | 'buy_market';
+
+type GameQuestActionListener = (action: GameQuestAction) => void;
+const questActionListeners = new Set<GameQuestActionListener>();
+
+export function onGameQuestAction(listener: GameQuestActionListener): () => void {
+  questActionListeners.add(listener);
+  return () => {
+    questActionListeners.delete(listener);
+  };
+}
+
+export function emitGameQuestAction(action: GameQuestAction): void {
+  questActionListeners.forEach((fn) => {
+    try {
+      fn(action);
+    } catch {
+      // Ignore listener error
+    }
+  });
+}
+
+/**
+ * Kiểm tra xem tên nhiệm vụ có khớp với hành động người chơi vừa thực hiện không
+ */
+export function doesQuestMatchAction(
+  questTitle: string,
+  action: GameQuestAction
+): boolean {
+  const t = questTitle.toLowerCase();
+  switch (action) {
+    case 'water':
+      return (
+        t.includes('tưới') ||
+        t.includes('vườn') ||
+        t.includes('trồng cây') ||
+        t.includes('gieo') ||
+        t.includes('chăm cây') ||
+        t.includes('hoa')
+      );
+    case 'fish':
+      return (
+        t.includes('cá') ||
+        t.includes('câu') ||
+        t.includes('hồ cá') ||
+        t.includes('cho cá') ||
+        t.includes('thả cá')
+      );
+    case 'gift_drink':
+      return (
+        t.includes('nước') ||
+        t.includes('thức uống') ||
+        t.includes('trà') ||
+        t.includes('cà phê') ||
+        t.includes('pha') ||
+        t.includes('tặng nước') ||
+        t.includes('quầy')
+      );
+    case 'gift_flower':
+      return (
+        t.includes('tặng hoa') ||
+        t.includes('hoa') ||
+        t.includes('quà') ||
+        t.includes('tặng')
+      );
+    case 'chat_companion':
+      return (
+        t.includes('trò chuyện') ||
+        t.includes('tâm sự') ||
+        t.includes('tri kỷ') ||
+        t.includes('chào') ||
+        t.includes('nói chuyện') ||
+        t.includes('thăm')
+      );
+    case 'feed_pet':
+      return (
+        t.includes('thú') ||
+        t.includes('pet') ||
+        t.includes('mèo') ||
+        t.includes('cún') ||
+        t.includes('cho thú') ||
+        t.includes('chăm thú')
+      );
+    case 'gacha':
+      return (
+        t.includes('gacha') ||
+        t.includes('mở quà') ||
+        t.includes('hộp quà') ||
+        t.includes('quay')
+      );
+    case 'love_letter':
+      return (
+        t.includes('thư') ||
+        t.includes('lời nhắn') ||
+        t.includes('yêu thương') ||
+        t.includes('gửi lời') ||
+        t.includes('feedback') ||
+        t.includes('nhắn')
+      );
+    case 'buy_market':
+      return (
+        t.includes('chợ') ||
+        t.includes('mua') ||
+        t.includes('sắm') ||
+        t.includes('cửa hàng')
+      );
+    default:
+      return false;
   }
 }
 

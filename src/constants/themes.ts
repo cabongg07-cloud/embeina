@@ -96,7 +96,7 @@ export interface NavTab {
   label: string;
   emoji: string;
   whisper: string;
-  creatorOnly?: boolean; // Chỉ hiện với vai Creator (Commission, Request, Kho lệnh)
+  creatorOnly?: boolean; // Chỉ hiện với vai Chủ web (Commission, Request, Kho lệnh)
 }
 
 export const NAV_TABS: NavTab[] = [
@@ -104,7 +104,7 @@ export const NAV_TABS: NavTab[] = [
     id: 'char',
     label: 'Char',
     emoji: '✨',
-    whisper: 'Lật mở cuốn sổ nhỏ tìm kiếm nhân vật theo tên, lọc nhiều tag và chọn Creator yêu thích.',
+    whisper: 'Lật mở cuốn sổ nhỏ tìm kiếm nhân vật theo tên và lọc kết hợp nhiều tag yêu thích.',
   },
   {
     id: 'mini-game',
@@ -116,7 +116,7 @@ export const NAV_TABS: NavTab[] = [
     id: 'feedback',
     label: 'Feedback',
     emoji: '💬',
-    whisper: 'Gửi đánh giá 5 sao và lời nhắn yêu thương đến Web, Creator hoặc các nhân vật AI.',
+    whisper: 'Gửi đánh giá 5 sao và lời nhắn yêu thương đến Web hoặc các nhân vật AI.',
   },
   {
     id: 'nhac',
@@ -164,21 +164,22 @@ export const NAV_TABS: NavTab[] = [
     id: 'commission',
     label: 'Commission',
     emoji: '🎀',
-    whisper: 'Bảng quản lý giá và trạng thái đơn Commission dành cho Creator.',
+    whisper: 'Bảng quản lý giá và trạng thái đơn Commission dành cho Chủ web.',
     creatorOnly: true,
   },
   {
     id: 'request',
     label: 'Request',
     emoji: '📮',
-    whisper: 'Hộp thư tiếp nhận và trả lời ý tưởng nhân vật dành cho Creator.',
+    whisper: 'Hộp thư tiếp nhận và trả lời ý tưởng nhân vật dành cho Chủ web.',
     creatorOnly: true,
   },
   {
     id: 'kho-lenh',
     label: 'Kho lệnh',
     emoji: '🔖',
-    whisper: 'Ngăn kéo riêng cất giữ những mẫu câu lệnh yêu thích của Creator.',
+    whisper: 'Ngăn kéo riêng cất giữ những mẫu câu lệnh yêu thích của Chủ web.',
     creatorOnly: true,
   },
 ];
+

@@ -32,6 +32,8 @@ interface RescueStationTabProps {
   onUpdateFaqs?: (next: FaqItem[], label?: string) => void;
   rescueTickets?: RescueReport[];
   onUpdateRescueTickets?: (next: RescueReport[], label?: string) => void;
+  backupEntries?: BackupEntry[];
+  onUpdateBackups?: (next: BackupEntry[], label?: string) => void;
 }
 
 const RESCUE_STATUS_LABELS: Record<RescueStatus, string> = {
@@ -50,11 +52,15 @@ export const RescueStationTab: React.FC<RescueStationTabProps> = ({
   onUpdateFaqs,
   rescueTickets: propTickets,
   onUpdateRescueTickets,
+  backupEntries: propBackups,
+  onUpdateBackups,
 }) => {
   const [reports, setReports] = useState<RescueReport[]>(() =>
     propTickets && propTickets.length > 0 ? propTickets : SAMPLE_RESCUE_REPORTS
   );
-  const [backups, setBackups] = useState<BackupEntry[]>(() => SAMPLE_BACKUPS);
+  const [backups, setBackups] = useState<BackupEntry[]>(() =>
+    propBackups && propBackups.length > 0 ? propBackups : SAMPLE_BACKUPS
+  );
   const [faqs, setFaqs] = useState<FaqItem[]>(() =>
     propFaqs && propFaqs.length > 0 ? propFaqs : INITIAL_FAQS
   );
@@ -64,6 +70,12 @@ export const RescueStationTab: React.FC<RescueStationTabProps> = ({
       setReports(propTickets);
     }
   }, [propTickets]);
+
+  useEffect(() => {
+    if (propBackups && propBackups.length > 0) {
+      setBackups(propBackups);
+    }
+  }, [propBackups]);
 
   useEffect(() => {
     if (propFaqs && propFaqs.length > 0) {
@@ -82,6 +94,14 @@ export const RescueStationTab: React.FC<RescueStationTabProps> = ({
   ) => {
     setReports(next);
     onUpdateRescueTickets?.(next, label);
+  };
+
+  const syncBackups = (
+    next: BackupEntry[],
+    label = 'Cập nhật Sổ lưu trữ dự phòng'
+  ) => {
+    setBackups(next);
+    onUpdateBackups?.(next, label);
   };
 
   const [charName, setCharName] = useState('');
@@ -228,7 +248,7 @@ export const RescueStationTab: React.FC<RescueStationTabProps> = ({
       savedAt: new Date().toLocaleDateString('vi-VN'),
     };
 
-    setBackups((prev) => [added, ...prev]);
+    syncBackups([added, ...backups], 'Lưu bản sao dự phòng vào sổ tay');
     setBakCharName('');
     setBakCreatorName('');
     setBakLink('');
@@ -309,14 +329,6 @@ export const RescueStationTab: React.FC<RescueStationTabProps> = ({
 
           <input
             type="text"
-            value={creatorName}
-            onChange={(e) => setCreatorName(e.target.value)}
-            placeholder="Tên Creator (nếu bạn còn nhớ)..."
-            className="w-full px-3.5 py-2 text-xs bg-[var(--bg)] border border-[var(--border)] text-[var(--text)]"
-          />
-
-          <input
-            type="text"
             value={brokenUrl}
             onChange={(e) => setBrokenUrl(e.target.value)}
             placeholder="Đường dẫn cũ bị hỏng (tùy chọn)..."
@@ -359,9 +371,6 @@ export const RescueStationTab: React.FC<RescueStationTabProps> = ({
                     <h4 className="font-serif-title text-xl font-bold text-[var(--text)]">
                       {rep.characterName}
                     </h4>
-                    <span className="text-xs text-[var(--muted)]">
-                      Creator: {rep.creatorName}
-                    </span>
                   </div>
 
                   <span className="sticker-chip text-xs">
@@ -445,13 +454,6 @@ export const RescueStationTab: React.FC<RescueStationTabProps> = ({
               value={bakCharName}
               onChange={(e) => setBakCharName(e.target.value)}
               placeholder="Tên nhân vật & phiên bản *"
-              className="w-full px-3.5 py-2 text-xs bg-[var(--bg)] border border-[var(--border)] text-[var(--text)]"
-            />
-            <input
-              type="text"
-              value={bakCreatorName}
-              onChange={(e) => setBakCreatorName(e.target.value)}
-              placeholder="Tên Creator..."
               className="w-full px-3.5 py-2 text-xs bg-[var(--bg)] border border-[var(--border)] text-[var(--text)]"
             />
             <input
