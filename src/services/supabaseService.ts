@@ -227,6 +227,10 @@ export async function fetchCharsAndCreatorsFromSupabase(): Promise<{
         prof?.role === 'owner'
           ? 'Chủ sổ tay Góc Nhỏ Lấp Lánh ✨'
           : 'Tác giả sáng tạo nhân vật tại Góc Nhỏ Lấp Lánh 🌸',
+      longBio:
+        prof?.role === 'owner'
+          ? 'Người chăm sóc và lưu giữ các câu chuyện nhỏ tại Góc Nhỏ Lấp Lánh.'
+          : 'Tác giả sáng tạo nhân vật AI với những cốt truyện ấm áp và giàu cảm xúc.',
       tags: collectedTags.length > 0 ? collectedTags : ['Đời thường', 'Chữa lành'],
       socials: [],
     };
@@ -787,6 +791,99 @@ export async function deleteCommissionRecordOnSupabase(id: string): Promise<void
   }
 }
 
+export async function saveCommissionBoardOnSupabase(
+  info: CreatorCommissionInfo,
+  isNew = false
+): Promise<{ ok: boolean; message: string }> {
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    const uid = sessionData.session?.user?.id || info.creatorId;
+    const payload: Record<string, unknown> = {
+      recordType: 'board',
+      creatorId: info.creatorId || uid,
+      isOpen: info.isOpen,
+      waitTime: info.waitTime,
+      slotsLeft: info.slotsLeft,
+      note: info.note,
+      imageUrl: info.imageUrl,
+      tiers: info.tiers,
+    };
+    if (isNew || !info.id || info.id.startsWith('comm-info-')) {
+      await insertCommissionRecordOnSupabase(uid, payload);
+    } else {
+      await updateCommissionRecordOnSupabase(info.id, payload);
+    }
+    return { ok: true, message: 'Đã lưu bảng giá Commission lên Supabase!' };
+  } catch (err) {
+    return {
+      ok: false,
+      message:
+        err instanceof Error
+          ? err.message
+          : 'Không thể lưu bảng giá Commission lên Supabase.',
+    };
+  }
+}
+
+export async function deleteCommissionBoardOnSupabase(
+  id: string
+): Promise<boolean> {
+  try {
+    await deleteCommissionRecordOnSupabase(id);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function insertCommissionOrderOnSupabase(
+  order: Omit<CommissionOrder, 'id' | 'createdAt'>
+): Promise<{ ok: boolean; message: string }> {
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    const uid = sessionData.session?.user?.id;
+    if (!uid) {
+      return {
+        ok: false,
+        message: 'Bạn hãy đăng nhập trước khi gửi đơn Commission nhé 🌸',
+      };
+    }
+    await insertCommissionRecordOnSupabase(uid, {
+      recordType: 'order',
+      ...order,
+    });
+    return { ok: true, message: 'Đã gửi đơn đặt Commission thành công!' };
+  } catch (err) {
+    return {
+      ok: false,
+      message:
+        err instanceof Error
+          ? err.message
+          : 'Không thể gửi đơn Commission lúc này.',
+    };
+  }
+}
+
+export async function updateCommissionOrderStatusOnSupabase(
+  order: CommissionOrder,
+  nextStatus: CommissionOrder['status']
+): Promise<boolean> {
+  try {
+    await updateCommissionRecordOnSupabase(order.id, {
+      recordType: 'order',
+      creatorId: order.creatorId,
+      requesterName: order.requesterName,
+      characterConcept: order.characterConcept,
+      budget: order.budget,
+      contact: order.contact,
+      status: nextStatus,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * 12. Bảng `requests` (id, owner_id, data, created_at)
  */
@@ -824,30 +921,58 @@ export async function fetchRequestsFromSupabase(): Promise<CharacterRequest[]> {
 }
 
 export async function insertRequestOnSupabase(
-  ownerId: string,
-  reqData: Omit<CharacterRequest, 'id'>
-): Promise<void> {
-  const { error } = await supabase.from('requests').insert({
-    owner_id: ownerId,
-    data: reqData,
-  });
-  if (error) {
-    throw new Error(error.message || 'Không thể gửi Request lên Supabase.');
+  arg1: string | Omit<CharacterRequest, 'id' | 'createdAt' | 'replies'>,
+  arg2?: Omit<CharacterRequest, 'id'>
+): Promise<{ ok: boolean; message?: string }> {
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    const uid =
+      typeof arg1 === 'string'
+        ? arg1
+        : sessionData.session?.user?.id || '';
+    const reqPayload =
+      typeof arg1 === 'string'
+        ? arg2
+        : {
+            ...arg1,
+            replies: [],
+            createdAt: new Date().toISOString(),
+          };
+    if (!uid || !reqPayload) {
+      return { ok: false, message: 'Vui lòng đăng nhập để gửi Request.' };
+    }
+    const { error } = await supabase.from('requests').insert({
+      owner_id: uid,
+      data: reqPayload,
+    });
+    if (error) {
+      return { ok: false, message: error.message };
+    }
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      message: err instanceof Error ? err.message : 'Lỗi gửi Request.',
+    };
   }
 }
 
 export async function updateRequestOnSupabase(
-  id: string,
-  reqData: Partial<CharacterRequest>,
-  existingFull: CharacterRequest
-): Promise<void> {
-  const merged = { ...existingFull, ...reqData };
-  const { error } = await supabase
-    .from('requests')
-    .update({ data: merged })
-    .eq('id', id);
-  if (error) {
-    throw new Error(error.message || 'Không thể cập nhật Request trên Supabase.');
+  arg1: string | CharacterRequest,
+  arg2?: Partial<CharacterRequest>,
+  arg3?: CharacterRequest
+): Promise<boolean> {
+  try {
+    const id = typeof arg1 === 'string' ? arg1 : arg1.id;
+    const merged =
+      typeof arg1 === 'string' ? { ...arg3, ...arg2 } : arg1;
+    const { error } = await supabase
+      .from('requests')
+      .update({ data: merged })
+      .eq('id', id);
+    return !error;
+  } catch {
+    return false;
   }
 }
 
@@ -888,6 +1013,7 @@ export async function fetchCommandVaultFromSupabase(): Promise<{
           usageNote: String(d.usageNote || ''),
           content: String(d.content || ''),
           imageUrl: d.imageUrl ? String(d.imageUrl) : undefined,
+          createdAt: row.created_at,
         });
       } else {
         personalPrompts.push({
@@ -900,12 +1026,23 @@ export async function fetchCommandVaultFromSupabase(): Promise<{
           sourceCreatorName: d.sourceCreatorName
             ? String(d.sourceCreatorName)
             : undefined,
+          createdAt: row.created_at,
         });
       }
     }
   );
 
   return { personalPrompts, sharedPrompts };
+}
+
+export async function fetchSharedPromptsFromSupabase(): Promise<SharedPrompt[]> {
+  const res = await fetchCommandVaultFromSupabase();
+  return res.sharedPrompts;
+}
+
+export async function fetchPersonalPromptsFromSupabase(): Promise<PersonalPrompt[]> {
+  const res = await fetchCommandVaultFromSupabase();
+  return res.personalPrompts;
 }
 
 export async function insertCommandVaultOnSupabase(
@@ -938,6 +1075,229 @@ export async function deleteCommandVaultOnSupabase(id: string): Promise<void> {
   const { error } = await supabase.from('command_vault').delete().eq('id', id);
   if (error) {
     throw new Error(error.message || 'Không thể xóa mục khỏi command_vault.');
+  }
+}
+
+export async function deleteCommandVaultRowOnSupabase(
+  id: string
+): Promise<boolean> {
+  try {
+    await deleteCommandVaultOnSupabase(id);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function insertSharedPromptOnSupabase(
+  prompt: Omit<SharedPrompt, 'id' | 'createdAt'>
+): Promise<{ ok: boolean; message?: string }> {
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    const uid = sessionData.session?.user?.id || prompt.creatorId;
+    await insertCommandVaultOnSupabase(uid, {
+      vaultType: 'shared',
+      ...prompt,
+    });
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      message: err instanceof Error ? err.message : 'Không thể đăng lệnh chia sẻ.',
+    };
+  }
+}
+
+export async function updateSharedPromptOnSupabase(
+  prompt: SharedPrompt
+): Promise<boolean> {
+  try {
+    await updateCommandVaultOnSupabase(prompt.id, {
+      vaultType: 'shared',
+      title: prompt.title,
+      creatorId: prompt.creatorId,
+      characterId: prompt.characterId,
+      tags: prompt.tags,
+      usageNote: prompt.usageNote,
+      content: prompt.content,
+      imageUrl: prompt.imageUrl,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function insertPersonalPromptOnSupabase(
+  prompt: Omit<PersonalPrompt, 'id' | 'createdAt'>
+): Promise<{ ok: boolean; message?: string }> {
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    const uid = sessionData.session?.user?.id;
+    if (!uid) {
+      return { ok: false, message: 'Vui lòng đăng nhập để lưu vào Kho lệnh.' };
+    }
+    await insertCommandVaultOnSupabase(uid, {
+      vaultType: 'personal',
+      ...prompt,
+    });
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      message: err instanceof Error ? err.message : 'Không thể lưu vào Kho lệnh.',
+    };
+  }
+}
+
+export async function updatePersonalPromptOnSupabase(
+  prompt: PersonalPrompt
+): Promise<boolean> {
+  try {
+    await updateCommandVaultOnSupabase(prompt.id, {
+      vaultType: 'personal',
+      title: prompt.title,
+      folder: prompt.folder,
+      tags: prompt.tags,
+      content: prompt.content,
+      starred: prompt.starred,
+      sourceCreatorName: prompt.sourceCreatorName,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Các hàm tương thích với MiniGameTab (DbInventoryRow, rollGachaOnSupabase, v.v.)
+ */
+export interface DbInventoryRow {
+  id: string;
+  user_id: string;
+  item_type: string;
+  item_name: string;
+  rarity: string | null;
+  color?: string | null;
+  ready_at: string | null;
+  created_at: string;
+  count?: number | null;
+}
+
+export async function fetchMyInventoryFromSupabase(): Promise<DbInventoryRow[]> {
+  const { data: sessionData } = await supabase.auth.getSession();
+  const uid = sessionData.session?.user?.id;
+  if (!uid) return [];
+
+  const { data, error } = await supabase
+    .from('inventory')
+    .select('id, user_id, kind, name, rarity, ready_at, created_at, count')
+    .eq('user_id', uid)
+    .order('created_at', { ascending: false });
+
+  if (error || !Array.isArray(data)) return [];
+  return (data as SupabaseInventoryRow[]).map((r) => ({
+    id: r.id,
+    user_id: r.user_id,
+    item_type: r.kind || 'flower',
+    item_name: r.name || 'Vật phẩm',
+    rarity: r.rarity || 'common',
+    ready_at: r.ready_at,
+    created_at: r.created_at,
+    count: r.count ?? 1,
+  }));
+}
+
+export async function fetchMyDailyRollToday(): Promise<boolean> {
+  return fetchHasRolledTodayFromSupabase();
+}
+
+export async function rollGachaOnSupabase(): Promise<{
+  ok: boolean;
+  error?: string;
+  item?: DbInventoryRow;
+}> {
+  try {
+    const res = await rollDailyGachaViaRpc();
+    const raw = res.rawResult as Record<string, unknown> | null;
+    const latest = res.updatedInventory[0];
+    if (latest) {
+      return {
+        ok: true,
+        item: {
+          id: latest.id,
+          user_id: '',
+          item_type: latest.category,
+          item_name: latest.name,
+          rarity: latest.rarity,
+          color: latest.visual.primaryColor,
+          ready_at: latest.readyAt,
+          created_at: latest.createdAt,
+          count: latest.count,
+        },
+      };
+    }
+    if (raw && typeof raw === 'object') {
+      return {
+        ok: true,
+        item: {
+          id: String(raw.id || `gacha_${Date.now()}`),
+          user_id: String(raw.user_id || ''),
+          item_type: String(raw.kind || raw.item_type || 'flower'),
+          item_name: String(raw.name || raw.item_name || 'Hoa Sương Mai Ngọt'),
+          rarity: String(raw.rarity || 'common'),
+          ready_at: raw.ready_at ? String(raw.ready_at) : null,
+          created_at: new Date().toISOString(),
+        },
+      };
+    }
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      error:
+        err instanceof Error
+          ? err.message
+          : 'Hôm nay bạn đã nhận rồi, mai quay lại nhé',
+    };
+  }
+}
+
+export async function updateInventoryItemReadyAt(
+  id: string,
+  readyAtIso: string | null
+): Promise<boolean> {
+  try {
+    const { error } = await supabase
+      .from('inventory')
+      .update({ ready_at: readyAtIso })
+      .eq('id', id);
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
+export async function insertCraftedDrinkToInventory(params: {
+  item_type: string;
+  item_name: string;
+  rarity: string;
+  color?: string;
+}): Promise<boolean> {
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    const uid = sessionData.session?.user?.id;
+    if (!uid) return false;
+    const { error } = await supabase.from('inventory').insert({
+      user_id: uid,
+      kind: params.item_type || 'drink',
+      name: params.item_name,
+      rarity: params.rarity || 'common',
+      ready_at: null,
+    });
+    return !error;
+  } catch {
+    return false;
   }
 }
 
@@ -1098,3 +1458,4 @@ export async function updateFeedbackEnvelopeOnSupabase(
     throw new Error(error.message || 'Không thể cập nhật Feedback.');
   }
 }
+

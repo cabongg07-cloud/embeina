@@ -36,6 +36,7 @@ export interface GeneratedGameItem {
   hungerFullUntil?: number; // timestamp ms khi thú cưng đang no
   // Thuộc tính riêng cho Hoa / Thức uống
   sweetnessNote?: string;
+  readyAt?: string | null;
 }
 
 export type GardenStage = 0 | 1 | 2 | 3 | 4; // 0: Hạt, 1: Nảy mầm, 2: Cây con, 3: Nụ, 4: Nở

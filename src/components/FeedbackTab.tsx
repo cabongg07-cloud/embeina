@@ -16,10 +16,12 @@ import {
   CharacterItem,
   FeedbackItem,
   FeedbackTargetType,
-  FEEDBACKS_COLLECTION,
-  INITIAL_FEEDBACKS,
 } from '../data/sampleData';
-import { dataStore } from '../services/dataLayer';
+import {
+  fetchFeedbacksFromSupabase,
+  insertFeedbackOnSupabase,
+  updateFeedbackEnvelopeOnSupabase,
+} from '../services/supabaseService';
 import { AuthUser, can } from '../services/authLayer';
 import { EditableText } from './EditableText';
 
@@ -42,16 +44,22 @@ export const FeedbackTab: React.FC<FeedbackTabProps> = ({
   customTexts = {},
   onUpdateCustomText,
 }) => {
-  const [feedbacks, setFeedbacks] = useState<FeedbackItem[]>(() => {
-    const list = dataStore.list<FeedbackItem>(FEEDBACKS_COLLECTION);
-    return list.length > 0 ? list : INITIAL_FEEDBACKS;
-  });
+  const [feedbacks, setFeedbacks] = useState<FeedbackItem[]>([]);
+  const [loadingFeedbacks, setLoadingFeedbacks] = useState<boolean>(true);
+
+  const reloadFeedbacks = async () => {
+    try {
+      const rows = await fetchFeedbacksFromSupabase();
+      setFeedbacks(rows);
+    } catch {
+      // Ignore error
+    } finally {
+      setLoadingFeedbacks(false);
+    }
+  };
 
   useEffect(() => {
-    const list = dataStore.list<FeedbackItem>(FEEDBACKS_COLLECTION);
-    if (list.length > 0) {
-      setFeedbacks(list);
-    }
+    reloadFeedbacks();
   }, []);
 
   const canWrite = can('write_feedback', currentUser);
@@ -131,7 +139,7 @@ export const FeedbackTab: React.FC<FeedbackTabProps> = ({
     setShowWriteForm((prev) => !prev);
   };
 
-  const handleSubmitFeedback = (e: React.FormEvent) => {
+  const handleSubmitFeedback = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!canWrite) {
       onRequireAuth(
@@ -158,58 +166,76 @@ export const FeedbackTab: React.FC<FeedbackTabProps> = ({
       creatorId = ch?.creatorId;
     }
 
-    const added = dataStore.add<FeedbackItem>(FEEDBACKS_COLLECTION, {
-      targetType,
-      targetId,
-      targetName,
-      creatorId,
-      authorId: currentUser.id,
-      authorName: isAnonymous
-        ? 'Một người bạn ẩn danh'
-        : currentUser.displayName || 'Bạn Nhỏ',
-      isAnonymous,
-      rating: Math.max(1, Math.min(5, rating)),
-      content: content.trim(),
-      hearts: 1,
-      isRead: false,
-      replies: [],
-    });
+    try {
+      await insertFeedbackOnSupabase({
+        authorId: currentUser.id,
+        authorName: currentUser.displayName || 'Bạn Nhỏ',
+        rating: Math.max(1, Math.min(5, rating)),
+        content: content.trim(),
+        anonymous: isAnonymous,
+        targetType,
+        targetId,
+        targetName,
+        creatorId,
+      });
 
-    if (added) {
-      setFeedbacks(dataStore.list<FeedbackItem>(FEEDBACKS_COLLECTION));
+      await reloadFeedbacks();
       setContent('');
       setRating(5);
       setIsAnonymous(false);
       setShowWriteForm(false);
-      setSubmitToast('✨ Cảm ơn bạn đã gửi Feedback ấm áp!');
+      setSubmitToast('✨ Cảm ơn bạn đã gửi Feedback ấm áp lên Supabase!');
       setTimeout(() => setSubmitToast(null), 3500);
+    } catch (err) {
+      setSubmitToast(
+        err instanceof Error
+          ? err.message
+          : 'Không thể gửi Feedback lúc này, bạn thử lại nhé 🌸'
+      );
+      setTimeout(() => setSubmitToast(null), 4000);
     }
   };
 
-  const handleHeartFeedback = (fbId: string) => {
+  const handleHeartFeedback = async (fbId: string) => {
     if (!can('heart_love_message', currentUser)) {
       onRequireAuth('Mời bạn đăng nhập để thả tim cho Feedback này nhé 🌸');
       return;
     }
     const target = feedbacks.find((f) => f.id === fbId);
     if (!target) return;
-    dataStore.update<FeedbackItem>(FEEDBACKS_COLLECTION, fbId, {
+    const updatedItem: FeedbackItem = {
+      ...target,
       hearts: (target.hearts || 0) + 1,
-    });
-    setFeedbacks(dataStore.list<FeedbackItem>(FEEDBACKS_COLLECTION));
+    };
+    setFeedbacks((prev) =>
+      prev.map((f) => (f.id === fbId ? updatedItem : f))
+    );
+    try {
+      await updateFeedbackEnvelopeOnSupabase(fbId, updatedItem);
+    } catch {
+      // Ignore if RLS restricts non-owner update
+    }
   };
 
-  const handleToggleRead = (fbId: string) => {
+  const handleToggleRead = async (fbId: string) => {
     if (!canManage) return;
     const target = feedbacks.find((f) => f.id === fbId);
     if (!target) return;
-    dataStore.update<FeedbackItem>(FEEDBACKS_COLLECTION, fbId, {
+    const updatedItem: FeedbackItem = {
+      ...target,
       isRead: !target.isRead,
-    });
-    setFeedbacks(dataStore.list<FeedbackItem>(FEEDBACKS_COLLECTION));
+    };
+    setFeedbacks((prev) =>
+      prev.map((f) => (f.id === fbId ? updatedItem : f))
+    );
+    try {
+      await updateFeedbackEnvelopeOnSupabase(fbId, updatedItem);
+    } catch {
+      // Ignore error
+    }
   };
 
-  const handleCreatorReply = (fbId: string) => {
+  const handleCreatorReply = async (fbId: string) => {
     if (!canManage) return;
     const text = (replyDrafts[fbId] || '').trim();
     if (!text) return;
@@ -223,13 +249,22 @@ export const FeedbackTab: React.FC<FeedbackTabProps> = ({
       createdAt: new Date().toISOString(),
     };
 
-    dataStore.update<FeedbackItem>(FEEDBACKS_COLLECTION, fbId, {
+    const updatedItem: FeedbackItem = {
+      ...target,
       replies: [...(target.replies || []), newReply],
       isRead: true,
-    });
+    };
 
-    setFeedbacks(dataStore.list<FeedbackItem>(FEEDBACKS_COLLECTION));
+    setFeedbacks((prev) =>
+      prev.map((f) => (f.id === fbId ? updatedItem : f))
+    );
     setReplyDrafts((prev) => ({ ...prev, [fbId]: '' }));
+
+    try {
+      await updateFeedbackEnvelopeOnSupabase(fbId, updatedItem);
+    } catch {
+      // Ignore error
+    }
   };
 
   const averageRating = useMemo(() => {

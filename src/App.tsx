@@ -3,27 +3,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Hằng số chế độ xác thực ("demo" hoặc "real") theo yêu cầu:
-// - "demo": hiện nút chuyển vai nhanh Khách / Người dùng / Creator để thử giao diện, không cần đăng nhập thật.
-// - "real": ẩn nút chuyển vai nhanh, bắt buộc đăng nhập qua lớp authService (sẵn sàng nối Firebase/Supabase Auth).
-export const AUTH_MODE: 'demo' | 'real' = 'demo';
-
-// Hằng số để bạn tự điền các đường dẫn file .mp3 mặc định trong code (ngoài ra Chủ web có thể thêm/xóa trực tiếp trong bảng "Cài đặt trang"):
+// Hằng số để điền các đường dẫn file .mp3 mặc định trong code (ngoài ra Chủ web có thể thêm/xóa trực tiếp trong bảng "Cài đặt trang" lưu lên site_settings của Supabase):
 export const MUSIC_URLS: string[] = [];
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
-  Volume2,
-  VolumeX,
-  Palette,
   Download,
   Upload,
   Command,
-  UserCheck,
   LogOut,
   LogIn,
   Lock,
-  CheckCircle2,
   Crown,
 } from 'lucide-react';
 import {
@@ -42,16 +32,30 @@ import {
 import {
   SiteConfig,
   getSiteConfig,
-  saveSiteConfig,
+  fetchSiteSettingsFromSupabase,
+  upsertSiteSettingsOnSupabase,
   updateCustomText,
+  undoSiteSettingsOnSupabase,
+  resetSiteSettingsToDefaultsOnSupabase,
+  getSiteSettingsUndoCount,
+  getSiteSettingsLastUndoLabel,
+  onSiteSettingsChange,
 } from './services/siteSettings';
+import {
+  fetchCharsAndCreatorsFromSupabase,
+  createCharOnSupabase,
+  updateCharOnSupabase,
+  deleteCharOnSupabase,
+  fetchInventoryFromSupabase,
+  fetchUnlockedCharIdsFromSupabase,
+  SupabaseInventoryItem,
+} from './services/supabaseService';
 import { SparkleCanvas } from './components/SparkleCanvas';
 import { GateOverlay } from './components/GateOverlay';
 import { AuthModal } from './components/AuthModal';
 import { EditableText } from './components/EditableText';
 import { EditModeSystem } from './components/EditModeSystem';
 import {
-  ensureInitialLibraryData,
   Creator,
   CharacterItem,
   UserRole,
@@ -87,17 +91,15 @@ import {
   musicIdbStorage,
 } from './services/musicService';
 
+// GHI CHÚ: Chỉ giữ localStorage cho sở thích riêng từng người (sáng/tối, âm lượng, màu nhấn đã chọn, ghi chú/yêu thích cá nhân)
 const THEME_STORAGE_KEY = 'selected_theme_id';
 const COLOR_MODE_STORAGE_KEY = 'selected_color_mode';
 const VOLUME_STORAGE_KEY = 'ambient_volume';
 const FAVORITES_STORAGE_KEY = 'favorite_char_ids';
 const NOTES_STORAGE_KEY = 'personal_char_notes';
 const PETALS_STORAGE_KEY = 'petals_balance';
-const UNLOCKED_CHARS_KEY = 'unlocked_char_ids';
 const LAST_DAILY_VISIT_KEY = 'last_daily_visit_date';
 const EDIT_GUIDE_SEEN_KEY = 'edit_mode_guide_seen_v1';
-const CREATORS_COLLECTION = 'creators';
-const CHARACTERS_COLLECTION = 'characters';
 
 interface WebAudioSynthNodes {
   ctx: AudioContext;
@@ -134,13 +136,15 @@ function getInitialColorMode(defaultModeSetting?: ColorMode | 'system'): ColorMo
 }
 
 export default function App() {
-  // Cấu hình toàn trang ("Cài đặt trang") lưu qua dataStore (localStorage)
-  // GHI CHÚ: Hiện tại mọi chỉnh sửa lưu trên trình duyệt của người sửa; khi nối database thật sẽ đồng bộ cho mọi người.
-  const [siteConfig, setSiteConfig] = useState<SiteConfig>(() => getSiteConfig());
+  // Cấu hình toàn trang ("Cài đặt trang") đọc trực tiếp từ bảng `site_settings` trên Supabase cho MỌI người (kể cả Khách).
+  // Tuyệt đối không đọc nội dung hiển thị từ localStorage nữa.
+  const [siteConfig, setSiteConfig] = useState<SiteConfig>(() =>
+    getSiteConfig(MUSIC_URLS)
+  );
 
-  // Khởi tạo màu nhấn (5 màu pastel từ siteConfig.themes)
+  // Khởi tạo màu nhấn (5 màu pastel từ siteConfig.themes; sở thích chọn màu của từng người lưu ở localStorage)
   const [activeThemeId, setActiveThemeId] = useState<string>(() => {
-    const initialCfg = getSiteConfig();
+    const initialCfg = getSiteConfig(MUSIC_URLS);
     const saved = dataStore.get<string>(
       THEME_STORAGE_KEY,
       initialCfg.themes[0]?.id || THEMES[0].id
@@ -150,16 +154,16 @@ export default function App() {
       : initialCfg.themes[0]?.id || THEMES[0].id;
   });
 
-  // Khởi tạo chế độ Sáng / Tối
+  // Khởi tạo chế độ Sáng / Tối (sở thích riêng từng người lưu ở localStorage)
   const [colorMode, setColorMode] = useState<ColorMode>(() =>
-    getInitialColorMode(getSiteConfig().defaultColorMode)
+    getInitialColorMode(getSiteConfig(MUSIC_URLS).defaultColorMode)
   );
 
   // Trạng thái cổng fullscreen
   const [gateClosing, setGateClosing] = useState(false);
   const [gateClosed, setGateClosed] = useState(false);
 
-  // Người dùng hiện tại từ lớp authService
+  // Người dùng hiện tại từ lớp authService (Supabase Auth thật)
   const [currentUser, setCurrentUser] = useState<AuthUser>(() =>
     authService.getCurrentUser()
   );
@@ -167,16 +171,16 @@ export default function App() {
   const [authPromptReason, setAuthPromptReason] = useState<string | null>(null);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
 
-  // Trạng thái CHẾ ĐỘ CHỈNH SỬA (Chỉ dành cho Creator qua can("edit", currentUser))
+  // Trạng thái CHẾ ĐỘ CHỈNH SỬA (Chỉ dành cho vai `owner` qua can("edit", currentUser))
   const [editMode, setEditMode] = useState(false);
   const [showEditGuideModal, setShowEditGuideModal] = useState(false);
 
-  // Trạng thái Undo & đồng bộ dữ liệu khi Hoàn tác / Khôi phục mặc định
+  // Trạng thái Undo của site_settings
   const [undoCount, setUndoCount] = useState<number>(() =>
-    dataStore.getUndoCount()
+    getSiteSettingsUndoCount()
   );
   const [lastUndoLabel, setLastUndoLabel] = useState<string | null>(() =>
-    dataStore.getLastUndoLabel()
+    getSiteSettingsLastUndoLabel()
   );
   const [dataRevision, setDataRevision] = useState<number>(0);
 
@@ -188,7 +192,7 @@ export default function App() {
     return unsubscribe;
   }, []);
 
-  // Bảo vệ nghiêm ngặt: Nếu người dùng không có quyền can("edit"), tự động tắt ngay Chế độ chỉnh sửa
+  // Bảo vệ nghiêm ngặt: Chỉ vai `owner` (can("edit", currentUser)) mới thấy và dùng được nút ✏️ Chỉnh sửa và Cài đặt trang
   const hasEditPermission = can('edit', currentUser);
   useEffect(() => {
     if (!hasEditPermission && editMode) {
@@ -199,11 +203,12 @@ export default function App() {
 
   const isEditActive = Boolean(editMode && hasEditPermission);
 
-  // Lắng nghe thay đổi trên dataStore để cập nhật số bước Hoàn tác (Undo) & cấu hình
+  // Lắng nghe thay đổi trên siteSettings (in-memory)
   useEffect(() => {
-    const unsubscribe = dataStore.onChange(() => {
-      setUndoCount(dataStore.getUndoCount());
-      setLastUndoLabel(dataStore.getLastUndoLabel());
+    const unsubscribe = onSiteSettingsChange((cfg) => {
+      setSiteConfig(cfg);
+      setUndoCount(getSiteSettingsUndoCount());
+      setLastUndoLabel(getSiteSettingsLastUndoLabel());
     });
     return unsubscribe;
   }, []);
@@ -214,13 +219,15 @@ export default function App() {
     setAuthModalOpen(true);
   }, []);
 
-  // Tiền tệ ("Cánh hoa" hoặc tên tùy chỉnh trong Cài đặt trang) & danh sách char đã mở khóa
+  // Tiền tệ phụ trợ trong mini game & danh sách char đã mở khóa đọc từ bảng `unlocks` của Supabase
   const [petalsBalance, setPetalsBalance] = useState<number>(() =>
     dataStore.get<number>(PETALS_STORAGE_KEY, 45)
   );
-  const [unlockedCharIds, setUnlockedCharIds] = useState<string[]>(() =>
-    dataStore.get<string[]>(UNLOCKED_CHARS_KEY, [])
-  );
+  const [unlockedCharIds, setUnlockedCharIds] = useState<string[]>([]);
+  const [supabaseInventory, setSupabaseInventory] = useState<
+    SupabaseInventoryItem[]
+  >([]);
+  const [isLoadingChars, setIsLoadingChars] = useState<boolean>(true);
   const [dailyToast, setDailyToast] = useState<string | null>(null);
 
   const notifyToast = useCallback((msg: string, duration = 3800) => {
@@ -228,6 +235,29 @@ export default function App() {
     setTimeout(() => {
       setDailyToast((prev) => (prev === msg ? null : prev));
     }, duration);
+  }, []);
+
+  // Khi mở web, MỌI người (kể cả Khách) đọc `site_settings` từ Supabase để hiển thị đúng bản mới nhất
+  useEffect(() => {
+    let active = true;
+    fetchSiteSettingsFromSupabase(MUSIC_URLS).then((loadedCfg) => {
+      if (!active) return;
+      setSiteConfig(loadedCfg);
+      const savedUserColor = dataStore.get<string | null>(
+        COLOR_MODE_STORAGE_KEY,
+        null
+      );
+      if (
+        !savedUserColor &&
+        (loadedCfg.defaultColorMode === 'light' ||
+          loadedCfg.defaultColorMode === 'dark')
+      ) {
+        setColorMode(loadedCfg.defaultColorMode);
+      }
+    });
+    return () => {
+      active = false;
+    };
   }, []);
 
   // Danh sách tab hiển thị theo cấu hình trang & phân quyền:
@@ -262,13 +292,46 @@ export default function App() {
     }
   }, [visibleTabs, activeTabId]);
 
-  // Dữ liệu Creator & Character khởi tạo từ dataLayer
+  // Dữ liệu Creator & Character đọc từ bảng `chars` và view `public_profiles` trên Supabase
   const [libraryData, setLibraryData] = useState<{
     creators: Creator[];
     characters: CharacterItem[];
-  }>(() => ensureInitialLibraryData());
+  }>({ creators: [], characters: [] });
 
-  // Danh sách yêu thích & ghi chú cá nhân lưu qua dataStore
+  const refreshLibraryData = useCallback(async () => {
+    setIsLoadingChars(true);
+    try {
+      const res = await fetchCharsAndCreatorsFromSupabase();
+      setLibraryData(res);
+    } finally {
+      setIsLoadingChars(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshLibraryData();
+  }, [refreshLibraryData]);
+
+  // Khi người dùng đăng nhập / đổi phiên, tải `inventory` và `unlocks` từ Supabase
+  const refreshUserInventoryAndUnlocks = useCallback(async () => {
+    if (!currentUser || currentUser.profileRole === 'guest') {
+      setUnlockedCharIds([]);
+      setSupabaseInventory([]);
+      return;
+    }
+    const [inv, unl] = await Promise.all([
+      fetchInventoryFromSupabase(),
+      fetchUnlockedCharIdsFromSupabase(),
+    ]);
+    setSupabaseInventory(inv);
+    setUnlockedCharIds(unl);
+  }, [currentUser]);
+
+  useEffect(() => {
+    refreshUserInventoryAndUnlocks();
+  }, [refreshUserInventoryAndUnlocks]);
+
+  // Danh sách yêu thích & ghi chú cá nhân
   const [favoriteIds, setFavoriteIds] = useState<string[]>(() =>
     dataStore.get<string[]>(FAVORITES_STORAGE_KEY, [])
   );
@@ -286,21 +349,24 @@ export default function App() {
   const fileImportRef = useRef<HTMLInputElement | null>(null);
 
   // ============================================================================
-  // HỆ THỐNG NHẠC & PLAYLIST (Nhớ bài, vị trí, âm lượng, chế độ bằng localStorage try/catch)
+  // HỆ THỐNG NHẠC & 2 PLAYLIST ("Playlist của web" trên site_settings & "Playlist của tôi")
   // ============================================================================
-  const effectiveMusicUrls = useMemo(() => {
-    const combined = [...MUSIC_URLS, ...(siteConfig.musicUrls || [])]
-      .map((u) => u.trim())
-      .filter(Boolean);
-    return Array.from(new Set(combined));
-  }, [siteConfig.musicUrls]);
-
-  const [playlist, setPlaylist] = useState<MusicTrack[]>(() =>
-    getSavedPlaylist([
-      ...MUSIC_URLS,
-      ...(getSiteConfig().musicUrls || []),
-    ])
+  const [playlistSource, setPlaylistSource] = useState<'web' | 'personal'>('web');
+  const [personalPlaylist, setPersonalPlaylist] = useState<MusicTrack[]>(() =>
+    getSavedPlaylist([])
   );
+
+  const webPlaylist = useMemo(() => {
+    return siteConfig.webPlaylistTracks && siteConfig.webPlaylistTracks.length > 0
+      ? siteConfig.webPlaylistTracks
+      : BUILTIN_SYNTH_TRACKS;
+  }, [siteConfig.webPlaylistTracks]);
+
+  const playlist = useMemo(() => {
+    return playlistSource === 'web' ? webPlaylist : personalPlaylist;
+  }, [playlistSource, webPlaylist, personalPlaylist]);
+
+  const canEditWebPlaylist = can('edit', currentUser);
 
   const initialPlayerState = useMemo(
     () => getSavedPlayerState(playlist[0]?.id || BUILTIN_SYNTH_TRACKS[0].id),
@@ -326,12 +392,6 @@ export default function App() {
   const audioElRef = useRef<HTMLAudioElement | null>(null);
   const currentTimeRef = useRef<number>(initialPlayerState.currentTime);
   const loadedTrackIdRef = useRef<string | null>(null);
-
-  // Đồng bộ các link thêm từ "Cài đặt trang" vào Playlist
-  useEffect(() => {
-    const synced = getSavedPlaylist(effectiveMusicUrls);
-    setPlaylist(synced);
-  }, [effectiveMusicUrls]);
 
   const currentTrack = useMemo(() => {
     return (
@@ -378,7 +438,7 @@ export default function App() {
     setColorMode((prev) => (prev === 'light' ? 'dark' : 'light'));
   }, []);
 
-  // Bật / tắt Chế độ chỉnh sửa (Chỉ hoạt động khi can("edit", currentUser) === true)
+  // Bật / tắt Chế độ chỉnh sửa (Chỉ hoạt động khi can("edit", currentUser) === true — tức là vai `owner`)
   const handleToggleEditMode = useCallback(() => {
     if (!can('edit', currentUser)) return;
     setEditMode((prev) => {
@@ -394,57 +454,67 @@ export default function App() {
     });
   }, [currentUser]);
 
-  // Cập nhật cấu hình trang (SiteConfig)
+  // Cập nhật cấu hình trang (SiteConfig) -> Lưu bằng upsert vào bảng `site_settings` trên Supabase
   const handleUpdateSiteConfig = useCallback(
-    (patch: Partial<SiteConfig>, undoLabel = 'Cập nhật cài đặt trang') => {
-      if (!can('edit', currentUser)) return;
-      const next = saveSiteConfig(patch, undoLabel);
-      setSiteConfig(next);
+    async (patch: Partial<SiteConfig>, undoLabel = 'Cập nhật cài đặt trang') => {
+      if (!can('edit', currentUser)) {
+        notifyToast('🔒 Chỉ Chủ web (owner) mới có quyền chỉnh sửa cài đặt trang.');
+        return;
+      }
       if (patch.defaultColorMode === 'light' || patch.defaultColorMode === 'dark') {
         setColorMode(patch.defaultColorMode);
       }
+      const res = await upsertSiteSettingsOnSupabase(patch, undoLabel);
+      setSiteConfig(res.config);
+      if (res.ok) {
+        notifyToast('✨ Đã lưu');
+      } else {
+        notifyToast(`⚠️ ${res.message}`, 5000);
+      }
     },
-    [currentUser]
+    [currentUser, notifyToast]
   );
 
-  // Cập nhật văn bản sửa trực tiếp trên giao diện (tự lưu ngay)
+  // Cập nhật văn bản sửa trực tiếp trên giao diện (tự lưu ngay lên key "texts" của site_settings)
   const handleUpdateCustomText = useCallback(
-    (key: string, value: string) => {
+    (key: string, value: string, fallback = '') => {
       if (!can('edit', currentUser)) return;
-      const next = updateCustomText(key, value, '');
+      const next = updateCustomText(key, value, fallback, (res) => {
+        if (res.ok) {
+          notifyToast('✨ Đã lưu');
+        } else {
+          notifyToast(`⚠️ ${res.message}`, 5000);
+        }
+      });
       setSiteConfig(next);
     },
-    [currentUser]
+    [currentUser, notifyToast]
   );
 
-  // Hoàn tác (Undo) thao tác chỉnh sửa gần nhất
-  const handleUndo = useCallback(() => {
+  // Hoàn tác (Undo) thao tác chỉnh sửa gần nhất trên `site_settings`
+  const handleUndo = useCallback(async () => {
     if (!can('edit', currentUser)) return;
-    const res = dataStore.undo();
-    if (res) {
-      const freshCfg = getSiteConfig();
-      setSiteConfig(freshCfg);
-      setLibraryData(ensureInitialLibraryData());
-      setDataRevision((r) => r + 1);
-      notifyToast(`↩️ Đã hoàn tác: ${res.label || 'Thao tác gần nhất'}`);
+    const res = await undoSiteSettingsOnSupabase();
+    setSiteConfig(res.config);
+    setDataRevision((r) => r + 1);
+    if (res.ok) {
+      notifyToast(`↩️ ${res.message}`);
+    } else {
+      notifyToast(`⚠️ ${res.message}`, 5000);
     }
   }, [currentUser, notifyToast]);
 
-  // Khôi phục mặc định toàn bộ dữ liệu
-  const handleResetDefaults = useCallback(() => {
+  // Khôi phục mặc định toàn bộ cấu hình trang trên `site_settings`
+  const handleResetDefaults = useCallback(async () => {
     if (!can('edit', currentUser)) return;
-    dataStore.resetAllToDefaults();
-    dataStore.set(EDIT_GUIDE_SEEN_KEY, true, true);
-    const freshData = ensureInitialLibraryData();
-    const freshCfg = getSiteConfig();
-    setLibraryData(freshData);
-    setSiteConfig(freshCfg);
-    setFavoriteIds(dataStore.get<string[]>(FAVORITES_STORAGE_KEY, []));
-    setNotesMap(dataStore.get<Record<string, string>>(NOTES_STORAGE_KEY, {}));
-    setPetalsBalance(dataStore.get<number>(PETALS_STORAGE_KEY, 45));
-    setUnlockedCharIds(dataStore.get<string[]>(UNLOCKED_CHARS_KEY, []));
+    const res = await resetSiteSettingsToDefaultsOnSupabase(MUSIC_URLS);
+    setSiteConfig(res.config);
     setDataRevision((r) => r + 1);
-    notifyToast('🌸 Đã khôi phục toàn bộ trang về dữ liệu mặc định ban đầu!');
+    if (res.ok) {
+      notifyToast('🌸 Đã lưu (Khôi phục mặc định trên Supabase)!');
+    } else {
+      notifyToast(`⚠️ ${res.message}`, 5000);
+    }
   }, [currentUser, notifyToast]);
 
   // Thưởng tiền tệ khi ghé thăm mỗi ngày
@@ -458,13 +528,8 @@ export default function App() {
         dataStore.set(PETALS_STORAGE_KEY, next, true);
         return next;
       });
-      const curCfg = getSiteConfig();
-      notifyToast(
-        `${curCfg.currencyEmoji} Quà ghé thăm góc nhỏ hôm nay: +15 ${curCfg.currencyName}!`,
-        5000
-      );
     }
-  }, [notifyToast]);
+  }, []);
 
   const handleAddPetals = useCallback((amount: number) => {
     setPetalsBalance((prev) => {
@@ -474,12 +539,11 @@ export default function App() {
     });
   }, []);
 
-  // Kiểm tra quyền qua hàm can() trước khi mở khóa nhân vật
   const handleUnlockCharWithPetals = useCallback(
     (charId: string, price: number): boolean => {
       if (!can('unlock_char', currentUser)) {
         handleRequireAuth(
-          `Mời bạn đăng nhập để dùng ${siteConfig.currencyName} mở khóa liên kết trò chuyện của nhân vật nhé ${siteConfig.currencyEmoji}`
+          `Mời bạn đăng nhập để mở khóa liên kết trò chuyện của nhân vật nhé ${siteConfig.currencyEmoji}`
         );
         return false;
       }
@@ -489,37 +553,27 @@ export default function App() {
         dataStore.set(PETALS_STORAGE_KEY, next, true);
         return next;
       });
-      setUnlockedCharIds((prev) => {
-        const next = prev.includes(charId) ? prev : [...prev, charId];
-        dataStore.set(UNLOCKED_CHARS_KEY, next, true);
-        return next;
-      });
+      setUnlockedCharIds((prev) => (prev.includes(charId) ? prev : [...prev, charId]));
       return true;
     },
-    [currentUser, petalsBalance, handleRequireAuth, siteConfig.currencyName, siteConfig.currencyEmoji]
+    [currentUser, petalsBalance, handleRequireAuth, siteConfig.currencyEmoji]
   );
 
-  // Mở khóa nhân vật vĩnh viễn bằng vật phẩm từ Mini game
+  // Mở khóa nhân vật vĩnh viễn bằng vật phẩm từ bảng `inventory` qua RPC `unlock_char`
   const handleUnlockCharWithItems = useCallback(
-    (charId: string) => {
-      setUnlockedCharIds((prev) => {
-        const next = prev.includes(charId) ? prev : [...prev, charId];
-        dataStore.set(UNLOCKED_CHARS_KEY, next, true);
-        return next;
-      });
+    async (charId: string) => {
+      setUnlockedCharIds((prev) =>
+        prev.includes(charId) ? prev : [...prev, charId]
+      );
+      await refreshUserInventoryAndUnlocks();
       const target = libraryData.characters.find((c) => c.id === charId);
       notifyToast(
         `✨ Đã mở khóa vĩnh viễn nhân vật "${target?.name || 'Char'}"! Link chat và Open Scene đã sẵn sàng.`,
         5000
       );
     },
-    [libraryData.characters, notifyToast]
+    [libraryData.characters, notifyToast, refreshUserInventoryAndUnlocks]
   );
-
-  // Chuyển vai nhanh khi ở chế độ AUTH_MODE === 'demo'
-  const handleDemoRoleSwitch = (nextRole: UserRole) => {
-    authService.switchDemoRole(nextRole);
-  };
 
   // Lưu âm lượng, bài đang chọn & chế độ phát vào localStorage (try/catch)
   useEffect(() => {
@@ -592,71 +646,83 @@ export default function App() {
   );
 
   // ============================================================================
-  // CRUD & Sắp xếp cho Creator và Character (Phân quyền Chủ web vs Creator thường)
+  // CRUD Nhân vật trên bảng `chars` và `char_secrets` của Supabase
   // ============================================================================
-  const refreshLibraryData = useCallback(() => {
-    setLibraryData({
-      creators: dataStore.list<Creator>(CREATORS_COLLECTION),
-      characters: dataStore.list<CharacterItem>(CHARACTERS_COLLECTION),
-    });
-  }, []);
-
   const handleAddCharacterByCreator = useCallback(
-    (newChar: Omit<CharacterItem, 'id'>) => {
+    async (newChar: Omit<CharacterItem, 'id'>) => {
       if (!can('manage_own_chars', currentUser)) {
         handleRequireAuth('Chỉ Creator mới có quyền thêm nhân vật mới.');
         return;
       }
-      const added = dataStore.add<CharacterItem>(
-        CHARACTERS_COLLECTION,
-        newChar
-      );
-      if (added) {
-        refreshLibraryData();
-        notifyToast(`✨ Đã thêm nhân vật "${added.name}" lên kệ sổ tay!`);
+      try {
+        await createCharOnSupabase({
+          creatorId: currentUser.id,
+          name: newChar.name,
+          imageUrl: newChar.imageUrl,
+          tags: newChar.tags,
+          description: newChar.description,
+          locked: Boolean(newChar.isLocked),
+          requirements: newChar.unlockRequirements || [],
+          chatLink: newChar.chatUrl || '',
+          openScene: newChar.openScene || newChar.openingLine || '',
+        });
+        await refreshLibraryData();
+        notifyToast(`✨ Đã thêm nhân vật "${newChar.name}" lên Supabase!`);
+      } catch (err) {
+        notifyToast(
+          err instanceof Error
+            ? `⚠️ ${err.message}`
+            : '⚠️ Không thể thêm nhân vật lên Supabase.',
+          5000
+        );
       }
     },
     [currentUser, handleRequireAuth, refreshLibraryData, notifyToast]
   );
 
   const handleUpdateCharacter = useCallback(
-    (charId: string, patch: Partial<CharacterItem>) => {
+    async (
+      charId: string,
+      patch: Partial<CharacterItem> & {
+        chatLink?: string;
+        openSceneSecret?: string;
+      }
+    ) => {
       const target = libraryData.characters.find((c) => c.id === charId);
       if (!target) return;
-      const canModify =
-        canEditItem(currentUser, target.creatorId) ||
-        (target.creatorName &&
-          currentUser.displayName &&
-          target.creatorName.toLowerCase() ===
-            currentUser.displayName.toLowerCase());
-      if (!canModify) return;
-      const updated = dataStore.update<CharacterItem>(
-        CHARACTERS_COLLECTION,
-        charId,
-        patch
-      );
-      if (updated) {
-        refreshLibraryData();
+      if (!canEditItem(currentUser, target.creatorId)) return;
+      try {
+        await updateCharOnSupabase(charId, patch);
+        await refreshLibraryData();
+        notifyToast('✨ Đã lưu cập nhật nhân vật lên Supabase!');
+      } catch (err) {
+        notifyToast(
+          err instanceof Error
+            ? `⚠️ ${err.message}`
+            : '⚠️ Không thể cập nhật nhân vật.',
+          5000
+        );
       }
     },
-    [currentUser, libraryData.characters, refreshLibraryData]
+    [currentUser, libraryData.characters, refreshLibraryData, notifyToast]
   );
 
   const handleDeleteCharacter = useCallback(
-    (charId: string) => {
+    async (charId: string) => {
       const target = libraryData.characters.find((c) => c.id === charId);
       if (!target) return;
-      const canModify =
-        canEditItem(currentUser, target.creatorId) ||
-        (target.creatorName &&
-          currentUser.displayName &&
-          target.creatorName.toLowerCase() ===
-            currentUser.displayName.toLowerCase());
-      if (!canModify) return;
-      const removed = dataStore.remove(CHARACTERS_COLLECTION, charId);
-      if (removed) {
-        refreshLibraryData();
-        notifyToast(`🗑️ Đã xóa nhân vật "${target.name}".`);
+      if (!canEditItem(currentUser, target.creatorId)) return;
+      try {
+        await deleteCharOnSupabase(charId);
+        await refreshLibraryData();
+        notifyToast(`🗑️ Đã xóa nhân vật "${target.name}" khỏi Supabase.`);
+      } catch (err) {
+        notifyToast(
+          err instanceof Error
+            ? `⚠️ ${err.message}`
+            : '⚠️ Không thể xóa nhân vật.',
+          5000
+        );
       }
     },
     [currentUser, libraryData.characters, refreshLibraryData, notifyToast]
@@ -665,16 +731,18 @@ export default function App() {
   const handleMoveCharacter = useCallback(
     (charId: string, direction: 'up' | 'down') => {
       if (!can('edit', currentUser)) return;
-      const moved = dataStore.moveItem<CharacterItem>(
-        CHARACTERS_COLLECTION,
-        charId,
-        direction
-      );
-      if (moved) {
-        refreshLibraryData();
-      }
+      setLibraryData((prev) => {
+        const idx = prev.characters.findIndex((c) => c.id === charId);
+        if (idx < 0) return prev;
+        const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
+        if (targetIdx < 0 || targetIdx >= prev.characters.length) return prev;
+        const copy = [...prev.characters];
+        const [moved] = copy.splice(idx, 1);
+        copy.splice(targetIdx, 0, moved);
+        return { ...prev, characters: copy };
+      });
     },
-    [currentUser, refreshLibraryData]
+    [currentUser]
   );
 
   const handleToggleSearchTag = useCallback((tag: string) => {

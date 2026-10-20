@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import {
   Heart,
   Send,
@@ -14,13 +14,15 @@ import {
   LoveMessage,
   CharacterRequest,
   RequestStatus,
+  SAMPLE_LOVE_MESSAGES,
 } from '../data/sampleData';
-import { dataStore } from '../services/dataLayer';
+import {
+  fetchRequestsFromSupabase,
+  insertRequestOnSupabase,
+  updateRequestOnSupabase,
+} from '../services/supabaseService';
 import { AuthUser, can } from '../services/authLayer';
 import { EditableText } from './EditableText';
-
-const LOVE_COLLECTION = 'love_messages';
-const REQUESTS_COLLECTION = 'requests';
 
 interface LoveCornerTabProps {
   creators: Creator[];
@@ -30,6 +32,8 @@ interface LoveCornerTabProps {
   editMode?: boolean;
   customTexts?: Record<string, string>;
   onUpdateCustomText?: (key: string, val: string) => void;
+  loveMessages?: LoveMessage[];
+  onUpdateLoveMessages?: (next: LoveMessage[], label?: string) => void;
 }
 
 export const LoveCornerTab: React.FC<LoveCornerTabProps> = ({
@@ -40,11 +44,20 @@ export const LoveCornerTab: React.FC<LoveCornerTabProps> = ({
   editMode = false,
   customTexts = {},
   onUpdateCustomText,
+  loveMessages,
+  onUpdateLoveMessages,
 }) => {
   const canEdit = Boolean(editMode && can('edit', currentUser));
   const [messages, setMessages] = useState<LoveMessage[]>(() =>
-    dataStore.list<LoveMessage>(LOVE_COLLECTION)
+    loveMessages && loveMessages.length > 0 ? loveMessages : SAMPLE_LOVE_MESSAGES
   );
+
+  useEffect(() => {
+    if (loveMessages && loveMessages.length > 0) {
+      setMessages(loveMessages);
+    }
+  }, [loveMessages]);
+
   const [displayMode, setDisplayMode] = useState<'all' | 'letter' | 'lantern'>(
     'all'
   );
@@ -53,6 +66,12 @@ export const LoveCornerTab: React.FC<LoveCornerTabProps> = ({
   const [targetValue, setTargetValue] = useState<string>(
     `character:${characters[0]?.id || ''}`
   );
+  useEffect(() => {
+    if (targetValue === 'character:' && characters[0]?.id) {
+      setTargetValue(`character:${characters[0].id}`);
+    }
+  }, [characters, targetValue]);
+
   const [senderName, setSenderName] = useState('');
   const [isAnonymous, setIsAnonymous] = useState(false);
   const [styleChoice, setStyleChoice] = useState<'letter' | 'lantern'>('lantern');
@@ -83,7 +102,8 @@ export const LoveCornerTab: React.FC<LoveCornerTabProps> = ({
         ? creators.find((c) => c.id === tId)?.name || 'Creator'
         : characters.find((c) => c.id === tId)?.name || 'Nhân vật';
 
-    const added = dataStore.add<LoveMessage>(LOVE_COLLECTION, {
+    const newItem: LoveMessage = {
+      id: `love_${Date.now()}`,
       targetType: tType,
       targetId: tId,
       targetName,
@@ -94,12 +114,13 @@ export const LoveCornerTab: React.FC<LoveCornerTabProps> = ({
       message: messageText.trim(),
       hearts: 1,
       style: styleChoice,
-    });
+      createdAt: new Date().toISOString().slice(0, 10),
+    };
 
-    if (added) {
-      setMessages(dataStore.list<LoveMessage>(LOVE_COLLECTION));
-      setMessageText('');
-    }
+    const next = [newItem, ...messages];
+    setMessages(next);
+    onUpdateLoveMessages?.(next, 'Thêm lời nhắn Góc yêu thương');
+    setMessageText('');
   };
 
   const handleHeartLove = (id: string) => {
@@ -107,12 +128,11 @@ export const LoveCornerTab: React.FC<LoveCornerTabProps> = ({
       onRequireAuth('Mời bạn đăng nhập để thả tim cho bức thư dễ thương này nhé 🌸');
       return;
     }
-    const target = messages.find((m) => m.id === id);
-    if (!target) return;
-    dataStore.update<LoveMessage>(LOVE_COLLECTION, id, {
-      hearts: (target.hearts || 0) + 1,
-    });
-    setMessages(dataStore.list<LoveMessage>(LOVE_COLLECTION));
+    const next = messages.map((m) =>
+      m.id === id ? { ...m, hearts: (m.hearts || 0) + 1 } : m
+    );
+    setMessages(next);
+    onUpdateLoveMessages?.(next, 'Thả tim lời nhắn');
   };
 
   return (
@@ -374,15 +394,28 @@ export const RequestTab: React.FC<RequestTabProps> = ({
   onUpdateCustomText,
 }) => {
   const canEdit = Boolean(editMode && can('edit', currentUser));
-  const [requests, setRequests] = useState<CharacterRequest[]>(() =>
-    dataStore.list<CharacterRequest>(REQUESTS_COLLECTION)
-  );
+  const [requests, setRequests] = useState<CharacterRequest[]>([]);
   const [creatorId, setCreatorId] = useState(creators[0]?.id || '');
   const [requesterName, setRequesterName] = useState('');
   const [reqTitle, setReqTitle] = useState('');
   const [reqDesc, setReqDesc] = useState('');
   const [reqTags, setReqTags] = useState('');
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
+
+  const reloadRequests = useCallback(async () => {
+    const list = await fetchRequestsFromSupabase();
+    setRequests(list);
+  }, []);
+
+  useEffect(() => {
+    reloadRequests();
+  }, [reloadRequests]);
+
+  useEffect(() => {
+    if (!creatorId && creators[0]?.id) {
+      setCreatorId(creators[0].id);
+    }
+  }, [creators, creatorId]);
 
   const canManageInbox = can('manage_requests_inbox', currentUser);
 
@@ -392,7 +425,7 @@ export const RequestTab: React.FC<RequestTabProps> = ({
     return map;
   }, [creators]);
 
-  const handleSubmitRequest = (e: React.FormEvent) => {
+  const handleSubmitRequest = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!can('create_request', currentUser)) {
       onRequireAuth(
@@ -407,7 +440,7 @@ export const RequestTab: React.FC<RequestTabProps> = ({
       .map((t) => t.trim())
       .filter(Boolean);
 
-    const added = dataStore.add<CharacterRequest>(REQUESTS_COLLECTION, {
+    const res = await insertRequestOnSupabase({
       creatorId,
       requesterName:
         requesterName.trim() || currentUser.displayName || 'Bạn Nhỏ',
@@ -415,18 +448,17 @@ export const RequestTab: React.FC<RequestTabProps> = ({
       description: reqDesc.trim(),
       tags: tags.length > 0 ? tags : ['Ý tưởng mới'],
       status: 'pending',
-      replies: [],
     });
 
-    if (added) {
-      setRequests(dataStore.list<CharacterRequest>(REQUESTS_COLLECTION));
+    if (res.ok) {
+      await reloadRequests();
       setReqTitle('');
       setReqDesc('');
       setReqTags('');
     }
   };
 
-  const handleAddReply = (reqId: string) => {
+  const handleAddReply = async (reqId: string) => {
     if (!can('reply_request', currentUser)) {
       onRequireAuth('Mời bạn đăng nhập để nhắn phản hồi trong hộp thư Request nhé 💬');
       return;
@@ -452,21 +484,29 @@ export const RequestTab: React.FC<RequestTabProps> = ({
     const nextStatus: RequestStatus =
       isCreator && item.status === 'pending' ? 'answered' : item.status;
 
-    dataStore.update<CharacterRequest>(REQUESTS_COLLECTION, reqId, {
+    const ok = await updateRequestOnSupabase({
+      ...item,
       replies: [...item.replies, newReply],
       status: nextStatus,
     });
 
-    setRequests(dataStore.list<CharacterRequest>(REQUESTS_COLLECTION));
-    setReplyDrafts((prev) => ({ ...prev, [reqId]: '' }));
+    if (ok) {
+      await reloadRequests();
+      setReplyDrafts((prev) => ({ ...prev, [reqId]: '' }));
+    }
   };
 
-  const handleChangeStatus = (reqId: string, nextStatus: RequestStatus) => {
+  const handleChangeStatus = async (reqId: string, nextStatus: RequestStatus) => {
     if (!canManageInbox) return;
-    dataStore.update<CharacterRequest>(REQUESTS_COLLECTION, reqId, {
+    const item = requests.find((r) => r.id === reqId);
+    if (!item) return;
+    const ok = await updateRequestOnSupabase({
+      ...item,
       status: nextStatus,
     });
-    setRequests(dataStore.list<CharacterRequest>(REQUESTS_COLLECTION));
+    if (ok) {
+      await reloadRequests();
+    }
   };
 
   return (

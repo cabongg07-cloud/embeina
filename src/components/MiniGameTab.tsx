@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   Sparkles,
   Droplets,
@@ -18,12 +18,18 @@ import {
 import {
   CharacterItem,
   PartnerDialogueItem,
-  DIALOGUES_COLLECTION,
   INITIAL_PARTNER_DIALOGUES,
 } from '../data/sampleData';
-import { dataStore } from '../services/dataLayer';
 import { AuthUser, can } from '../services/authLayer';
 import { EditableText } from './EditableText';
+import {
+  DbInventoryRow,
+  fetchMyInventoryFromSupabase,
+  fetchMyDailyRollToday,
+  rollGachaOnSupabase,
+  updateInventoryItemReadyAt,
+  insertCraftedDrinkToInventory,
+} from '../services/supabaseService';
 import {
   GeneratedGameItem,
   ItemCategory,
@@ -51,6 +57,60 @@ import {
 } from '../services/itemSystem';
 import { ProceduralItemSvg } from './ProceduralItemSvg';
 
+function mapDbInvRowToGameItem(row: DbInventoryRow): GeneratedGameItem {
+  const rawType = String(row.item_type || 'flower').toLowerCase();
+  const category: ItemCategory =
+    rawType === 'fish' || rawType === 'ca' || rawType === 'cá'
+      ? 'fish'
+      : rawType === 'pet' || rawType === 'thu_cung' || rawType === 'thú cưng'
+      ? 'pet'
+      : rawType === 'drink' || rawType === 'thuc_uong' || rawType === 'thức uống'
+      ? 'drink'
+      : 'flower';
+  const rawRarity = String(row.rarity || 'common').toLowerCase();
+  const rarity: ItemRarity =
+    rawRarity === 'legendary' || rawRarity === 'hiếm' || rawRarity === 'hiem'
+      ? 'legendary'
+      : rawRarity === 'rare' || rawRarity === 'quý' || rawRarity === 'quy'
+      ? 'rare'
+      : 'common';
+
+  let h = 2166136261;
+  const seedStr = row.item_name || row.id;
+  for (let i = 0; i < seedStr.length; i++) {
+    h ^= seedStr.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  const absH = Math.abs(h);
+  const palettes = [
+    { primary: '#F4A9B8', secondary: '#FDE2E8', accent: '#FFE599' },
+    { primary: '#B39DDB', secondary: '#EDE7F6', accent: '#FFD54F' },
+    { primary: '#81D4FA', secondary: '#E1F5FE', accent: '#FFF59D' },
+    { primary: '#A5D6A7', secondary: '#E8F5E9', accent: '#FFE082' },
+    { primary: '#FFCC80', secondary: '#FFF3E0', accent: '#F48FB1' },
+  ];
+  const pal = palettes[absH % palettes.length];
+
+  return {
+    id: row.id,
+    name: row.item_name,
+    category,
+    rarity,
+    visual: {
+      primaryColor: row.color || pal.primary,
+      secondaryColor: pal.secondary,
+      accentColor: pal.accent,
+      shapeVariant: absH % 6,
+      patternVariant: (absH >> 3) % 5,
+      petalOrFinCount: 5 + (absH % 6),
+      hasSparkle: rarity !== 'common',
+    },
+    createdAt: row.created_at || new Date().toISOString(),
+    description: `Vật phẩm ${CATEGORY_LABELS[category]} thuộc phẩm cấp ${RARITY_LABELS[rarity]} được lưu trữ trong Kho đồ Supabase.`,
+    readyAt: row.ready_at || null,
+  };
+}
+
 interface MiniGameTabProps {
   characters: CharacterItem[];
   petalsBalance: number;
@@ -61,6 +121,7 @@ interface MiniGameTabProps {
   currencyEmoji?: string;
   customTexts?: Record<string, string>;
   onUpdateCustomText?: (key: string, val: string) => void;
+  onInventoryChange?: (rows: DbInventoryRow[]) => void;
 }
 
 type MiniZone = 'gacha_inv' | 'garden' | 'pond' | 'companion' | 'drinks';
@@ -83,6 +144,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
   currencyEmoji = '🌸',
   customTexts = {},
   onUpdateCustomText,
+  onInventoryChange,
 }) => {
   const canEdit = Boolean(editMode && can('edit', currentUser));
 
@@ -92,7 +154,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
   // Đồng hồ thời gian thực (cập nhật mỗi giây cho Vườn hoa & Hồ cá)
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
 
-  // State chính từ itemSystem (dataLayer)
+  // State chính: Kho đồ đọc từ bảng inventory trên Supabase
   const [inventory, setInventory] = useState<GeneratedGameItem[]>(() =>
     getInventoryItems()
   );
@@ -107,10 +169,9 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
   );
 
   // Danh sách câu thoại dựng sẵn trong Phòng tri kỷ
-  const [dialogues, setDialogues] = useState<PartnerDialogueItem[]>(() => {
-    const list = dataStore.list<PartnerDialogueItem>(DIALOGUES_COLLECTION);
-    return list.length > 0 ? list : INITIAL_PARTNER_DIALOGUES;
-  });
+  const [dialogues] = useState<PartnerDialogueItem[]>(
+    () => INITIAL_PARTNER_DIALOGUES
+  );
 
   // Trạng thái Gacha & Kho đồ
   const [isRollingGacha, setIsRollingGacha] = useState(false);
@@ -149,6 +210,31 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
 
   const todayStr = new Date().toISOString().slice(0, 10);
   const hasFreeGachaToday = roomState.lastFreeGachaDate !== todayStr;
+
+  const refreshSupabaseInventoryAndRoll = useCallback(async () => {
+    if (!currentUser || currentUser.role === 'guest' || !currentUser.id) return;
+    const [invRows, rolledToday] = await Promise.all([
+      fetchMyInventoryFromSupabase(),
+      fetchMyDailyRollToday(),
+    ]);
+    onInventoryChange?.(invRows);
+    const mapped = invRows.map(mapDbInvRowToGameItem);
+    setInventory(mapped);
+    saveInventoryItems(mapped);
+
+    if (rolledToday) {
+      setRoomState((prev) => {
+        if (prev.lastFreeGachaDate === todayStr) return prev;
+        const next = { ...prev, lastFreeGachaDate: todayStr };
+        saveCompanionRoomState(next);
+        return next;
+      });
+    }
+  }, [currentUser, onInventoryChange, todayStr]);
+
+  useEffect(() => {
+    refreshSupabaseInventoryAndRoll();
+  }, [refreshSupabaseInventoryAndRoll]);
 
   // Cập nhật đồng hồ thời gian thực & sự phát triển tự nhiên của Cá trong hồ
   useEffect(() => {
@@ -243,39 +329,123 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
   };
 
   // ============================================================================
-  // 1. XỬ LÝ GACHA MỖI NGÀY & MUA LƯỢT ROLL
+  // 1. XỬ LÝ GACHA MỖI NGÀY: Gọi rpc roll_gacha trên Supabase
+  //    Lỗi already_rolled -> báo "Hôm nay bạn đã nhận rồi, mai quay lại nhé"
   // ============================================================================
-  const handleRollGacha = (useFreeRoll: boolean) => {
+  const handleRollGacha = async (useFreeRoll: boolean) => {
     if (isRollingGacha) return;
     const rollCost = 15;
 
     if (useFreeRoll) {
-      if (!hasFreeGachaToday) return;
-    } else {
-      if (petalsBalance < rollCost) {
-        showToast(
-          `Bạn cần ${rollCost} ${currencyName} để mở thêm hộp quà Gacha nhé 🌸`
-        );
+      if (!hasFreeGachaToday) {
+        showToast('Hôm nay bạn đã nhận rồi, mai quay lại nhé');
         return;
       }
-      onAddPetals(-rollCost);
+      setIsRollingGacha(true);
+      setLastGachaResult(null);
+
+      try {
+        const res = await rollGachaOnSupabase();
+        if (!res.ok) {
+          if (res.errorCode === 'already_rolled') {
+            const nextRoom = {
+              ...roomState,
+              lastFreeGachaDate: todayStr,
+            };
+            setRoomState(nextRoom);
+            saveCompanionRoomState(nextRoom);
+            showToast('Hôm nay bạn đã nhận rồi, mai quay lại nhé');
+          } else {
+            showToast(res.message);
+          }
+          return;
+        }
+
+        const nextRoom = {
+          ...roomState,
+          lastFreeGachaDate: todayStr,
+        };
+        setRoomState(nextRoom);
+        saveCompanionRoomState(nextRoom);
+        markDailyTaskReady('gacha');
+
+        await refreshSupabaseInventoryAndRoll();
+
+        if (res.item) {
+          const newItem = mapDbInvRowToGameItem(res.item);
+          let destinationNote =
+            '✨ Đã cất vật phẩm vào Kho đồ trên Supabase!';
+          if (newItem.category === 'flower') {
+            // Đưa hạt giống vào Vườn hoa
+            const currentPlots = [...gardenPlots];
+            const emptyIdx = currentPlots.findIndex((p) => p.seedItem === null);
+            const now = Date.now();
+            const newPlotData: GardenPlotState = {
+              id:
+                emptyIdx !== -1
+                  ? currentPlots[emptyIdx].id
+                  : `plot_${now}_${Math.random().toString(36).slice(2, 5)}`,
+              seedItem: newItem,
+              stage: 0,
+              stageStartedAt: now,
+              stageDurationMs: STAGE_DURATIONS_MS[0],
+              wateredInCurrentStage: false,
+            };
+            if (emptyIdx !== -1) {
+              currentPlots[emptyIdx] = newPlotData;
+            } else {
+              currentPlots.push(newPlotData);
+            }
+            setGardenPlots(currentPlots);
+            saveGardenPlots(currentPlots);
+            destinationNote =
+              '🌱 Đã nhận vào Kho đồ Supabase & gieo hạt giống vào Vườn hoa!';
+          } else if (newItem.category === 'fish') {
+            const now = Date.now();
+            const newFishState: PondFishState = {
+              id: newItem.id,
+              item: newItem,
+              stage: 'egg',
+              xp: 0,
+              hatchedAt: now,
+              fullUntil: now + 90 * 1000,
+              lastPetalGeneratedAt: now,
+              pendingPetals: 0,
+              swimSpeed: 16 + Math.floor(Math.random() * 10),
+              swimOffset: Math.floor(Math.random() * 85),
+            };
+            const nextFish = [newFishState, ...pondFish];
+            setPondFish(nextFish);
+            savePondFishList(nextFish);
+            destinationNote =
+              '🥚 Đã nhận vào Kho đồ Supabase & thả trứng cá vào Hồ cá!';
+          }
+          setLastGachaResult({ item: newItem, destinationNote });
+          showToast(
+            `🎉 Chúc mừng! Bạn đã nhận được [${RARITY_LABELS[newItem.rarity]}] "${newItem.name}"!`
+          );
+        } else {
+          showToast(`🎉 ${res.message}`);
+        }
+      } finally {
+        setIsRollingGacha(false);
+      }
+      return;
     }
 
+    // Mở thêm bằng Cánh hoa
+    if (petalsBalance < rollCost) {
+      showToast(
+        `Bạn cần ${rollCost} ${currencyName} để mở thêm hộp quà Gacha nhé 🌸`
+      );
+      return;
+    }
+    onAddPetals(-rollCost);
     setIsRollingGacha(true);
     setLastGachaResult(null);
-
-    if (useFreeRoll) {
-      const nextRoom = {
-        ...roomState,
-        lastFreeGachaDate: todayStr,
-      };
-      setRoomState(nextRoom);
-      saveCompanionRoomState(nextRoom);
-    }
-
     markDailyTaskReady('gacha');
 
-    setTimeout(() => {
+    setTimeout(async () => {
       const categories: ItemCategory[] = ['flower', 'fish', 'pet', 'drink'];
       const chosenCategory =
         categories[Math.floor(Math.random() * categories.length)];
@@ -285,72 +455,18 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
         companionCharTags: companionChar?.tags || ['Dịu dàng'],
       });
 
-      let destinationNote = '';
+      await insertCraftedDrinkToInventory({
+        item_type: newItem.category,
+        item_name: newItem.name,
+        rarity: newItem.rarity,
+        color: newItem.visual.primaryColor,
+      });
+      await refreshSupabaseInventoryAndRoll();
 
-      if (chosenCategory === 'flower') {
-        // Nhận hạt giống đưa vào Vườn hoa
-        const currentPlots = [...gardenPlots];
-        const emptyIdx = currentPlots.findIndex((p) => p.seedItem === null);
-        const now = Date.now();
-        const newPlotData: GardenPlotState = {
-          id:
-            emptyIdx !== -1
-              ? currentPlots[emptyIdx].id
-              : `plot_${now}_${Math.random().toString(36).slice(2, 5)}`,
-          seedItem: newItem,
-          stage: 0,
-          stageStartedAt: now,
-          stageDurationMs: STAGE_DURATIONS_MS[0],
-          wateredInCurrentStage: false,
-        };
-
-        if (emptyIdx !== -1) {
-          currentPlots[emptyIdx] = newPlotData;
-        } else {
-          currentPlots.push(newPlotData);
-        }
-        setGardenPlots(currentPlots);
-        saveGardenPlots(currentPlots);
-        destinationNote =
-          '🌱 Đã gieo hạt giống vào Vườn hoa! Hãy sang Vườn hoa tưới nước và chờ cây nở nhé.';
-      } else if (chosenCategory === 'fish') {
-        // Nhận trứng cá đưa vào Hồ cá
-        const now = Date.now();
-        const newFishState: PondFishState = {
-          id: newItem.id,
-          item: newItem,
-          stage: 'egg',
-          xp: 0,
-          hatchedAt: now,
-          fullUntil: now + 90 * 1000,
-          lastPetalGeneratedAt: now,
-          pendingPetals: 0,
-          swimSpeed: 16 + Math.floor(Math.random() * 10),
-          swimOffset: Math.floor(Math.random() * 85),
-        };
-        const nextFish = [newFishState, ...pondFish];
-        setPondFish(nextFish);
-        savePondFishList(nextFish);
-        destinationNote =
-          '🥚 Trứng cá đã được thả vào Hồ cá! Hãy ghé Hồ cá cho ăn để bé cá mau nở và lớn nhé.';
-      } else if (chosenCategory === 'pet') {
-        // Nhận thú cưng về Phòng tri kỷ (và lưu trong Kho đồ)
-        const nextInv = addItemToInventory(newItem);
-        setInventory(nextInv);
-        destinationNote = `🐾 Bé thú cưng đã chạy về Phòng tri kỷ của ${
-          companionChar?.name || 'bạn'
-        }! ${newItem.vibeReason || ''}`;
-      } else {
-        // Nhận thức uống cất vào Quầy thức uống & Kho đồ
-        const nextInv = addItemToInventory(newItem);
-        setInventory(nextInv);
-        destinationNote =
-          '☕ Đã cất ly thức uống thơm lừng vào Quầy thức uống & Kho đồ!';
-      }
-
+      const destinationNote = `✨ Đã thêm "${newItem.name}" vào Kho đồ Supabase!`;
       setIsRollingGacha(false);
       setLastGachaResult({ item: newItem, destinationNote });
-    }, 1050);
+    }, 850);
   };
 
   // ============================================================================
@@ -453,7 +569,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     }
   }, [nowMs, gardenPlots]);
 
-  const handleHarvestFlower = (plotId: string, sellForPetals: boolean) => {
+  const handleHarvestFlower = async (plotId: string, sellForPetals: boolean) => {
     const target = gardenPlots.find((p) => p.id === plotId);
     if (!target || !target.seedItem || target.stage < 4) return;
 
@@ -473,6 +589,9 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     setGardenPlots(nextPlots);
     saveGardenPlots(nextPlots);
 
+    // Đánh dấu ready_at = null (đã thu hoạch xong, sẵn sàng dùng để mở khóa Char)
+    await updateInventoryItemReadyAt(harvestedFlower.id, null);
+
     if (sellForPetals) {
       const price =
         harvestedFlower.rarity === 'legendary'
@@ -485,8 +604,10 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
         `🌸 Đã bán đóa "${harvestedFlower.name}" và nhận +${price} ${currencyName}!`
       );
     } else {
-      const nextInv = addItemToInventory(harvestedFlower);
+      const readyFlower = { ...harvestedFlower, readyAt: null };
+      const nextInv = addItemToInventory(readyFlower);
       setInventory(nextInv);
+      await refreshSupabaseInventoryAndRoll();
       showToast(
         `✨ Đã thu hoạch "${harvestedFlower.name}" vào Kho đồ (có thể tặng Char hoặc dùng mở khóa Char)!`
       );
@@ -734,7 +855,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     showToast('🐾 Thú cưng đã ăn no nê, chạy nhảy vui vẻ khắp căn phòng!');
   };
 
-  const handleBrewNewDrinkAtBar = () => {
+  const handleBrewNewDrinkAtBar = async () => {
     const cost = 10;
     if (petalsBalance < cost) {
       showToast(
@@ -746,6 +867,13 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     const newDrink = generateUniqueGameItem('drink');
     const nextInv = addItemToInventory(newDrink);
     setInventory(nextInv);
+    await insertCraftedDrinkToInventory({
+      item_type: 'drink',
+      item_name: newDrink.name,
+      rarity: newDrink.rarity,
+      color: newDrink.visual.primaryColor,
+    });
+    await refreshSupabaseInventoryAndRoll();
     showToast(`☕ Đã pha chế thành công ly "${newDrink.name}" độc nhất!`);
   };
 

@@ -42,15 +42,23 @@ import { ColorMode, ThemeConfig } from '../constants/themes';
 import { EditableText } from './EditableText';
 
 interface AddMusicPanelProps {
-  onAddTrack: (track: MusicTrack, playImmediately?: boolean) => void;
+  onAddTrack: (
+    track: MusicTrack,
+    playImmediately?: boolean,
+    targetPlaylist?: 'web' | 'personal'
+  ) => void;
   onClose?: () => void;
   compact?: boolean;
+  playlistSource?: 'web' | 'personal';
+  canEditWebPlaylist?: boolean;
 }
 
 export const AddMusicPanel: React.FC<AddMusicPanelProps> = ({
   onAddTrack,
   onClose,
   compact = false,
+  playlistSource = 'web',
+  canEditWebPlaylist = false,
 }) => {
   const [mode, setMode] = useState<'url' | 'file'>('url');
 
@@ -103,6 +111,9 @@ export const AddMusicPanel: React.FC<AddMusicPanelProps> = ({
       const finalTitle =
         titleInput.trim() || inferTitleFromUrl(result.normalizedUrl);
 
+      const targetSource: 'web' | 'personal' =
+        playlistSource === 'web' && canEditWebPlaylist ? 'web' : 'personal';
+
       const newTrack: MusicTrack = {
         id: `track-url-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         title: finalTitle,
@@ -111,10 +122,11 @@ export const AddMusicPanel: React.FC<AddMusicPanelProps> = ({
         sourceType: 'url',
         url: result.normalizedUrl,
         duration: result.duration,
+        isWebTrack: targetSource === 'web',
         createdAt: new Date().toISOString(),
       };
 
-      onAddTrack(newTrack, true);
+      onAddTrack(newTrack, true, targetSource);
       setTitleInput('');
       setUrlInput('');
       setCoverInput('');
@@ -214,17 +226,19 @@ export const AddMusicPanel: React.FC<AddMusicPanelProps> = ({
       const newTrack: MusicTrack = {
         id: `track-idb-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         title: fileTitleInput.trim() || selectedFile.name,
-        artist: `Tải lên từ máy (.${ext}) 💾`,
+        artist: `Tải lên từ máy (.${ext}) · Chỉ nghe trên máy này 💾`,
         coverUrl: fileCoverInput.trim() || undefined,
         sourceType: 'indexeddb',
         idbKey,
         duration,
         fileSize: selectedFile.size,
         fileExt: ext,
+        isWebTrack: false,
         createdAt: new Date().toISOString(),
       };
 
-      onAddTrack(newTrack, true);
+      // Playlist web chỉ lưu được các link MP3; file tải từ máy luôn lưu vào Playlist cá nhân trên máy đó
+      onAddTrack(newTrack, true, 'personal');
       setSelectedFile(null);
       setFileTitleInput('');
       setFileCoverInput('');
@@ -248,7 +262,12 @@ export const AddMusicPanel: React.FC<AddMusicPanelProps> = ({
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5 font-bold text-xs sm:text-sm text-[var(--text)]">
           <Sparkles className="w-4 h-4 text-[var(--accent)]" />
-          <span>➕ Thêm bài nhạc mới vào Playlist</span>
+          <span>
+            ➕ Thêm nhạc vào{' '}
+            {playlistSource === 'web' && canEditWebPlaylist
+              ? '🌐 Playlist của Web'
+              : '💖 Playlist của tôi'}
+          </span>
         </div>
         {onClose && (
           <button
@@ -467,10 +486,10 @@ export const AddMusicPanel: React.FC<AddMusicPanelProps> = ({
             </div>
           </div>
 
-          <div className="p-2.5 rounded-xl bg-[var(--surface)] border border-[var(--border)] text-[11px] text-[var(--muted)] flex items-start gap-2 leading-relaxed">
-            <HardDrive className="w-4 h-4 text-[var(--accent)] shrink-0 mt-0.5" />
+          <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/40 text-[11px] text-[var(--text)] flex items-start gap-2 leading-relaxed">
+            <HardDrive className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
             <span>
-              File tải lên được lưu an toàn bằng <strong>IndexedDB</strong> ngay trên trình duyệt của bạn (không làm đầy localStorage). Lưu ý: file chỉ nằm trên thiết bị này của bạn; khi kết nối Cloud Storage sẽ đồng bộ mọi nơi.
+              <strong>Lưu ý quan trọng:</strong> Playlist của web chỉ lưu được các <strong>link MP3 trực tiếp</strong> lên Supabase để mọi người cùng nghe. File tải từ máy lên (lưu bằng IndexedDB) <strong>chỉ nghe được trên chính máy/trình duyệt này của bạn</strong> và sẽ được thêm vào <strong>"Playlist của tôi"</strong> nhé!
             </span>
           </div>
 
@@ -513,6 +532,9 @@ interface CornerMusicWidgetProps {
   volume: number;
   isMuted: boolean;
   playMode: PlayMode;
+  playlistSource: 'web' | 'personal';
+  onSwitchPlaylistSource: (source: 'web' | 'personal') => void;
+  canEditWebPlaylist: boolean;
   onTogglePlay: () => void;
   onSelectTrack: (trackId: string) => void;
   onPrevTrack: () => void;
@@ -521,7 +543,11 @@ interface CornerMusicWidgetProps {
   onVolumeChange: (newVol: number) => void;
   onToggleMute: () => void;
   onCyclePlayMode: () => void;
-  onAddTrack: (track: MusicTrack, playImmediately?: boolean) => void;
+  onAddTrack: (
+    track: MusicTrack,
+    playImmediately?: boolean,
+    targetPlaylist?: 'web' | 'personal'
+  ) => void;
   onUpdateTrack: (trackId: string, patch: Partial<MusicTrack>) => void;
   onDeleteTrack: (trackId: string) => void;
   onMoveTrack: (trackId: string, direction: 'up' | 'down') => void;
@@ -544,6 +570,9 @@ export const CornerMusicWidget: React.FC<CornerMusicWidgetProps> = ({
   volume,
   isMuted,
   playMode,
+  playlistSource,
+  onSwitchPlaylistSource,
+  canEditWebPlaylist,
   onTogglePlay,
   onSelectTrack,
   onPrevTrack,
@@ -686,12 +715,40 @@ export const CornerMusicWidget: React.FC<CornerMusicWidgetProps> = ({
 
           {/* Khu vực cuộn bên trong Playlist */}
           <div className="p-4 space-y-3.5 overflow-y-auto flex-1">
+            {/* Thanh chuyển đổi giữa "Playlist của web" và "Playlist của tôi" */}
+            <div className="grid grid-cols-2 gap-1.5 p-1 rounded-2xl bg-[var(--bg)] border border-[var(--border)] text-xs">
+              <button
+                type="button"
+                onClick={() => onSwitchPlaylistSource('web')}
+                className={`py-1.5 px-2.5 rounded-xl font-bold transition-all cursor-pointer ${
+                  playlistSource === 'web'
+                    ? 'bg-[var(--accent)] text-[#3a2b30] shadow-2xs'
+                    : 'text-[var(--muted)] hover:text-[var(--text)]'
+                }`}
+              >
+                🌐 Playlist của web
+              </button>
+              <button
+                type="button"
+                onClick={() => onSwitchPlaylistSource('personal')}
+                className={`py-1.5 px-2.5 rounded-xl font-bold transition-all cursor-pointer ${
+                  playlistSource === 'personal'
+                    ? 'bg-[var(--accent)] text-[#3a2b30] shadow-2xs'
+                    : 'text-[var(--muted)] hover:text-[var(--text)]'
+                }`}
+              >
+                💖 Nghe nhạc của tôi
+              </button>
+            </div>
+
             {/* Khung Thêm Nhạc (khi bấm ➕ Thêm nhạc) */}
             {showAddMusic && (
               <AddMusicPanel
                 compact
-                onAddTrack={(track, playNow) => {
-                  onAddTrack(track, playNow);
+                playlistSource={playlistSource}
+                canEditWebPlaylist={canEditWebPlaylist}
+                onAddTrack={(track, playNow, targetSource) => {
+                  onAddTrack(track, playNow, targetSource);
                   setShowAddMusic(false);
                 }}
                 onClose={() => setShowAddMusic(false)}
@@ -949,44 +1006,47 @@ export const CornerMusicWidget: React.FC<CornerMusicWidgetProps> = ({
                             </div>
                           </button>
 
-                          <div className="flex items-center gap-0.5 shrink-0">
-                            <button
-                              type="button"
-                              disabled={idx === 0}
-                              onClick={() => onMoveTrack(track.id, 'up')}
-                              title="Đưa lên"
-                              className="p-1 text-[var(--muted)] hover:text-[var(--text)] disabled:opacity-30 cursor-pointer"
-                            >
-                              <ArrowUp className="w-3 h-3" />
-                            </button>
-                            <button
-                              type="button"
-                              disabled={idx === playlist.length - 1}
-                              onClick={() => onMoveTrack(track.id, 'down')}
-                              title="Đưa xuống"
-                              className="p-1 text-[var(--muted)] hover:text-[var(--text)] disabled:opacity-30 cursor-pointer"
-                            >
-                              <ArrowDown className="w-3 h-3" />
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => startEditTrack(track)}
-                              title="Sửa tên / ảnh bìa"
-                              className="p-1 text-[var(--muted)] hover:text-[var(--text)] cursor-pointer"
-                            >
-                              <Pencil className="w-3 h-3" />
-                            </button>
-                            {playlist.length > 1 && (
+                          {(playlistSource === 'personal' ||
+                            canEditWebPlaylist) && (
+                            <div className="flex items-center gap-0.5 shrink-0">
                               <button
                                 type="button"
-                                onClick={() => onDeleteTrack(track.id)}
-                                title="Xóa bài này"
-                                className="p-1 text-[var(--muted)] hover:text-red-500 cursor-pointer"
+                                disabled={idx === 0}
+                                onClick={() => onMoveTrack(track.id, 'up')}
+                                title="Đưa lên"
+                                className="p-1 text-[var(--muted)] hover:text-[var(--text)] disabled:opacity-30 cursor-pointer"
                               >
-                                <Trash2 className="w-3 h-3" />
+                                <ArrowUp className="w-3 h-3" />
                               </button>
-                            )}
-                          </div>
+                              <button
+                                type="button"
+                                disabled={idx === playlist.length - 1}
+                                onClick={() => onMoveTrack(track.id, 'down')}
+                                title="Đưa xuống"
+                                className="p-1 text-[var(--muted)] hover:text-[var(--text)] disabled:opacity-30 cursor-pointer"
+                              >
+                                <ArrowDown className="w-3 h-3" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => startEditTrack(track)}
+                                title="Sửa tên / ảnh bìa"
+                                className="p-1 text-[var(--muted)] hover:text-[var(--text)] cursor-pointer"
+                              >
+                                <Pencil className="w-3 h-3" />
+                              </button>
+                              {playlist.length > 1 && (
+                                <button
+                                  type="button"
+                                  onClick={() => onDeleteTrack(track.id)}
+                                  title="Xóa bài này"
+                                  className="p-1 text-[var(--muted)] hover:text-red-500 cursor-pointer"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                </button>
+                              )}
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
@@ -1058,14 +1118,27 @@ export const CornerMusicWidget: React.FC<CornerMusicWidgetProps> = ({
           type="button"
           onClick={() => setPlaylistOpen((prev) => !prev)}
           title="Bấm để mở rộng bảng Playlist & Thêm nhạc"
-          className="flex items-center gap-1.5 px-2 py-1 rounded-full hover:bg-[var(--bg)] text-xs font-semibold text-[var(--text)] transition-colors cursor-pointer max-w-[140px] sm:max-w-[190px]"
+          className="flex items-center gap-1.5 px-2 py-1 rounded-full hover:bg-[var(--bg)] text-xs font-semibold text-[var(--text)] transition-colors cursor-pointer max-w-[165px] sm:max-w-[220px]"
         >
-          <Music
+          <Disc3
             className={`w-3.5 h-3.5 shrink-0 ${
-              isPlaying ? 'text-[var(--accent)]' : 'text-[var(--muted)]'
+              isPlaying
+                ? 'text-[var(--accent)] motion-safe:animate-spin'
+                : 'text-[var(--muted)]'
             }`}
+            style={{ animationDuration: '8s' }}
           />
           <span className="truncate">{currentTrack.title}</span>
+          {isPlaying && (
+            <span
+              className="inline-flex items-end gap-0.5 h-3 shrink-0"
+              aria-hidden="true"
+            >
+              <span className="w-0.5 h-2 bg-[var(--accent)] rounded-full motion-safe:animate-pulse" />
+              <span className="w-0.5 h-3 bg-[var(--accent)] rounded-full motion-safe:animate-bounce" />
+              <span className="w-0.5 h-1.5 bg-[var(--accent)] rounded-full motion-safe:animate-pulse" />
+            </span>
+          )}
           {playlistOpen ? (
             <ChevronDown className="w-3.5 h-3.5 text-[var(--muted)] shrink-0" />
           ) : (
@@ -1102,6 +1175,9 @@ interface MusicTabProps {
   volume: number;
   isMuted: boolean;
   playMode: PlayMode;
+  playlistSource: 'web' | 'personal';
+  onSwitchPlaylistSource: (source: 'web' | 'personal') => void;
+  canEditWebPlaylist: boolean;
   onTogglePlay: () => void;
   onSelectTrack: (trackId: string) => void;
   onPrevTrack: () => void;
@@ -1110,7 +1186,11 @@ interface MusicTabProps {
   onVolumeChange: (newVol: number) => void;
   onToggleMute: () => void;
   onCyclePlayMode: () => void;
-  onAddTrack: (track: MusicTrack, playImmediately?: boolean) => void;
+  onAddTrack: (
+    track: MusicTrack,
+    playImmediately?: boolean,
+    targetPlaylist?: 'web' | 'personal'
+  ) => void;
   onUpdateTrack: (trackId: string, patch: Partial<MusicTrack>) => void;
   onDeleteTrack: (trackId: string) => void;
   onMoveTrack: (trackId: string, direction: 'up' | 'down') => void;
@@ -1129,6 +1209,9 @@ export const MusicTab: React.FC<MusicTabProps> = ({
   volume,
   isMuted,
   playMode,
+  playlistSource,
+  onSwitchPlaylistSource,
+  canEditWebPlaylist,
   onTogglePlay,
   onSelectTrack,
   onPrevTrack,
@@ -1223,17 +1306,43 @@ export const MusicTab: React.FC<MusicTabProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2 text-xs">
+          <div className="inline-flex p-1 rounded-2xl bg-[var(--bg)] border border-[var(--border)]">
+            <button
+              type="button"
+              onClick={() => onSwitchPlaylistSource('web')}
+              className={`px-3 py-1.5 rounded-xl font-bold transition-all cursor-pointer ${
+                playlistSource === 'web'
+                  ? 'bg-[var(--accent)] text-[#3a2b30]'
+                  : 'text-[var(--muted)] hover:text-[var(--text)]'
+              }`}
+            >
+              🌐 Playlist của Web
+            </button>
+            <button
+              type="button"
+              onClick={() => onSwitchPlaylistSource('personal')}
+              className={`px-3 py-1.5 rounded-xl font-bold transition-all cursor-pointer ${
+                playlistSource === 'personal'
+                  ? 'bg-[var(--accent)] text-[#3a2b30]'
+                  : 'text-[var(--muted)] hover:text-[var(--text)]'
+              }`}
+            >
+              💖 Playlist của tôi
+            </button>
+          </div>
           <div className="px-3.5 py-2 rounded-2xl border border-[var(--border)] bg-[var(--bg)] font-semibold text-[var(--text)]">
             🎶 Tổng số bài: <strong>{playlist.length}</strong>
           </div>
-          <button
-            type="button"
-            onClick={onRestoreBuiltinTracks}
-            className="px-3.5 py-2 rounded-2xl border border-[var(--border)] bg-[var(--bg)] hover:border-[var(--accent)] font-semibold text-[var(--muted)] hover:text-[var(--text)] cursor-pointer inline-flex items-center gap-1.5"
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-            <span>Khôi phục 4 bài hộp nhạc gốc</span>
-          </button>
+          {(playlistSource === 'personal' || canEditWebPlaylist) && (
+            <button
+              type="button"
+              onClick={onRestoreBuiltinTracks}
+              className="px-3.5 py-2 rounded-2xl border border-[var(--border)] bg-[var(--bg)] hover:border-[var(--accent)] font-semibold text-[var(--muted)] hover:text-[var(--text)] cursor-pointer inline-flex items-center gap-1.5"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>Khôi phục 4 bài hộp nhạc gốc</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -1377,7 +1486,11 @@ export const MusicTab: React.FC<MusicTabProps> = ({
           </div>
 
           {/* Khung ➕ Thêm nhạc (2 cách: Dán link MP3 trực tiếp & Tải file từ máy lên) */}
-          <AddMusicPanel onAddTrack={onAddTrack} />
+          <AddMusicPanel
+            onAddTrack={onAddTrack}
+            playlistSource={playlistSource}
+            canEditWebPlaylist={canEditWebPlaylist}
+          />
         </div>
 
         {/* CỘT PHẢI: Danh sách Playlist chi tiết */}
@@ -1559,44 +1672,47 @@ export const MusicTab: React.FC<MusicTabProps> = ({
                           </div>
                         </button>
 
-                        <div className="flex items-center gap-1 shrink-0">
-                          <button
-                            type="button"
-                            disabled={idxInFull <= 0}
-                            onClick={() => onMoveTrack(track.id, 'up')}
-                            title="Đưa lên"
-                            className="p-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] text-[var(--muted)] hover:text-[var(--text)] disabled:opacity-30 cursor-pointer"
-                          >
-                            <ArrowUp className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            type="button"
-                            disabled={idxInFull >= playlist.length - 1}
-                            onClick={() => onMoveTrack(track.id, 'down')}
-                            title="Đưa xuống"
-                            className="p-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] text-[var(--muted)] hover:text-[var(--text)] disabled:opacity-30 cursor-pointer"
-                          >
-                            <ArrowDown className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => startEdit(track)}
-                            title="Sửa tên bài & ảnh bìa"
-                            className="p-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] text-[var(--muted)] hover:text-[var(--text)] cursor-pointer"
-                          >
-                            <Pencil className="w-3.5 h-3.5" />
-                          </button>
-                          {playlist.length > 1 && (
+                        {(playlistSource === 'personal' ||
+                          canEditWebPlaylist) && (
+                          <div className="flex items-center gap-1 shrink-0">
                             <button
                               type="button"
-                              onClick={() => onDeleteTrack(track.id)}
-                              title="Xóa bài nhạc"
-                              className="p-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] text-[var(--muted)] hover:text-red-500 cursor-pointer"
+                              disabled={idxInFull <= 0}
+                              onClick={() => onMoveTrack(track.id, 'up')}
+                              title="Đưa lên"
+                              className="p-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] text-[var(--muted)] hover:text-[var(--text)] disabled:opacity-30 cursor-pointer"
                             >
-                              <Trash2 className="w-3.5 h-3.5" />
+                              <ArrowUp className="w-3.5 h-3.5" />
                             </button>
-                          )}
-                        </div>
+                            <button
+                              type="button"
+                              disabled={idxInFull >= playlist.length - 1}
+                              onClick={() => onMoveTrack(track.id, 'down')}
+                              title="Đưa xuống"
+                              className="p-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] text-[var(--muted)] hover:text-[var(--text)] disabled:opacity-30 cursor-pointer"
+                            >
+                              <ArrowDown className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => startEdit(track)}
+                              title="Sửa tên bài & ảnh bìa"
+                              className="p-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] text-[var(--muted)] hover:text-[var(--text)] cursor-pointer"
+                            >
+                              <Pencil className="w-3.5 h-3.5" />
+                            </button>
+                            {playlist.length > 1 && (
+                              <button
+                                type="button"
+                                onClick={() => onDeleteTrack(track.id)}
+                                title="Xóa bài nhạc"
+                                className="p-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] text-[var(--muted)] hover:text-red-500 cursor-pointer"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>

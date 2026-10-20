@@ -15,15 +15,12 @@ import {
   RescueStatus,
   BackupEntry,
   FaqItem,
-  FAQS_COLLECTION,
   INITIAL_FAQS,
+  SAMPLE_RESCUE_REPORTS,
+  SAMPLE_BACKUPS,
 } from '../data/sampleData';
-import { dataStore } from '../services/dataLayer';
 import { AuthUser, can } from '../services/authLayer';
 import { EditableText, ItemEditControls } from './EditableText';
-
-const RESCUE_COLLECTION = 'rescue_reports';
-const BACKUPS_COLLECTION = 'backups';
 
 interface RescueStationTabProps {
   currentUser: AuthUser;
@@ -31,6 +28,10 @@ interface RescueStationTabProps {
   editMode?: boolean;
   customTexts?: Record<string, string>;
   onUpdateCustomText?: (key: string, val: string, fallback: string) => void;
+  rescueFaqs?: FaqItem[];
+  onUpdateFaqs?: (next: FaqItem[], label?: string) => void;
+  rescueTickets?: RescueReport[];
+  onUpdateRescueTickets?: (next: RescueReport[], label?: string) => void;
 }
 
 const RESCUE_STATUS_LABELS: Record<RescueStatus, string> = {
@@ -45,30 +46,43 @@ export const RescueStationTab: React.FC<RescueStationTabProps> = ({
   editMode = false,
   customTexts = {},
   onUpdateCustomText,
+  rescueFaqs: propFaqs,
+  onUpdateFaqs,
+  rescueTickets: propTickets,
+  onUpdateRescueTickets,
 }) => {
   const [reports, setReports] = useState<RescueReport[]>(() =>
-    dataStore.list<RescueReport>(RESCUE_COLLECTION)
+    propTickets && propTickets.length > 0 ? propTickets : SAMPLE_RESCUE_REPORTS
   );
-  const [backups, setBackups] = useState<BackupEntry[]>(() =>
-    dataStore.list<BackupEntry>(BACKUPS_COLLECTION)
+  const [backups, setBackups] = useState<BackupEntry[]>(() => SAMPLE_BACKUPS);
+  const [faqs, setFaqs] = useState<FaqItem[]>(() =>
+    propFaqs && propFaqs.length > 0 ? propFaqs : INITIAL_FAQS
   );
-  const [faqs, setFaqs] = useState<FaqItem[]>(() => {
-    const stored = dataStore.list<FaqItem>(FAQS_COLLECTION);
-    if (stored.length === 0) {
-      dataStore.set(`col_${FAQS_COLLECTION}`, INITIAL_FAQS, true);
-      return INITIAL_FAQS;
-    }
-    return stored;
-  });
 
   useEffect(() => {
-    return dataStore.onChange(() => {
-      setReports(dataStore.list<RescueReport>(RESCUE_COLLECTION));
-      setBackups(dataStore.list<BackupEntry>(BACKUPS_COLLECTION));
-      const storedFaqs = dataStore.list<FaqItem>(FAQS_COLLECTION);
-      setFaqs(storedFaqs.length > 0 ? storedFaqs : INITIAL_FAQS);
-    });
-  }, []);
+    if (propTickets && propTickets.length > 0) {
+      setReports(propTickets);
+    }
+  }, [propTickets]);
+
+  useEffect(() => {
+    if (propFaqs && propFaqs.length > 0) {
+      setFaqs(propFaqs);
+    }
+  }, [propFaqs]);
+
+  const syncFaqs = (next: FaqItem[], label = 'Cập nhật câu hỏi FAQ') => {
+    setFaqs(next);
+    onUpdateFaqs?.(next, label);
+  };
+
+  const syncReports = (
+    next: RescueReport[],
+    label = 'Cập nhật tín hiệu cứu hộ'
+  ) => {
+    setReports(next);
+    onUpdateRescueTickets?.(next, label);
+  };
 
   const [charName, setCharName] = useState('');
   const [creatorName, setCreatorName] = useState('');
@@ -107,12 +121,13 @@ export const RescueStationTab: React.FC<RescueStationTabProps> = ({
   const handleAddFaqSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!faqQ.trim() || !faqA.trim()) return;
-    dataStore.add<FaqItem>(FAQS_COLLECTION, {
+    const added: FaqItem = {
+      id: `faq_${Date.now()}`,
       q: faqQ.trim(),
       a: faqA.trim(),
       imageUrl: faqImageUrl.trim() || undefined,
-    });
-    setFaqs(dataStore.list<FaqItem>(FAQS_COLLECTION));
+    };
+    syncFaqs([...faqs, added], 'Thêm câu hỏi FAQ mới');
     setFaqQ('');
     setFaqA('');
     setFaqImageUrl('');
@@ -128,23 +143,34 @@ export const RescueStationTab: React.FC<RescueStationTabProps> = ({
 
   const handleSaveEditFaq = (e: React.FormEvent, id: string) => {
     e.preventDefault();
-    dataStore.update<FaqItem>(FAQS_COLLECTION, id, {
-      q: faqQ.trim(),
-      a: faqA.trim(),
-      imageUrl: faqImageUrl.trim() || undefined,
-    });
-    setFaqs(dataStore.list<FaqItem>(FAQS_COLLECTION));
+    const next = faqs.map((f) =>
+      f.id === id
+        ? {
+            ...f,
+            q: faqQ.trim(),
+            a: faqA.trim(),
+            imageUrl: faqImageUrl.trim() || undefined,
+          }
+        : f
+    );
+    syncFaqs(next, 'Sửa câu hỏi FAQ');
     setEditingFaqId(null);
   };
 
   const handleDeleteFaq = (id: string) => {
-    dataStore.remove(FAQS_COLLECTION, id);
-    setFaqs(dataStore.list<FaqItem>(FAQS_COLLECTION));
+    const next = faqs.filter((f) => f.id !== id);
+    syncFaqs(next, 'Xóa câu hỏi FAQ');
   };
 
   const handleMoveFaq = (id: string, direction: 'up' | 'down') => {
-    const next = dataStore.moveItem<FaqItem>(FAQS_COLLECTION, id, direction);
-    setFaqs(next);
+    const idx = faqs.findIndex((f) => f.id === id);
+    if (idx < 0) return;
+    const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
+    if (targetIdx < 0 || targetIdx >= faqs.length) return;
+    const next = [...faqs];
+    const [item] = next.splice(idx, 1);
+    next.splice(targetIdx, 0, item);
+    syncFaqs(next, 'Đổi thứ tự câu hỏi FAQ');
   };
 
   const handleSubmitReport = (e: React.FormEvent) => {
@@ -157,29 +183,29 @@ export const RescueStationTab: React.FC<RescueStationTabProps> = ({
     }
     if (!charName.trim() || !issueDesc.trim()) return;
 
-    const added = dataStore.add<RescueReport>(RESCUE_COLLECTION, {
+    const added: RescueReport = {
+      id: `res_${Date.now()}`,
       characterName: charName.trim(),
       creatorName: creatorName.trim() || 'Chưa rõ tên Creator',
       brokenUrl: brokenUrl.trim() || undefined,
       issueDescription: issueDesc.trim(),
       status: 'received',
-    });
+      createdAt: new Date().toISOString(),
+    };
 
-    if (added) {
-      setReports(dataStore.list<RescueReport>(RESCUE_COLLECTION));
-      setCharName('');
-      setCreatorName('');
-      setBrokenUrl('');
-      setIssueDesc('');
-    }
+    syncReports([added, ...reports], 'Gửi tín hiệu cứu hộ');
+    setCharName('');
+    setCreatorName('');
+    setBrokenUrl('');
+    setIssueDesc('');
   };
 
   const handleChangeReportStatus = (id: string, nextStatus: RescueStatus) => {
     if (!canManageRescueStatus) return;
-    dataStore.update<RescueReport>(RESCUE_COLLECTION, id, {
-      status: nextStatus,
-    });
-    setReports(dataStore.list<RescueReport>(RESCUE_COLLECTION));
+    const next = reports.map((r) =>
+      r.id === id ? { ...r, status: nextStatus } : r
+    );
+    syncReports(next, 'Đổi trạng thái tín hiệu cứu hộ');
   };
 
   const handleAddBackup = (e: React.FormEvent) => {
@@ -192,23 +218,22 @@ export const RescueStationTab: React.FC<RescueStationTabProps> = ({
     }
     if (!bakCharName.trim() || !bakDesc.trim()) return;
 
-    const added = dataStore.add<BackupEntry>(BACKUPS_COLLECTION, {
+    const added: BackupEntry = {
+      id: `bak_${Date.now()}`,
       characterName: bakCharName.trim(),
       creatorName: bakCreatorName.trim() || currentUser.displayName,
       backupLink: bakLink.trim() || 'Chưa đính kèm link',
       descriptionBackup: bakDesc.trim(),
       promptBackup: bakPrompt.trim() || 'Chưa có lời mở đầu dự phòng',
       savedAt: new Date().toLocaleDateString('vi-VN'),
-    });
+    };
 
-    if (added) {
-      setBackups(dataStore.list<BackupEntry>(BACKUPS_COLLECTION));
-      setBakCharName('');
-      setBakCreatorName('');
-      setBakLink('');
-      setBakDesc('');
-      setBakPrompt('');
-    }
+    setBackups((prev) => [added, ...prev]);
+    setBakCharName('');
+    setBakCreatorName('');
+    setBakLink('');
+    setBakDesc('');
+    setBakPrompt('');
   };
 
   const handleCopyBackup = async (bak: BackupEntry) => {
@@ -677,10 +702,10 @@ export const RescueStationTab: React.FC<RescueStationTabProps> = ({
                       value={item.q}
                       editMode={isEditor}
                       onSave={(val) => {
-                        dataStore.update<FaqItem>(FAQS_COLLECTION, item.id, {
-                          q: val,
-                        });
-                        setFaqs(dataStore.list<FaqItem>(FAQS_COLLECTION));
+                        const next = faqs.map((f) =>
+                          f.id === item.id ? { ...f, q: val } : f
+                        );
+                        syncFaqs(next, 'Sửa câu hỏi FAQ');
                       }}
                     />
                   </h4>
@@ -690,10 +715,10 @@ export const RescueStationTab: React.FC<RescueStationTabProps> = ({
                       editMode={isEditor}
                       multiline
                       onSave={(val) => {
-                        dataStore.update<FaqItem>(FAQS_COLLECTION, item.id, {
-                          a: val,
-                        });
-                        setFaqs(dataStore.list<FaqItem>(FAQS_COLLECTION));
+                        const next = faqs.map((f) =>
+                          f.id === item.id ? { ...f, a: val } : f
+                        );
+                        syncFaqs(next, 'Sửa câu trả lời FAQ');
                       }}
                     />
                   </div>

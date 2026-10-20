@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   Send,
   Clock,
@@ -14,7 +14,13 @@ import {
   CommissionOrderStatus,
   CommissionTier,
 } from '../data/sampleData';
-import { dataStore } from '../services/dataLayer';
+import {
+  fetchCommissionsFromSupabase,
+  saveCommissionBoardOnSupabase,
+  deleteCommissionBoardOnSupabase,
+  insertCommissionOrderOnSupabase,
+  updateCommissionOrderStatusOnSupabase,
+} from '../services/supabaseService';
 import { AuthUser, can, canEditItem } from '../services/authLayer';
 import { EditableText, ItemEditControls } from './EditableText';
 
@@ -26,9 +32,6 @@ interface CommissionTabProps {
   customTexts?: Record<string, string>;
   onUpdateCustomText?: (key: string, val: string, fallback: string) => void;
 }
-
-const COMMISSIONS_COLLECTION = 'commissions';
-const ORDERS_COLLECTION = 'commission_orders';
 
 const STATUS_LABELS: Record<CommissionOrderStatus, string> = {
   pending: 'Chờ nhận',
@@ -44,23 +47,28 @@ export const CommissionTab: React.FC<CommissionTabProps> = ({
   customTexts = {},
   onUpdateCustomText,
 }) => {
-  const [commInfos, setCommInfos] = useState<CreatorCommissionInfo[]>(() =>
-    dataStore.list<CreatorCommissionInfo>(COMMISSIONS_COLLECTION)
-  );
-  const [orders, setOrders] = useState<CommissionOrder[]>(() =>
-    dataStore.list<CommissionOrder>(ORDERS_COLLECTION)
-  );
+  const [commInfos, setCommInfos] = useState<CreatorCommissionInfo[]>([]);
+  const [orders, setOrders] = useState<CommissionOrder[]>([]);
+
+  const reloadCommissions = useCallback(async () => {
+    const data = await fetchCommissionsFromSupabase();
+    setCommInfos(data.boards);
+    setOrders(data.orders);
+  }, []);
 
   useEffect(() => {
-    return dataStore.onChange(() => {
-      setCommInfos(dataStore.list<CreatorCommissionInfo>(COMMISSIONS_COLLECTION));
-      setOrders(dataStore.list<CommissionOrder>(ORDERS_COLLECTION));
-    });
-  }, []);
+    reloadCommissions();
+  }, [reloadCommissions]);
 
   const [selectedCreatorId, setSelectedCreatorId] = useState<string>(
     creators[0]?.id || ''
   );
+  useEffect(() => {
+    if (!selectedCreatorId && creators[0]?.id) {
+      setSelectedCreatorId(creators[0].id);
+    }
+  }, [creators, selectedCreatorId]);
+
   const [requesterName, setRequesterName] = useState('');
   const [characterConcept, setCharacterConcept] = useState('');
   const [budget, setBudget] = useState('');
@@ -71,7 +79,7 @@ export const CommissionTab: React.FC<CommissionTabProps> = ({
   const [showAddBoardForm, setShowAddBoardForm] = useState(false);
   const [editingBoardId, setEditingBoardId] = useState<string | null>(null);
   const [boardCreatorId, setBoardCreatorId] = useState(
-    currentUser.linkedCreatorId || creators[0]?.id || ''
+    currentUser.id || currentUser.linkedCreatorId || creators[0]?.id || ''
   );
   const [boardWaitTime, setBoardWaitTime] = useState('3 – 5 ngày');
   const [boardNote, setBoardNote] = useState('');
@@ -126,88 +134,111 @@ export const CommissionTab: React.FC<CommissionTabProps> = ({
     );
   };
 
-  const handleSaveEditBoard = (e: React.FormEvent, id: string) => {
+  const handleSaveEditBoard = async (e: React.FormEvent, id: string) => {
     e.preventDefault();
-    dataStore.update<CreatorCommissionInfo>(COMMISSIONS_COLLECTION, id, {
+    const target = commInfos.find((c) => c.id === id);
+    if (!target) return;
+    const updated: CreatorCommissionInfo = {
+      ...target,
       waitTime: boardWaitTime.trim() || '3 – 5 ngày',
       note: boardNote.trim(),
       imageUrl: boardImageUrl.trim() || undefined,
       tiers: parseTiers(boardTiersText),
-    });
-    setCommInfos(dataStore.list<CreatorCommissionInfo>(COMMISSIONS_COLLECTION));
-    setEditingBoardId(null);
+    };
+    const res = await saveCommissionBoardOnSupabase(updated, false);
+    if (res.ok) {
+      await reloadCommissions();
+      setEditingBoardId(null);
+    } else {
+      setSubmitNotice(res.message);
+    }
   };
 
-  const handleAddBoardSubmit = (e: React.FormEvent) => {
+  const handleAddBoardSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const targetCreatorId = currentUser.isSiteOwner
-      ? boardCreatorId
-      : currentUser.linkedCreatorId || boardCreatorId;
-    dataStore.add<CreatorCommissionInfo>(COMMISSIONS_COLLECTION, {
-      creatorId: targetCreatorId,
-      isOpen: true,
-      waitTime: boardWaitTime.trim() || '3 – 5 ngày',
-      slotsLeft: 3,
-      note:
-        boardNote.trim() ||
-        'Nhận thiết kế nhân vật theo ý tưởng riêng với sự chăm chút tỉ mỉ.',
-      imageUrl: boardImageUrl.trim() || undefined,
-      tiers: parseTiers(boardTiersText),
-    });
-    setCommInfos(dataStore.list<CreatorCommissionInfo>(COMMISSIONS_COLLECTION));
-    setShowAddBoardForm(false);
+      ? boardCreatorId || currentUser.id
+      : currentUser.id || currentUser.linkedCreatorId || boardCreatorId;
+    const res = await saveCommissionBoardOnSupabase(
+      {
+        id: '',
+        creatorId: targetCreatorId,
+        isOpen: true,
+        waitTime: boardWaitTime.trim() || '3 – 5 ngày',
+        slotsLeft: 3,
+        note:
+          boardNote.trim() ||
+          'Nhận thiết kế nhân vật theo ý tưởng riêng với sự chăm chút tỉ mỉ.',
+        imageUrl: boardImageUrl.trim() || undefined,
+        tiers: parseTiers(boardTiersText),
+      },
+      true
+    );
+    if (res.ok) {
+      await reloadCommissions();
+      setShowAddBoardForm(false);
+    } else {
+      setSubmitNotice(res.message);
+    }
   };
 
-  const handleDeleteBoard = (id: string) => {
-    dataStore.remove(COMMISSIONS_COLLECTION, id);
-    setCommInfos(dataStore.list<CreatorCommissionInfo>(COMMISSIONS_COLLECTION));
+  const handleDeleteBoard = async (id: string) => {
+    const ok = await deleteCommissionBoardOnSupabase(id);
+    if (ok) {
+      await reloadCommissions();
+    }
   };
 
   const handleMoveBoard = (id: string, direction: 'up' | 'down') => {
-    const next = dataStore.moveItem<CreatorCommissionInfo>(
-      COMMISSIONS_COLLECTION,
-      id,
-      direction
-    );
-    setCommInfos(next);
+    setCommInfos((prev) => {
+      const idx = prev.findIndex((b) => b.id === id);
+      if (idx < 0) return prev;
+      const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
+      if (targetIdx < 0 || targetIdx >= prev.length) return prev;
+      const next = [...prev];
+      const [item] = next.splice(idx, 1);
+      next.splice(targetIdx, 0, item);
+      return next;
+    });
   };
 
-  const handleToggleCreatorOpen = (infoId: string, creatorId: string) => {
+  const handleToggleCreatorOpen = async (infoId: string, creatorId: string) => {
     if (!can('manage_commission_board', currentUser)) {
       onRequireAuth('Chỉ Creator mới có thể mở hoặc đóng bảng Commission.');
       return;
     }
-    if (!currentUser.isSiteOwner && currentUser.linkedCreatorId !== creatorId) {
+    if (
+      !currentUser.isSiteOwner &&
+      currentUser.id !== creatorId &&
+      currentUser.linkedCreatorId !== creatorId
+    ) {
       return;
     }
     const target = commInfos.find((c) => c.id === infoId);
     if (!target) return;
-    const updated = dataStore.update<CreatorCommissionInfo>(
-      COMMISSIONS_COLLECTION,
-      infoId,
-      { isOpen: !target.isOpen }
+    const res = await saveCommissionBoardOnSupabase(
+      { ...target, isOpen: !target.isOpen },
+      false
     );
-    if (updated) {
-      setCommInfos(dataStore.list<CreatorCommissionInfo>(COMMISSIONS_COLLECTION));
+    if (res.ok) {
+      await reloadCommissions();
     }
   };
 
-  const handleOrderStatusChange = (
+  const handleOrderStatusChange = async (
     orderId: string,
     nextStatus: CommissionOrderStatus
   ) => {
     if (!can('manage_commission_board', currentUser)) return;
-    const updated = dataStore.update<CommissionOrder>(
-      ORDERS_COLLECTION,
-      orderId,
-      { status: nextStatus }
-    );
-    if (updated) {
-      setOrders(dataStore.list<CommissionOrder>(ORDERS_COLLECTION));
+    const target = orders.find((o) => o.id === orderId);
+    if (!target) return;
+    const ok = await updateCommissionOrderStatusOnSupabase(target, nextStatus);
+    if (ok) {
+      await reloadCommissions();
     }
   };
 
-  const handleSubmitOrder = (e: React.FormEvent) => {
+  const handleSubmitOrder = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!can('order_commission', currentUser)) {
       onRequireAuth(
@@ -220,7 +251,7 @@ export const CommissionTab: React.FC<CommissionTabProps> = ({
       return;
     }
 
-    const added = dataStore.add<CommissionOrder>(ORDERS_COLLECTION, {
+    const res = await insertCommissionOrderOnSupabase({
       creatorId: selectedCreatorId,
       requesterName:
         requesterName.trim() || currentUser.displayName || 'Bạn Nhỏ',
@@ -230,16 +261,18 @@ export const CommissionTab: React.FC<CommissionTabProps> = ({
       status: 'pending',
     });
 
-    if (added) {
-      setOrders(dataStore.list<CommissionOrder>(ORDERS_COLLECTION));
+    if (res.ok) {
+      await reloadCommissions();
       setRequesterName('');
       setCharacterConcept('');
       setBudget('');
       setContact('');
       setSubmitNotice(
-        '✨ Đã gửi đơn đặt Commission đến Creator! Bạn có thể theo dõi tiến độ ngay bên dưới nhé.'
+        '✨ Đã gửi đơn đặt Commission lên Supabase! Bạn có thể theo dõi tiến độ ngay bên dưới nhé.'
       );
       setTimeout(() => setSubmitNotice(null), 4000);
+    } else {
+      setSubmitNotice(`🌸 ${res.message}`);
     }
   };
 
@@ -523,17 +556,12 @@ export const CommissionTab: React.FC<CommissionTabProps> = ({
                             <EditableText
                               value={info.waitTime}
                               editMode={canEditBoard}
-                              onSave={(val) => {
-                                dataStore.update<CreatorCommissionInfo>(
-                                  COMMISSIONS_COLLECTION,
-                                  info.id,
-                                  { waitTime: val }
+                              onSave={async (val) => {
+                                await saveCommissionBoardOnSupabase(
+                                  { ...info, waitTime: val },
+                                  false
                                 );
-                                setCommInfos(
-                                  dataStore.list<CreatorCommissionInfo>(
-                                    COMMISSIONS_COLLECTION
-                                  )
-                                );
+                                await reloadCommissions();
                               }}
                             />
                           </span>
@@ -601,17 +629,12 @@ export const CommissionTab: React.FC<CommissionTabProps> = ({
                       value={info.note}
                       editMode={canEditBoard}
                       multiline
-                      onSave={(val) => {
-                        dataStore.update<CreatorCommissionInfo>(
-                          COMMISSIONS_COLLECTION,
-                          info.id,
-                          { note: val }
+                      onSave={async (val) => {
+                        await saveCommissionBoardOnSupabase(
+                          { ...info, note: val },
+                          false
                         );
-                        setCommInfos(
-                          dataStore.list<CreatorCommissionInfo>(
-                            COMMISSIONS_COLLECTION
-                          )
-                        );
+                        await reloadCommissions();
                       }}
                     />
                   </div>
@@ -627,20 +650,15 @@ export const CommissionTab: React.FC<CommissionTabProps> = ({
                             <EditableText
                               value={tier.name}
                               editMode={canEditBoard}
-                              onSave={(val) => {
+                              onSave={async (val) => {
                                 const nextTiers = info.tiers.map((t, i) =>
                                   i === tIdx ? { ...t, name: val } : t
                                 );
-                                dataStore.update<CreatorCommissionInfo>(
-                                  COMMISSIONS_COLLECTION,
-                                  info.id,
-                                  { tiers: nextTiers }
+                                await saveCommissionBoardOnSupabase(
+                                  { ...info, tiers: nextTiers },
+                                  false
                                 );
-                                setCommInfos(
-                                  dataStore.list<CreatorCommissionInfo>(
-                                    COMMISSIONS_COLLECTION
-                                  )
-                                );
+                                await reloadCommissions();
                               }}
                             />
                           </div>
@@ -648,20 +666,15 @@ export const CommissionTab: React.FC<CommissionTabProps> = ({
                             <EditableText
                               value={tier.detail}
                               editMode={canEditBoard}
-                              onSave={(val) => {
+                              onSave={async (val) => {
                                 const nextTiers = info.tiers.map((t, i) =>
                                   i === tIdx ? { ...t, detail: val } : t
                                 );
-                                dataStore.update<CreatorCommissionInfo>(
-                                  COMMISSIONS_COLLECTION,
-                                  info.id,
-                                  { tiers: nextTiers }
+                                await saveCommissionBoardOnSupabase(
+                                  { ...info, tiers: nextTiers },
+                                  false
                                 );
-                                setCommInfos(
-                                  dataStore.list<CreatorCommissionInfo>(
-                                    COMMISSIONS_COLLECTION
-                                  )
-                                );
+                                await reloadCommissions();
                               }}
                             />
                           </div>
@@ -670,20 +683,15 @@ export const CommissionTab: React.FC<CommissionTabProps> = ({
                           <EditableText
                             value={tier.price}
                             editMode={canEditBoard}
-                            onSave={(val) => {
+                            onSave={async (val) => {
                               const nextTiers = info.tiers.map((t, i) =>
                                 i === tIdx ? { ...t, price: val } : t
                               );
-                              dataStore.update<CreatorCommissionInfo>(
-                                COMMISSIONS_COLLECTION,
-                                info.id,
-                                { tiers: nextTiers }
+                              await saveCommissionBoardOnSupabase(
+                                { ...info, tiers: nextTiers },
+                                false
                               );
-                              setCommInfos(
-                                dataStore.list<CreatorCommissionInfo>(
-                                  COMMISSIONS_COLLECTION
-                                )
-                              );
+                              await reloadCommissions();
                             }}
                           />
                         </span>

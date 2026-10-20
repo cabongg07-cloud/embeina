@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import {
   FileText,
   Folder,
@@ -13,26 +13,39 @@ import {
   Code,
   Trash2,
 } from 'lucide-react';
-import { DocItem } from '../data/sampleData';
-import { dataStore } from '../services/dataLayer';
+import { DocItem, SAMPLE_DOCS } from '../data/sampleData';
 import { EditableText } from './EditableText';
-
-const DOCS_COLLECTION = 'docs';
 
 interface DocsVaultTabProps {
   editMode?: boolean;
   customTexts?: Record<string, string>;
   onUpdateCustomText?: (key: string, val: string) => void;
+  docArticles?: DocItem[];
+  onUpdateDocArticles?: (next: DocItem[], label?: string) => void;
 }
 
 export const DocsVaultTab: React.FC<DocsVaultTabProps> = ({
   editMode = false,
   customTexts = {},
   onUpdateCustomText,
+  docArticles: propDocs,
+  onUpdateDocArticles,
 }) => {
   const [docs, setDocs] = useState<DocItem[]>(() =>
-    dataStore.list<DocItem>(DOCS_COLLECTION)
+    propDocs && propDocs.length > 0 ? propDocs : SAMPLE_DOCS
   );
+
+  useEffect(() => {
+    if (propDocs && propDocs.length > 0) {
+      setDocs(propDocs);
+    }
+  }, [propDocs]);
+
+  const syncDocs = (next: DocItem[], label = 'Cập nhật tài liệu Kho Docs') => {
+    setDocs(next);
+    onUpdateDocArticles?.(next, label);
+  };
+
   const [activeDocId, setActiveDocId] = useState<string>(
     docs[0]?.id || ''
   );
@@ -73,35 +86,32 @@ export const DocsVaultTab: React.FC<DocsVaultTabProps> = ({
   const handleUpdateDocField = (patch: Partial<DocItem>) => {
     if (!activeDoc) return;
     setAutoSaveStatus('Đang lưu...');
-    const updated = dataStore.update<DocItem>(
-      DOCS_COLLECTION,
-      activeDoc.id,
-      patch
+    const nowStr = new Date().toISOString().slice(0, 10);
+    const next = docs.map((d) =>
+      d.id === activeDoc.id ? { ...d, ...patch, updatedAt: nowStr } : d
     );
-    if (updated) {
-      setDocs(dataStore.list<DocItem>(DOCS_COLLECTION));
-      setTimeout(() => setAutoSaveStatus('Đã lưu tự động'), 400);
-    }
+    syncDocs(next, `Cập nhật tài liệu "${activeDoc.title}"`);
+    setTimeout(() => setAutoSaveStatus('Đã lưu tự động'), 400);
   };
 
   const handleCreateNewDoc = () => {
-    const added = dataStore.add<DocItem>(DOCS_COLLECTION, {
+    const nowStr = new Date().toISOString().slice(0, 10);
+    const added: DocItem = {
+      id: `doc_${Date.now()}`,
       title: 'Bản ghi chép đêm mới',
       folder: selectedFolder === 'all' ? 'Ghi chép riêng' : selectedFolder,
       tags: ['Bản nháp'],
       content: '# Tiêu đề tài liệu\n\nViết những dòng ghi chép của bạn tại đây...',
-    });
-    if (added) {
-      const updatedList = dataStore.list<DocItem>(DOCS_COLLECTION);
-      setDocs(updatedList);
-      setActiveDocId(added.id);
-    }
+      updatedAt: nowStr,
+    };
+    const updatedList = [added, ...docs];
+    syncDocs(updatedList, 'Tạo tài liệu mới trong Kho Docs');
+    setActiveDocId(added.id);
   };
 
   const handleDeleteDoc = (id: string) => {
-    dataStore.remove(DOCS_COLLECTION, id);
-    const next = dataStore.list<DocItem>(DOCS_COLLECTION);
-    setDocs(next);
+    const next = docs.filter((d) => d.id !== id);
+    syncDocs(next, 'Xóa tài liệu Kho Docs');
     if (activeDocId === id) {
       setActiveDocId(next[0]?.id || '');
     }

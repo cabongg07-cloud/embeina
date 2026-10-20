@@ -85,11 +85,8 @@ const USER_ACTIONS: PermissionAction[] = [
 
 const CREATOR_ACTIONS: PermissionAction[] = [
   ...USER_ACTIONS,
-  'edit',
-  'site_settings',
   'view_creator_tabs',
   'manage_feedback',
-  'creator_edit_mode',
   'manage_own_chars',
   'manage_commission_board',
   'publish_shared_prompt',
@@ -97,6 +94,13 @@ const CREATOR_ACTIONS: PermissionAction[] = [
   'create_giveaway',
   'draw_giveaway_winner',
   'manage_rescue_status',
+];
+
+const OWNER_ACTIONS: PermissionAction[] = [
+  ...CREATOR_ACTIONS,
+  'edit',
+  'site_settings',
+  'creator_edit_mode',
   'approve_creator_requests',
 ];
 
@@ -116,6 +120,7 @@ let currentUserState: AuthUser = DEFAULT_GUEST_USER;
 /**
  * Hàm kiểm tra quyền trung tâm `can(action, user?)` dùng trên toàn bộ ứng dụng.
  * GHI CHÚ BẢO MẬT: Ẩn giao diện chỉ cho gọn, bảo mật thật nằm ở RLS trên Supabase.
+ * - Chỉ vai 'owner' mới có quyền 'edit' và 'site_settings' (Nút ✏️ Chỉnh sửa và Cài đặt trang).
  */
 export function can(
   action: PermissionAction,
@@ -130,11 +135,12 @@ export function can(
     return USER_ACTIONS.includes(action);
   }
 
-  if (
-    resolvedUser.profileRole === 'creator' ||
-    resolvedUser.profileRole === 'owner'
-  ) {
+  if (resolvedUser.profileRole === 'creator') {
     return CREATOR_ACTIONS.includes(action);
+  }
+
+  if (resolvedUser.profileRole === 'owner') {
+    return OWNER_ACTIONS.includes(action);
   }
 
   return false;
@@ -149,18 +155,21 @@ export function canEditItem(
   ownerCreatorId?: string | null,
   editMode = true
 ): boolean {
-  if (!editMode || !can('edit', user)) {
+  if (!user || user.profileRole === 'guest') {
     return false;
   }
-  if (user?.profileRole === 'owner' || user?.isSiteOwner) {
-    return true;
+  if (user.profileRole === 'owner' || user.isSiteOwner) {
+    return editMode ? true : can('manage_own_chars', user);
+  }
+  if (!can('manage_own_chars', user)) {
+    return false;
   }
   if (!ownerCreatorId) {
-    return true;
+    return false;
   }
   return (
-    ownerCreatorId === user?.id ||
-    ownerCreatorId === user?.linkedCreatorId
+    ownerCreatorId === user.id ||
+    ownerCreatorId === user.linkedCreatorId
   );
 }
 

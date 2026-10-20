@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import {
   Copy,
   Check,
@@ -17,12 +17,17 @@ import {
   SharedPrompt,
   PersonalPrompt,
 } from '../data/sampleData';
-import { dataStore } from '../services/dataLayer';
+import {
+  fetchSharedPromptsFromSupabase,
+  insertSharedPromptOnSupabase,
+  updateSharedPromptOnSupabase,
+  deleteCommandVaultRowOnSupabase,
+  fetchPersonalPromptsFromSupabase,
+  insertPersonalPromptOnSupabase,
+  updatePersonalPromptOnSupabase,
+} from '../services/supabaseService';
 import { AuthUser, can, canEditItem } from '../services/authLayer';
 import { EditableText, ItemEditControls } from './EditableText';
-
-const SHARED_PROMPTS_COLLECTION = 'shared_prompts';
-const PERSONAL_PROMPTS_COLLECTION = 'personal_prompts';
 
 interface SharedPromptsTabProps {
   creators: Creator[];
@@ -43,15 +48,16 @@ export const SharedPromptsTab: React.FC<SharedPromptsTabProps> = ({
   customTexts = {},
   onUpdateCustomText,
 }) => {
-  const [prompts, setPrompts] = useState<SharedPrompt[]>(() =>
-    dataStore.list<SharedPrompt>(SHARED_PROMPTS_COLLECTION)
-  );
+  const [prompts, setPrompts] = useState<SharedPrompt[]>([]);
+
+  const reloadSharedPrompts = useCallback(async () => {
+    const list = await fetchSharedPromptsFromSupabase();
+    setPrompts(list);
+  }, []);
 
   useEffect(() => {
-    return dataStore.onChange(() => {
-      setPrompts(dataStore.list<SharedPrompt>(SHARED_PROMPTS_COLLECTION));
-    });
-  }, []);
+    reloadSharedPrompts();
+  }, [reloadSharedPrompts]);
 
   const [selectedTag, setSelectedTag] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
@@ -63,7 +69,7 @@ export const SharedPromptsTab: React.FC<SharedPromptsTabProps> = ({
 
   const [newTitle, setNewTitle] = useState('');
   const [newCreatorId, setNewCreatorId] = useState(
-    currentUser.linkedCreatorId || creators[0]?.id || ''
+    currentUser.id || currentUser.linkedCreatorId || creators[0]?.id || ''
   );
   const [newCharId, setNewCharId] = useState<string>('');
   const [newTags, setNewTags] = useState('');
@@ -118,36 +124,48 @@ export const SharedPromptsTab: React.FC<SharedPromptsTabProps> = ({
     setNewImageUrl(item.imageUrl || '');
   };
 
-  const handleSaveEditPrompt = (e: React.FormEvent, id: string) => {
+  const handleSaveEditPrompt = async (e: React.FormEvent, id: string) => {
     e.preventDefault();
+    const target = prompts.find((p) => p.id === id);
+    if (!target) return;
     const tagsArr = newTags
       .split(',')
       .map((t) => t.trim())
       .filter(Boolean);
-    dataStore.update<SharedPrompt>(SHARED_PROMPTS_COLLECTION, id, {
+    const updated: SharedPrompt = {
+      ...target,
       title: newTitle.trim() || 'Lệnh chia sẻ',
       characterId: newCharId || undefined,
       tags: tagsArr.length > 0 ? tagsArr : ['Đa dụng'],
       usageNote: newUsageNote.trim(),
       content: newContent.trim(),
       imageUrl: newImageUrl.trim() || undefined,
-    });
-    setPrompts(dataStore.list<SharedPrompt>(SHARED_PROMPTS_COLLECTION));
-    setEditingPromptId(null);
+    };
+    const ok = await updateSharedPromptOnSupabase(updated);
+    if (ok) {
+      await reloadSharedPrompts();
+      setEditingPromptId(null);
+    }
   };
 
-  const handleDeletePrompt = (id: string) => {
-    dataStore.remove(SHARED_PROMPTS_COLLECTION, id);
-    setPrompts(dataStore.list<SharedPrompt>(SHARED_PROMPTS_COLLECTION));
+  const handleDeletePrompt = async (id: string) => {
+    const ok = await deleteCommandVaultRowOnSupabase(id);
+    if (ok) {
+      await reloadSharedPrompts();
+    }
   };
 
   const handleMovePrompt = (id: string, direction: 'up' | 'down') => {
-    const next = dataStore.moveItem<SharedPrompt>(
-      SHARED_PROMPTS_COLLECTION,
-      id,
-      direction
-    );
-    setPrompts(next);
+    setPrompts((prev) => {
+      const idx = prev.findIndex((p) => p.id === id);
+      if (idx < 0) return prev;
+      const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
+      if (targetIdx < 0 || targetIdx >= prev.length) return prev;
+      const next = [...prev];
+      const [item] = next.splice(idx, 1);
+      next.splice(targetIdx, 0, item);
+      return next;
+    });
   };
 
   const handleCopyPrompt = async (id: string, text: string) => {
@@ -163,7 +181,7 @@ export const SharedPromptsTab: React.FC<SharedPromptsTabProps> = ({
     }
   };
 
-  const handleSaveToPersonalVault = (prompt: SharedPrompt) => {
+  const handleSaveToPersonalVault = async (prompt: SharedPrompt) => {
     if (!can('use_personal_prompt_vault', currentUser)) {
       onRequireAuth(
         'Mời bạn đăng nhập để lưu lệnh này vào Kho lệnh cá nhân của bạn nhé 🔖'
@@ -171,7 +189,7 @@ export const SharedPromptsTab: React.FC<SharedPromptsTabProps> = ({
       return;
     }
     const creatorName = creatorMap[prompt.creatorId]?.name || 'Creator';
-    dataStore.add<PersonalPrompt>(PERSONAL_PROMPTS_COLLECTION, {
+    const res = await insertPersonalPromptOnSupabase({
       title: prompt.title,
       folder: 'Nhập từ Creator',
       tags: prompt.tags,
@@ -179,11 +197,13 @@ export const SharedPromptsTab: React.FC<SharedPromptsTabProps> = ({
       starred: true,
       sourceCreatorName: creatorName,
     });
-    setImportedId(prompt.id);
-    setTimeout(() => setImportedId(null), 2000);
+    if (res.ok) {
+      setImportedId(prompt.id);
+      setTimeout(() => setImportedId(null), 2000);
+    }
   };
 
-  const handleCreateSharedPrompt = (e: React.FormEvent) => {
+  const handleCreateSharedPrompt = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!canPublishPrompt) return;
     if (!newTitle.trim() || !newContent.trim()) return;
@@ -193,10 +213,10 @@ export const SharedPromptsTab: React.FC<SharedPromptsTabProps> = ({
       .filter(Boolean);
 
     const targetCreatorId = currentUser.isSiteOwner
-      ? newCreatorId
-      : currentUser.linkedCreatorId || newCreatorId;
+      ? newCreatorId || currentUser.id
+      : currentUser.id || currentUser.linkedCreatorId || newCreatorId;
 
-    const added = dataStore.add<SharedPrompt>(SHARED_PROMPTS_COLLECTION, {
+    const res = await insertSharedPromptOnSupabase({
       title: newTitle.trim(),
       creatorId: targetCreatorId,
       characterId: newCharId || undefined,
@@ -208,8 +228,8 @@ export const SharedPromptsTab: React.FC<SharedPromptsTabProps> = ({
       imageUrl: newImageUrl.trim() || undefined,
     });
 
-    if (added) {
-      setPrompts(dataStore.list<SharedPrompt>(SHARED_PROMPTS_COLLECTION));
+    if (res.ok) {
+      await reloadSharedPrompts();
       setNewTitle('');
       setNewTags('');
       setNewUsageNote('');
@@ -531,15 +551,12 @@ export const SharedPromptsTab: React.FC<SharedPromptsTabProps> = ({
                   <EditableText
                     value={item.title}
                     editMode={canEditPrompt}
-                    onSave={(val) => {
-                      dataStore.update<SharedPrompt>(
-                        SHARED_PROMPTS_COLLECTION,
-                        item.id,
-                        { title: val }
-                      );
-                      setPrompts(
-                        dataStore.list<SharedPrompt>(SHARED_PROMPTS_COLLECTION)
-                      );
+                    onSave={async (val) => {
+                      await updateSharedPromptOnSupabase({
+                        ...item,
+                        title: val,
+                      });
+                      await reloadSharedPrompts();
                     }}
                   />
                 </h3>
@@ -570,15 +587,12 @@ export const SharedPromptsTab: React.FC<SharedPromptsTabProps> = ({
                   <EditableText
                     value={item.usageNote}
                     editMode={canEditPrompt}
-                    onSave={(val) => {
-                      dataStore.update<SharedPrompt>(
-                        SHARED_PROMPTS_COLLECTION,
-                        item.id,
-                        { usageNote: val }
-                      );
-                      setPrompts(
-                        dataStore.list<SharedPrompt>(SHARED_PROMPTS_COLLECTION)
-                      );
+                    onSave={async (val) => {
+                      await updateSharedPromptOnSupabase({
+                        ...item,
+                        usageNote: val,
+                      });
+                      await reloadSharedPrompts();
                     }}
                   />
                 </div>
@@ -588,15 +602,12 @@ export const SharedPromptsTab: React.FC<SharedPromptsTabProps> = ({
                     value={item.content}
                     editMode={canEditPrompt}
                     multiline
-                    onSave={(val) => {
-                      dataStore.update<SharedPrompt>(
-                        SHARED_PROMPTS_COLLECTION,
-                        item.id,
-                        { content: val }
-                      );
-                      setPrompts(
-                        dataStore.list<SharedPrompt>(SHARED_PROMPTS_COLLECTION)
-                      );
+                    onSave={async (val) => {
+                      await updateSharedPromptOnSupabase({
+                        ...item,
+                        content: val,
+                      });
+                      await reloadSharedPrompts();
                     }}
                   />
                 </div>
@@ -657,20 +668,21 @@ export const PersonalPromptVaultTab: React.FC<PersonalPromptVaultTabProps> = ({
   customTexts = {},
   onUpdateCustomText,
 }) => {
-  const [personalPrompts, setPersonalPrompts] = useState<PersonalPrompt[]>(() =>
-    dataStore.list<PersonalPrompt>(PERSONAL_PROMPTS_COLLECTION)
-  );
-  const [sharedPrompts] = useState<SharedPrompt[]>(() =>
-    dataStore.list<SharedPrompt>(SHARED_PROMPTS_COLLECTION)
-  );
+  const [personalPrompts, setPersonalPrompts] = useState<PersonalPrompt[]>([]);
+  const [sharedPrompts, setSharedPrompts] = useState<SharedPrompt[]>([]);
+
+  const reloadPersonalVault = useCallback(async () => {
+    const [personalList, sharedList] = await Promise.all([
+      fetchPersonalPromptsFromSupabase(),
+      fetchSharedPromptsFromSupabase(),
+    ]);
+    setPersonalPrompts(personalList);
+    setSharedPrompts(sharedList);
+  }, []);
 
   useEffect(() => {
-    return dataStore.onChange(() => {
-      setPersonalPrompts(
-        dataStore.list<PersonalPrompt>(PERSONAL_PROMPTS_COLLECTION)
-      );
-    });
-  }, []);
+    reloadPersonalVault();
+  }, [reloadPersonalVault]);
 
   const [selectedFolder, setSelectedFolder] = useState<string>('all');
   const [onlyStarred, setOnlyStarred] = useState(false);
@@ -742,7 +754,7 @@ export const PersonalPromptVaultTab: React.FC<PersonalPromptVaultTabProps> = ({
     );
   }
 
-  const handleAddPersonalPrompt = (e: React.FormEvent) => {
+  const handleAddPersonalPrompt = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim() || !content.trim()) return;
     const tagArr = tags
@@ -750,7 +762,7 @@ export const PersonalPromptVaultTab: React.FC<PersonalPromptVaultTabProps> = ({
       .map((t) => t.trim())
       .filter(Boolean);
 
-    const added = dataStore.add<PersonalPrompt>(PERSONAL_PROMPTS_COLLECTION, {
+    const res = await insertPersonalPromptOnSupabase({
       title: title.trim(),
       folder: folder.trim() || 'Mặc định',
       tags: tagArr.length > 0 ? tagArr : ['Cá nhân'],
@@ -758,32 +770,31 @@ export const PersonalPromptVaultTab: React.FC<PersonalPromptVaultTabProps> = ({
       starred: false,
     });
 
-    if (added) {
-      setPersonalPrompts(
-        dataStore.list<PersonalPrompt>(PERSONAL_PROMPTS_COLLECTION)
-      );
+    if (res.ok) {
+      await reloadPersonalVault();
       setTitle('');
       setTags('');
       setContent('');
     }
   };
 
-  const handleToggleStar = (id: string) => {
+  const handleToggleStar = async (id: string) => {
     const target = personalPrompts.find((p) => p.id === id);
     if (!target) return;
-    dataStore.update<PersonalPrompt>(PERSONAL_PROMPTS_COLLECTION, id, {
+    const ok = await updatePersonalPromptOnSupabase({
+      ...target,
       starred: !target.starred,
     });
-    setPersonalPrompts(
-      dataStore.list<PersonalPrompt>(PERSONAL_PROMPTS_COLLECTION)
-    );
+    if (ok) {
+      await reloadPersonalVault();
+    }
   };
 
-  const handleDelete = (id: string) => {
-    dataStore.remove(PERSONAL_PROMPTS_COLLECTION, id);
-    setPersonalPrompts(
-      dataStore.list<PersonalPrompt>(PERSONAL_PROMPTS_COLLECTION)
-    );
+  const handleDelete = async (id: string) => {
+    const ok = await deleteCommandVaultRowOnSupabase(id);
+    if (ok) {
+      await reloadPersonalVault();
+    }
   };
 
   const handleCopy = async (id: string, text: string) => {
@@ -799,17 +810,17 @@ export const PersonalPromptVaultTab: React.FC<PersonalPromptVaultTabProps> = ({
     }
   };
 
-  const handleImportShared = (sp: SharedPrompt) => {
-    dataStore.add<PersonalPrompt>(PERSONAL_PROMPTS_COLLECTION, {
+  const handleImportShared = async (sp: SharedPrompt) => {
+    const res = await insertPersonalPromptOnSupabase({
       title: sp.title,
       folder: 'Nhập từ Creator',
       tags: sp.tags,
       content: sp.content,
       starred: true,
     });
-    setPersonalPrompts(
-      dataStore.list<PersonalPrompt>(PERSONAL_PROMPTS_COLLECTION)
-    );
+    if (res.ok) {
+      await reloadPersonalVault();
+    }
     setShowImportModal(false);
   };
 

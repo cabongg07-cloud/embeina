@@ -14,13 +14,10 @@ import {
   Creator,
   CharacterItem,
   GiveawayItem,
+  SAMPLE_GIVEAWAYS,
 } from '../data/sampleData';
-import { dataStore } from '../services/dataLayer';
 import { AuthUser, can, canEditItem } from '../services/authLayer';
 import { EditableText, ItemEditControls } from './EditableText';
-
-const GIVEAWAYS_COLLECTION = 'giveaways';
-const DAILY_VOTES_KEY = 'daily_char_votes';
 
 interface GiveawayTabProps {
   creators: Creator[];
@@ -29,6 +26,8 @@ interface GiveawayTabProps {
   editMode?: boolean;
   customTexts?: Record<string, string>;
   onUpdateCustomText?: (key: string, val: string, fallback: string) => void;
+  giveaways?: GiveawayItem[];
+  onUpdateGiveaways?: (next: GiveawayItem[], label?: string) => void;
 }
 
 export const GiveawayTab: React.FC<GiveawayTabProps> = ({
@@ -38,16 +37,23 @@ export const GiveawayTab: React.FC<GiveawayTabProps> = ({
   editMode = false,
   customTexts = {},
   onUpdateCustomText,
+  giveaways: propGiveaways,
+  onUpdateGiveaways,
 }) => {
   const [giveaways, setGiveaways] = useState<GiveawayItem[]>(() =>
-    dataStore.list<GiveawayItem>(GIVEAWAYS_COLLECTION)
+    propGiveaways && propGiveaways.length > 0 ? propGiveaways : SAMPLE_GIVEAWAYS
   );
 
   useEffect(() => {
-    return dataStore.onChange(() => {
-      setGiveaways(dataStore.list<GiveawayItem>(GIVEAWAYS_COLLECTION));
-    });
-  }, []);
+    if (propGiveaways && propGiveaways.length > 0) {
+      setGiveaways(propGiveaways);
+    }
+  }, [propGiveaways]);
+
+  const syncGiveaways = (next: GiveawayItem[], label = 'Cập nhật Giveaway') => {
+    setGiveaways(next);
+    onUpdateGiveaways?.(next, label);
+  };
 
   const [joinNameMap, setJoinNameMap] = useState<Record<string, string>>({});
   const [drawingId, setDrawingId] = useState<string | null>(null);
@@ -58,7 +64,7 @@ export const GiveawayTab: React.FC<GiveawayTabProps> = ({
   const [editingGaId, setEditingGaId] = useState<string | null>(null);
 
   const [newCreatorId, setNewCreatorId] = useState(
-    currentUser.linkedCreatorId || creators[0]?.id || ''
+    currentUser.id || currentUser.linkedCreatorId || creators[0]?.id || ''
   );
   const [newTitle, setNewTitle] = useState('');
   const [newPrize, setNewPrize] = useState('');
@@ -87,29 +93,36 @@ export const GiveawayTab: React.FC<GiveawayTabProps> = ({
 
   const handleSaveEditGiveaway = (e: React.FormEvent, id: string) => {
     e.preventDefault();
-    dataStore.update<GiveawayItem>(GIVEAWAYS_COLLECTION, id, {
-      title: newTitle.trim() || 'Giveaway',
-      prize: newPrize.trim(),
-      condition: newCondition.trim(),
-      deadlineText: newDeadline.trim() || 'Còn 3 ngày',
-      imageUrl: newImageUrl.trim() || undefined,
-    });
-    setGiveaways(dataStore.list<GiveawayItem>(GIVEAWAYS_COLLECTION));
+    const next = giveaways.map((g) =>
+      g.id === id
+        ? {
+            ...g,
+            title: newTitle.trim() || 'Giveaway',
+            prize: newPrize.trim(),
+            condition: newCondition.trim(),
+            deadlineText: newDeadline.trim() || 'Còn 3 ngày',
+            imageUrl: newImageUrl.trim() || undefined,
+          }
+        : g
+    );
+    syncGiveaways(next, 'Sửa thông tin Giveaway');
     setEditingGaId(null);
   };
 
   const handleDeleteGiveaway = (id: string) => {
-    dataStore.remove(GIVEAWAYS_COLLECTION, id);
-    setGiveaways(dataStore.list<GiveawayItem>(GIVEAWAYS_COLLECTION));
+    const next = giveaways.filter((g) => g.id !== id);
+    syncGiveaways(next, 'Xóa kỳ Giveaway');
   };
 
   const handleMoveGiveaway = (id: string, direction: 'up' | 'down') => {
-    const next = dataStore.moveItem<GiveawayItem>(
-      GIVEAWAYS_COLLECTION,
-      id,
-      direction
-    );
-    setGiveaways(next);
+    const idx = giveaways.findIndex((g) => g.id === id);
+    if (idx < 0) return;
+    const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
+    if (targetIdx < 0 || targetIdx >= giveaways.length) return;
+    const next = [...giveaways];
+    const [item] = next.splice(idx, 1);
+    next.splice(targetIdx, 0, item);
+    syncGiveaways(next, 'Đổi thứ tự Giveaway');
   };
 
   const handleJoinGiveaway = (gaId: string) => {
@@ -127,10 +140,12 @@ export const GiveawayTab: React.FC<GiveawayTabProps> = ({
       'Bạn Nhỏ';
     if (ga.participants.includes(participantName)) return;
 
-    dataStore.update<GiveawayItem>(GIVEAWAYS_COLLECTION, gaId, {
-      participants: [...ga.participants, participantName],
-    });
-    setGiveaways(dataStore.list<GiveawayItem>(GIVEAWAYS_COLLECTION));
+    const next = giveaways.map((g) =>
+      g.id === gaId
+        ? { ...g, participants: [...g.participants, participantName] }
+        : g
+    );
+    syncGiveaways(next, 'Ghi danh tham gia Giveaway');
     setJoinNameMap((prev) => ({ ...prev, [gaId]: '' }));
   };
 
@@ -165,13 +180,18 @@ export const GiveawayTab: React.FC<GiveawayTabProps> = ({
           minute: '2-digit',
         });
 
-        dataStore.update<GiveawayItem>(GIVEAWAYS_COLLECTION, gaId, {
-          winnerHistory: [
-            { winnerName: finalWinner, drawnAt: nowStr },
-            ...ga.winnerHistory,
-          ],
-        });
-        setGiveaways(dataStore.list<GiveawayItem>(GIVEAWAYS_COLLECTION));
+        const next = giveaways.map((g) =>
+          g.id === gaId
+            ? {
+                ...g,
+                winnerHistory: [
+                  { winnerName: finalWinner, drawnAt: nowStr },
+                  ...g.winnerHistory,
+                ],
+              }
+            : g
+        );
+        syncGiveaways(next, `Bốc thăm người thắng: ${finalWinner}`);
         setSparkleWinner((prev) => ({ ...prev, [gaId]: finalWinner }));
         setDrawingId(null);
       }
@@ -186,10 +206,11 @@ export const GiveawayTab: React.FC<GiveawayTabProps> = ({
     if (!newTitle.trim() || !newPrize.trim()) return;
 
     const targetCreatorId = currentUser.isSiteOwner
-      ? newCreatorId
-      : currentUser.linkedCreatorId || newCreatorId;
+      ? newCreatorId || currentUser.id
+      : currentUser.id || currentUser.linkedCreatorId || newCreatorId;
 
-    dataStore.add<GiveawayItem>(GIVEAWAYS_COLLECTION, {
+    const created: GiveawayItem = {
+      id: `ga_${Date.now()}`,
       creatorId: targetCreatorId,
       title: newTitle.trim(),
       prize: newPrize.trim(),
@@ -200,9 +221,9 @@ export const GiveawayTab: React.FC<GiveawayTabProps> = ({
       winnerHistory: [],
       isEnded: false,
       imageUrl: newImageUrl.trim() || undefined,
-    });
+    };
 
-    setGiveaways(dataStore.list<GiveawayItem>(GIVEAWAYS_COLLECTION));
+    syncGiveaways([created, ...giveaways], `Tạo Giveaway "${created.title}"`);
     setNewTitle('');
     setNewPrize('');
     setNewCondition('');
@@ -465,14 +486,10 @@ export const GiveawayTab: React.FC<GiveawayTabProps> = ({
                         value={ga.title}
                         editMode={canEditGa}
                         onSave={(val) => {
-                          dataStore.update<GiveawayItem>(
-                            GIVEAWAYS_COLLECTION,
-                            ga.id,
-                            { title: val }
+                          const next = giveaways.map((g) =>
+                            g.id === ga.id ? { ...g, title: val } : g
                           );
-                          setGiveaways(
-                            dataStore.list<GiveawayItem>(GIVEAWAYS_COLLECTION)
-                          );
+                          syncGiveaways(next, 'Đổi tên Giveaway');
                         }}
                       />
                     </h3>
@@ -485,14 +502,10 @@ export const GiveawayTab: React.FC<GiveawayTabProps> = ({
                           value={ga.deadlineText}
                           editMode={canEditGa}
                           onSave={(val) => {
-                            dataStore.update<GiveawayItem>(
-                              GIVEAWAYS_COLLECTION,
-                              ga.id,
-                              { deadlineText: val }
+                            const next = giveaways.map((g) =>
+                              g.id === ga.id ? { ...g, deadlineText: val } : g
                             );
-                            setGiveaways(
-                              dataStore.list<GiveawayItem>(GIVEAWAYS_COLLECTION)
-                            );
+                            syncGiveaways(next, 'Đổi hạn Giveaway');
                           }}
                         />
                       </span>
@@ -517,14 +530,10 @@ export const GiveawayTab: React.FC<GiveawayTabProps> = ({
                         value={ga.prize}
                         editMode={canEditGa}
                         onSave={(val) => {
-                          dataStore.update<GiveawayItem>(
-                            GIVEAWAYS_COLLECTION,
-                            ga.id,
-                            { prize: val }
+                          const next = giveaways.map((g) =>
+                            g.id === ga.id ? { ...g, prize: val } : g
                           );
-                          setGiveaways(
-                            dataStore.list<GiveawayItem>(GIVEAWAYS_COLLECTION)
-                          );
+                          syncGiveaways(next, 'Đổi phần thưởng Giveaway');
                         }}
                       />
                     </span>
@@ -536,14 +545,10 @@ export const GiveawayTab: React.FC<GiveawayTabProps> = ({
                         value={ga.condition}
                         editMode={canEditGa}
                         onSave={(val) => {
-                          dataStore.update<GiveawayItem>(
-                            GIVEAWAYS_COLLECTION,
-                            ga.id,
-                            { condition: val }
+                          const next = giveaways.map((g) =>
+                            g.id === ga.id ? { ...g, condition: val } : g
                           );
-                          setGiveaways(
-                            dataStore.list<GiveawayItem>(GIVEAWAYS_COLLECTION)
-                          );
+                          syncGiveaways(next, 'Đổi điều kiện Giveaway');
                         }}
                       />
                     </span>
@@ -673,13 +678,8 @@ export const RankingTab: React.FC<RankingTabProps> = ({
   );
   const [selectedTag, setSelectedTag] = useState<string>('all');
 
-  const todayKey = new Date().toISOString().slice(0, 10);
-  const [dailyVotes, setDailyVotes] = useState<Record<string, number>>(() =>
-    dataStore.get<Record<string, number>>(DAILY_VOTES_KEY, {})
-  );
-  const [votedTodayIds, setVotedTodayIds] = useState<string[]>(() =>
-    dataStore.get<string[]>(`voted_on_${todayKey}`, [])
-  );
+  const [dailyVotes, setDailyVotes] = useState<Record<string, number>>({});
+  const [votedTodayIds, setVotedTodayIds] = useState<string[]>([]);
 
   const isEditor = editMode && can('edit', currentUser);
 
@@ -748,8 +748,6 @@ export const RankingTab: React.FC<RankingTabProps> = ({
     const nextVotedToday = [...votedTodayIds, charId];
     setDailyVotes(nextVotes);
     setVotedTodayIds(nextVotedToday);
-    dataStore.set(DAILY_VOTES_KEY, nextVotes);
-    dataStore.set(`voted_on_${todayKey}`, nextVotedToday);
   };
 
   const rankTitle =

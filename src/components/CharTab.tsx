@@ -60,6 +60,8 @@ interface CharTabProps {
   currencyEmoji?: string;
   customTexts?: Record<string, string>;
   onUpdateCustomText?: (key: string, val: string) => void;
+  customTags?: string[];
+  onUpdateCustomTags?: (tags: string[]) => void;
   supabaseInventory?: SupabaseInventoryItem[];
   isLoadingChars?: boolean;
 }
@@ -93,6 +95,8 @@ export const CharTab: React.FC<CharTabProps> = ({
   currencyEmoji = '🌸',
   customTexts = {},
   onUpdateCustomText,
+  customTags = [],
+  onUpdateCustomTags,
   supabaseInventory = [],
   isLoadingChars = false,
 }) => {
@@ -142,17 +146,10 @@ export const CharTab: React.FC<CharTabProps> = ({
     return map;
   }, [creators]);
 
-  // Danh sách các tag do Creator tự thêm vào sổ tay (lưu qua dataStore)
-  const [creatorCustomTags, setCreatorCustomTags] = useState<string[]>(() => {
-    try {
-      const saved = dataStore.get<string[]>('creator_custom_tags', []);
-      return Array.isArray(saved) ? saved : [];
-    } catch {
-      return [];
-    }
-  });
+  // Danh sách các tag tùy chỉnh được lưu trên bảng site_settings (key "custom_tags") của Supabase
+  const creatorCustomTags = customTags;
 
-  // State mở khung Thêm tag mới của Creator trong khu vực bộ lọc
+  // State mở khung Thêm tag mới của Creator/Owner trong khu vực bộ lọc
   const [showAddTagBar, setShowAddTagBar] = useState(false);
   const [newCustomTagInput, setNewCustomTagInput] = useState('');
   const [tagToastMsg, setTagToastMsg] = useState<string | null>(null);
@@ -162,8 +159,7 @@ export const CharTab: React.FC<CharTabProps> = ({
     if (!cleaned) return;
     if (!creatorCustomTags.includes(cleaned)) {
       const next = [...creatorCustomTags, cleaned];
-      setCreatorCustomTags(next);
-      dataStore.set('creator_custom_tags', next, true);
+      onUpdateCustomTags?.(next);
       setTagToastMsg(`✨ Đã thêm tag mới #${cleaned} vào sổ tay!`);
       setTimeout(() => setTagToastMsg(null), 3000);
     } else {
@@ -175,8 +171,7 @@ export const CharTab: React.FC<CharTabProps> = ({
 
   const handleDeleteCustomTag = (tagToDelete: string) => {
     const next = creatorCustomTags.filter((t) => t !== tagToDelete);
-    setCreatorCustomTags(next);
-    dataStore.set('creator_custom_tags', next, true);
+    onUpdateCustomTags?.(next);
     setTagToastMsg(`🗑️ Đã xóa tag #${tagToDelete}.`);
     setTimeout(() => setTagToastMsg(null), 2500);
   };
