@@ -28,7 +28,7 @@ import {
   AuthUser,
   can,
   authService,
-  StoredSafeAccount,
+  DbProfileRole,
 } from '../services/authLayer';
 import { SiteConfig, NavTabConfig } from '../services/siteSettings';
 import { ThemeConfig, ColorMode } from '../constants/themes';
@@ -73,12 +73,11 @@ export const EditModeSystem: React.FC<EditModeSystemProps> = ({
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [confirmResetOpen, setConfirmResetOpen] = useState(false);
   const [newMp3Url, setNewMp3Url] = useState('');
-  const [creatorApps, setCreatorApps] = useState<StoredSafeAccount[]>(() =>
-    authService.listCreatorApplications()
-  );
+  const [roleUsername, setRoleUsername] = useState('');
+  const [roleTarget, setRoleTarget] = useState<DbProfileRole>('creator');
+  const [roleLoading, setRoleLoading] = useState(false);
 
-  // Kiểm tra quyền nghiêm ngặt bằng can("edit", currentUser).
-  // Khách và Người dùng tuyệt đối không thấy nút và không kích hoạt được.
+  // GHI CHÚ BẢO MẬT: Ẩn giao diện chỉ cho gọn, bảo mật thật nằm ở RLS trên Supabase.
   const canEdit = can('edit', currentUser);
   const canOpenSiteSettings = can('site_settings', currentUser);
 
@@ -88,15 +87,31 @@ export const EditModeSystem: React.FC<EditModeSystemProps> = ({
     }
   }, [canOpenSiteSettings, drawerOpen]);
 
-  useEffect(() => {
-    if (drawerOpen) {
-      setCreatorApps(authService.listCreatorApplications());
-    }
-  }, [drawerOpen]);
-
   if (!canEdit) {
     return null;
   }
+
+  const handleSetRoleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!roleUsername.trim() || roleLoading) return;
+    setRoleLoading(true);
+    try {
+      const msg = await authService.setUserRoleByRpc(
+        roleUsername.trim(),
+        roleTarget
+      );
+      onNotify(msg);
+      setRoleUsername('');
+    } catch (err) {
+      onNotify(
+        err instanceof Error
+          ? err.message
+          : 'Không thể cập nhật vai trò trên Supabase.'
+      );
+    } finally {
+      setRoleLoading(false);
+    }
+  };
 
   // Xử lý ẩn/hiện & sắp xếp tab trong "Cài đặt trang"
   const handleMoveTab = (index: number, direction: 'up' | 'down') => {
@@ -178,51 +193,11 @@ export const EditModeSystem: React.FC<EditModeSystemProps> = ({
 
   return (
     <>
-      {/* 1. Nút ✏️ "Chỉnh sửa" cố định ở góc dưới bên trái (Chỉ hiện với vai Creator) */}
+      {/* 1. Nút ✏️ "Chỉnh sửa" cố định ở góc dưới bên trái (Chỉ hiện khi profile.role là creator hoặc owner) */}
       <div className="fixed bottom-4 left-4 z-30 flex flex-col items-start gap-2 max-w-[calc(100vw-2rem)]">
         {editMode && (
           <div className="p-3 rounded-2xl border-2 border-dashed border-[var(--accent)] bg-[var(--surface)]/95 backdrop-blur-md shadow-xl flex flex-wrap items-center gap-2 text-xs">
-            {/* Chuyển nhanh giữa Chủ web & Creator thường để kiểm thử phân quyền */}
-            <div className="inline-flex items-center rounded-full border border-[var(--border)] bg-[var(--bg)] p-0.5">
-              <button
-                type="button"
-                onClick={() => {
-                  authService.setCreatorOwnerMode(true, 'creator-lam-vong');
-                  onNotify(
-                    '👑 Đang ở chế độ Chủ web: Có thể mở "Cài đặt trang" và sửa mọi mục.'
-                  );
-                }}
-                title="Chủ web: Sửa toàn trang & mở bảng Cài đặt trang"
-                className={`px-2.5 py-1 rounded-full text-[11px] cursor-pointer inline-flex items-center gap-1 ${
-                  currentUser.isSiteOwner
-                    ? 'bg-[var(--accent)] text-[#3a2b30] font-bold'
-                    : 'text-[var(--muted)] hover:text-[var(--text)]'
-                }`}
-              >
-                <Crown className="w-3 h-3" />
-                <span>Chủ web</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  authService.setCreatorOwnerMode(false, 'creator-lam-vong');
-                  onNotify(
-                    '🎨 Đang ở chế độ Creator thường (Lâm Vọng Nguyệt): Chỉ sửa nội dung của chính mình.'
-                  );
-                }}
-                title="Creator thường: Chỉ sửa char, lệnh, giveaway, commission của chính mình"
-                className={`px-2.5 py-1 rounded-full text-[11px] cursor-pointer inline-flex items-center gap-1 ${
-                  !currentUser.isSiteOwner
-                    ? 'bg-[var(--accent)] text-[#3a2b30] font-bold'
-                    : 'text-[var(--muted)] hover:text-[var(--text)]'
-                }`}
-              >
-                <UserCheck className="w-3 h-3" />
-                <span>Creator thường</span>
-              </button>
-            </div>
-
-            {/* Nút mở bảng "Cài đặt trang" (Chỉ hiện cho Chủ web) */}
+            {/* Nút mở bảng "Cài đặt trang" */}
             {canOpenSiteSettings && (
               <button
                 type="button"
@@ -863,99 +838,54 @@ export const EditModeSystem: React.FC<EditModeSystemProps> = ({
                 </div>
               </section>
 
-              {/* Mục 5: Duyệt hoặc Từ chối tài khoản Creator đang chờ */}
+              {/* Mục 5: Phân quyền vai trò qua hàm RPC set_role(p_username, p_role) trên Supabase */}
               <section className="space-y-3">
                 <div className="flex items-center justify-between">
-                  <h3 className="font-serif-title text-lg font-bold text-[var(--text)]">
-                    5. Duyệt Tài Khoản Creator Đang Chờ ({creatorApps.length})
+                  <h3 className="font-serif-title text-lg font-bold text-[var(--text)] flex items-center gap-1.5">
+                    <Crown className="w-4 h-4 text-[var(--accent)]" />
+                    <span>5. Phân Quyền Tài Khoản (Supabase RPC set_role)</span>
                   </h3>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const next = authService.addSamplePendingCreator();
-                      setCreatorApps(next);
-                      onNotify('✨ Đã tạo thêm 1 hồ sơ Creator chờ duyệt để bạn thử nghiệm!');
-                    }}
-                    className="text-[11px] font-bold text-[var(--text)] underline cursor-pointer"
-                  >
-                    + Tạo thử hồ sơ chờ
-                  </button>
                 </div>
 
-                <div className="p-3 rounded-2xl border border-[var(--border)] bg-[var(--bg)] space-y-2.5">
-                  {creatorApps.length === 0 ? (
-                    <p className="text-xs text-[var(--muted)] text-center py-3">
-                      Hiện chưa có hồ sơ đăng ký Creator nào.
-                    </p>
-                  ) : (
-                    creatorApps.map((app) => (
-                      <div
-                        key={app.id}
-                        className="p-3 rounded-xl bg-[var(--surface)] border border-[var(--border)] flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
-                      >
-                        <div className="min-w-0">
-                          <div className="font-bold text-[var(--text)] flex items-center gap-1.5">
-                            <span>{app.avatarEmoji}</span>
-                            <span className="truncate">{app.displayName}</span>
-                          </div>
-                          <div className="text-[11px] text-[var(--muted)] truncate">
-                            {app.email} ·{' '}
-                            {app.creatorStatus === 'pending' ? (
-                              <span className="font-bold text-[var(--text)]">
-                                ⏳ Đang chờ duyệt
-                              </span>
-                            ) : app.creatorStatus === 'approved' ? (
-                              <span className="font-bold text-emerald-600 dark:text-emerald-400">
-                                ✅ Đã duyệt
-                              </span>
-                            ) : (
-                              <span className="text-red-500">Đã từ chối</span>
-                            )}
-                          </div>
-                        </div>
-
-                        <div className="flex items-center gap-1.5 shrink-0">
-                          {app.creatorStatus !== 'approved' && (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                const next = authService.approveCreatorById(
-                                  app.id
-                                );
-                                setCreatorApps(next);
-                                onNotify(
-                                  `🎉 Đã duyệt ${app.displayName} lên quyền Creator!`
-                                );
-                              }}
-                              className="px-3 py-1 rounded-full bg-[var(--accent)] text-[#3a2b30] font-bold cursor-pointer inline-flex items-center gap-1"
-                            >
-                              <CheckCircle2 className="w-3 h-3" />
-                              <span>Duyệt</span>
-                            </button>
-                          )}
-                          {app.creatorStatus !== 'rejected' && (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                const next = authService.rejectCreatorById(
-                                  app.id
-                                );
-                                setCreatorApps(next);
-                                onNotify(
-                                  `Đã từ chối yêu cầu Creator của ${app.displayName}.`
-                                );
-                              }}
-                              className="px-2.5 py-1 rounded-full border border-[var(--border)] text-[var(--muted)] hover:text-red-500 cursor-pointer inline-flex items-center gap-1"
-                            >
-                              <XCircle className="w-3 h-3" />
-                              <span>Từ chối</span>
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
+                <form
+                  onSubmit={handleSetRoleSubmit}
+                  className="p-3.5 rounded-2xl border border-[var(--border)] bg-[var(--bg)] space-y-3"
+                >
+                  <p className="text-[11px] text-[var(--muted)] leading-relaxed">
+                    Nhập <strong>username</strong> của tài khoản và chọn vai trò để gọi hàm{' '}
+                    <code>set_role(p_username, p_role)</code> trên Supabase (yêu cầu quyền Owner ở RLS).
+                  </p>
+                  <div className="flex flex-col sm:flex-row gap-2">
+                    <input
+                      type="text"
+                      value={roleUsername}
+                      onChange={(e) =>
+                        setRoleUsername(e.target.value.toLowerCase())
+                      }
+                      placeholder="Nhập username (vd: mien_mien)"
+                      className="flex-1 px-3 py-1.5 rounded-xl bg-[var(--surface)] border border-[var(--border)] text-xs text-[var(--text)]"
+                    />
+                    <select
+                      value={roleTarget}
+                      onChange={(e) =>
+                        setRoleTarget(e.target.value as DbProfileRole)
+                      }
+                      className="px-3 py-1.5 rounded-xl bg-[var(--surface)] border border-[var(--border)] text-xs text-[var(--text)]"
+                    >
+                      <option value="user">user (Người dùng)</option>
+                      <option value="creator">creator (Creator)</option>
+                      <option value="owner">owner (Chủ web)</option>
+                    </select>
+                    <button
+                      type="submit"
+                      disabled={roleLoading || !roleUsername.trim()}
+                      className="px-4 py-1.5 rounded-full bg-[var(--accent)] text-[#3a2b30] font-bold text-xs cursor-pointer disabled:opacity-50 inline-flex items-center justify-center gap-1"
+                    >
+                      <UserCheck className="w-3.5 h-3.5" />
+                      <span>{roleLoading ? 'Đang lưu...' : 'Cấp quyền'}</span>
+                    </button>
+                  </div>
+                </form>
               </section>
             </div>
 

@@ -22,8 +22,8 @@ import { dataStore } from '../services/dataLayer';
 import {
   CharacterUnlockRequirement,
   ItemCategory,
-  getAllOwnedItemsForUnlock,
 } from '../services/itemSystem';
+import { SupabaseInventoryItem } from '../services/supabaseService';
 
 interface CharTabProps {
   characters: CharacterItem[];
@@ -46,14 +46,22 @@ interface CharTabProps {
   searchInputRef?: React.RefObject<HTMLInputElement | null>;
   currentUser: AuthUser;
   editMode?: boolean;
-  onAddCharacter: (newChar: Omit<CharacterItem, 'id'>) => void;
-  onUpdateCharacter: (charId: string, patch: Partial<CharacterItem>) => void;
-  onDeleteCharacter: (charId: string) => void;
+  onAddCharacter: (newChar: Omit<CharacterItem, 'id'>) => void | Promise<void>;
+  onUpdateCharacter: (
+    charId: string,
+    patch: Partial<CharacterItem> & {
+      chatLink?: string;
+      openSceneSecret?: string;
+    }
+  ) => void | Promise<void>;
+  onDeleteCharacter: (charId: string) => void | Promise<void>;
   onMoveCharacter: (charId: string, direction: 'up' | 'down') => void;
   currencyName?: string;
   currencyEmoji?: string;
   customTexts?: Record<string, string>;
   onUpdateCustomText?: (key: string, val: string) => void;
+  supabaseInventory?: SupabaseInventoryItem[];
+  isLoadingChars?: boolean;
 }
 
 export const CharTab: React.FC<CharTabProps> = ({
@@ -85,6 +93,8 @@ export const CharTab: React.FC<CharTabProps> = ({
   currencyEmoji = '🌸',
   customTexts = {},
   onUpdateCustomText,
+  supabaseInventory = [],
+  isLoadingChars = false,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [onlyFavorites, setOnlyFavorites] = useState(false);
@@ -224,15 +234,10 @@ export const CharTab: React.FC<CharTabProps> = ({
     return Array.from(map.values());
   }, [creators, characters]);
 
-  // Danh sách vật phẩm hiện có để gợi ý khi Creator chỉ định đúng tên vật phẩm mở khóa
+  // Danh sách vật phẩm hiện có trên Supabase để gợi ý khi Creator chỉ định đúng tên vật phẩm mở khóa
   const ownedItemsSuggestions = useMemo(() => {
-    if (!showAddForm) return [];
-    try {
-      return getAllOwnedItemsForUnlock();
-    } catch {
-      return [];
-    }
-  }, [showAddForm]);
+    return supabaseInventory;
+  }, [supabaseInventory]);
 
   const filteredCharacters = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -1135,7 +1140,16 @@ export const CharTab: React.FC<CharTabProps> = ({
       )}
 
       {/* Danh sách Card Nhân vật */}
-      {filteredCharacters.length === 0 ? (
+      {isLoadingChars ? (
+        <div className="soft-card py-16 text-center space-y-3">
+          <p className="font-serif-title text-xl font-bold text-[var(--text)] animate-pulse">
+            ✨ Đang tải danh sách nhân vật từ Supabase...
+          </p>
+          <p className="text-xs text-[var(--muted)]">
+            Sổ tay đang mở trang mới, bạn đợi một chút nhé 🌸
+          </p>
+        </div>
+      ) : filteredCharacters.length === 0 ? (
         <div className="soft-card py-16 text-center space-y-3">
           <p className="font-serif-title text-xl font-bold text-[var(--text)]">
             Không tìm thấy nhân vật nào khớp với bộ lọc hiện tại 🌸
@@ -1182,6 +1196,7 @@ export const CharTab: React.FC<CharTabProps> = ({
               currencyEmoji={currencyEmoji}
               allAvailableTags={allKnownTagNames}
               onAddGlobalTag={handleAddCustomTag}
+              supabaseInventory={supabaseInventory}
             />
           ))}
         </div>

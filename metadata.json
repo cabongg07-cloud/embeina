@@ -2,7 +2,5 @@
   "name": "embeina",
   "description": "Không gian lưu trữ tĩnh lặng nơi tổng hợp creator và nhân vật AI lúc nửa đêm.",
   "requestFramePermissions": [],
-  "majorCapabilities": [
-    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
-  ]
+  "majorCapabilities": []
 }

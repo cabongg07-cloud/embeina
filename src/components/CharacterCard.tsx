@@ -17,6 +17,7 @@ import {
   StickyNote,
   Tag,
   X,
+  Loader2,
 } from 'lucide-react';
 import { CharacterItem, Creator } from '../data/sampleData';
 import { EditableText, ItemEditControls } from './EditableText';
@@ -24,10 +25,13 @@ import {
   CharacterUnlockRequirement,
   ItemCategory,
   CATEGORY_LABELS,
-  checkUnlockRequirements,
-  consumeItemsForUnlock,
-  getAllOwnedItemsForUnlock,
 } from '../services/itemSystem';
+import {
+  SupabaseInventoryItem,
+  checkSupabaseUnlockRequirements,
+  fetchCharSecretOnDemand,
+  unlockCharViaRpc,
+} from '../services/supabaseService';
 
 interface CharacterCardProps {
   character: CharacterItem;
@@ -48,8 +52,14 @@ interface CharacterCardProps {
   // Chế độ chỉnh sửa & quyền sở hữu của Creator
   editMode?: boolean;
   canEditChar?: boolean;
-  onUpdateCharacter?: (charId: string, patch: Partial<CharacterItem>) => void;
-  onDeleteCharacter?: (charId: string) => void;
+  onUpdateCharacter?: (
+    charId: string,
+    patch: Partial<CharacterItem> & {
+      chatLink?: string;
+      openSceneSecret?: string;
+    }
+  ) => void | Promise<void>;
+  onDeleteCharacter?: (charId: string) => void | Promise<void>;
   onMoveCharacter?: (charId: string, direction: 'up' | 'down') => void;
   isFirst?: boolean;
   isLast?: boolean;
@@ -57,6 +67,7 @@ interface CharacterCardProps {
   currencyEmoji?: string;
   allAvailableTags?: string[];
   onAddGlobalTag?: (tag: string) => void;
+  supabaseInventory?: SupabaseInventoryItem[];
 }
 
 export const CharacterCard: React.FC<CharacterCardProps> = ({
@@ -82,6 +93,7 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
   isLast = false,
   allAvailableTags = [],
   onAddGlobalTag,
+  supabaseInventory = [],
 }) => {
   const [copied, setCopied] = useState(false);
   const [noteOpen, setNoteOpen] = useState(false);
@@ -91,6 +103,14 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
   // Trạng thái gắn tag nhanh trực tiếp trên card cho Creator
   const [quickAddTagOpen, setQuickAddTagOpen] = useState(false);
   const [quickTagInput, setQuickTagInput] = useState('');
+
+  // Dữ liệu char_secrets CHỈ đọc từ Supabase khi người dùng bấm vào char (không lưu global state hay localStorage)
+  const [loadedSecret, setLoadedSecret] = useState<{
+    chatLink: string;
+    openScene: string;
+  } | null>(null);
+  const [loadingSecret, setLoadingSecret] = useState(false);
+  const [unlocking, setUnlocking] = useState(false);
 
   // Hộp mở khóa bằng vật phẩm
   const [unlockPanelOpen, setUnlockPanelOpen] = useState(false);
@@ -130,51 +150,79 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
       : [{ id: 'req_default_1', category: 'flower', count: 2 }]
   );
 
-  // Danh sách tên vật phẩm hiện có trong kho để gợi ý khi Creator muốn đòi đúng tên cụ thể
+  // Danh sách tên vật phẩm hiện có trong kho Supabase để gợi ý khi Creator muốn đòi đúng tên cụ thể
   const ownedItemsSuggestions = useMemo(() => {
-    try {
-      return getAllOwnedItemsForUnlock();
-    } catch {
-      return [];
-    }
-  }, [editModalOpen, unlockPanelOpen]);
+    return supabaseInventory;
+  }, [supabaseInventory]);
 
   const effectiveRequirements: CharacterUnlockRequirement[] = useMemo(() => {
-    if (character.unlockRequirements && character.unlockRequirements.length > 0) {
+    if (
+      character.unlockRequirements &&
+      character.unlockRequirements.length > 0
+    ) {
       return character.unlockRequirements;
     }
-    if (character.isLocked || (character.petalPrice && character.petalPrice > 0)) {
-      return [
-        { id: 'fallback_req_1', category: 'flower', count: 2 },
-        { id: 'fallback_req_2', category: 'drink', count: 1 },
-      ];
-    }
     return [];
-  }, [character.unlockRequirements, character.isLocked, character.petalPrice]);
+  }, [character.unlockRequirements]);
 
   const requiresUnlock =
     Boolean(
       character.isLocked ||
-        (character.unlockRequirements && character.unlockRequirements.length > 0) ||
-        (character.petalPrice && character.petalPrice > 0)
-    ) && !isUnlocked;
+        (character.unlockRequirements &&
+          character.unlockRequirements.length > 0)
+    ) &&
+    !isUnlocked &&
+    !loadedSecret;
 
-  // Kiểm tra trạng thái đủ / thiếu của từng yêu cầu vật phẩm
+  // Kiểm tra trạng thái đủ / thiếu của từng yêu cầu vật phẩm trên bảng inventory (chỉ tính ready_at null hoặc đã qua)
   const requirementStatus = useMemo(() => {
     if (!requiresUnlock) {
       return { allMet: true, details: [] };
     }
-    return checkUnlockRequirements(effectiveRequirements);
-  }, [requiresUnlock, effectiveRequirements, unlockPanelOpen, justUnlockedSparkle]);
+    return checkSupabaseUnlockRequirements(
+      effectiveRequirements,
+      supabaseInventory
+    );
+  }, [requiresUnlock, effectiveRequirements, supabaseInventory]);
+
+  /**
+   * Khi người dùng bấm vào nhân vật để xem Open Scene & Link Chat:
+   * Chỉ đọc từ bảng `char_secrets` lúc này. Nếu rỗng thì hiện bảng yêu cầu mở khóa.
+   */
+  const handleInspectCharSecret = async () => {
+    if (loadingSecret) return;
+    setLoadingSecret(true);
+    setUnlockFeedback(null);
+    try {
+      const secret = await fetchCharSecretOnDemand(character.id);
+      if (secret && (secret.chatLink || secret.openScene)) {
+        setLoadedSecret(secret);
+        setUnlockPanelOpen(false);
+      } else {
+        setLoadedSecret(null);
+        setUnlockPanelOpen(true);
+      }
+    } catch {
+      setLoadedSecret(null);
+      setUnlockPanelOpen(true);
+    } finally {
+      setLoadingSecret(false);
+    }
+  };
 
   const handleCopyLink = async () => {
+    const linkToCopy = loadedSecret?.chatLink || '';
+    if (!linkToCopy) {
+      await handleInspectCharSecret();
+      return;
+    }
     try {
-      await navigator.clipboard.writeText(character.chatUrl);
+      await navigator.clipboard.writeText(linkToCopy);
       setCopied(true);
       setTimeout(() => setCopied(false), 1800);
     } catch {
       const input = document.createElement('input');
-      input.value = character.chatUrl;
+      input.value = linkToCopy;
       document.body.appendChild(input);
       input.select();
       document.execCommand('copy');
@@ -191,7 +239,10 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
     setTimeout(() => setNoteSavedToast(false), 1600);
   };
 
-  const handleConfirmItemUnlock = () => {
+  /**
+   * Mở khóa nhân vật bằng hàm RPC `unlock_char(p_char_id)`, xong đọc lại `char_secrets`.
+   */
+  const handleConfirmItemUnlock = async () => {
     if (!isLoggedIn) {
       onRequireAuth?.(
         `Mời bạn đăng nhập để dùng vật phẩm mở khóa nhân vật "${character.name}" và lưu vĩnh viễn nhé 🌸`
@@ -199,24 +250,31 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
       return;
     }
 
-    const latestCheck = checkUnlockRequirements(effectiveRequirements);
-    if (!latestCheck.allMet) {
-      setUnlockFeedback(
-        'Bạn vẫn còn thiếu một vài vật phẩm nhỏ. Hãy ghé Vườn hoa, Hồ cá hoặc Quầy thức uống nhé 🌱'
-      );
-      return;
-    }
+    if (unlocking) return;
+    setUnlocking(true);
+    setUnlockFeedback(null);
 
-    const consumed = consumeItemsForUnlock(effectiveRequirements);
-    if (consumed) {
+    try {
+      const { secret } = await unlockCharViaRpc(character.id);
+      if (secret) {
+        setLoadedSecret(secret);
+      }
       setJustUnlockedSparkle(true);
       setUnlockPanelOpen(false);
       onUnlockWithItems?.(character.id);
       setTimeout(() => setJustUnlockedSparkle(false), 4500);
+    } catch (err) {
+      setUnlockFeedback(
+        err instanceof Error
+          ? err.message
+          : '🌸 Chưa thể mở khóa nhân vật lúc này, bạn kiểm tra lại Kho đồ nhé!'
+      );
+    } finally {
+      setUnlocking(false);
     }
   };
 
-  const openEditForm = () => {
+  const openEditForm = async () => {
     setEditName(character.name);
     setEditEpithet(character.epithet);
     setEditCreatorName(character.creatorName || creator?.name || '');
@@ -225,12 +283,11 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
     setEditTagsList(character.tags);
     setEditTagInput('');
     setEditDesc(character.description);
-    setEditOpenScene(character.openScene || character.openingLine || '');
     setEditCreatorNote(character.creatorNote || '');
-    setEditChatUrl(character.chatUrl);
     const locked = Boolean(
       character.isLocked ||
-        (character.unlockRequirements && character.unlockRequirements.length > 0)
+        (character.unlockRequirements &&
+          character.unlockRequirements.length > 0)
     );
     setEditIsLocked(locked);
     setEditRequirements(
@@ -238,6 +295,22 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
         ? character.unlockRequirements
         : [{ id: `req_${Date.now()}`, category: 'flower', count: 2 }]
     );
+
+    // Đọc char_secrets để điền vào form sửa cho Creator
+    if (loadedSecret) {
+      setEditChatUrl(loadedSecret.chatLink);
+      setEditOpenScene(loadedSecret.openScene);
+    } else {
+      setEditChatUrl('');
+      setEditOpenScene('');
+      fetchCharSecretOnDemand(character.id).then((sec) => {
+        if (sec) {
+          setEditChatUrl(sec.chatLink);
+          setEditOpenScene(sec.openScene);
+        }
+      });
+    }
+
     setEditModalOpen(true);
   };
 
@@ -252,7 +325,7 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
     }
   };
 
-  const handleSaveEditForm = (e: React.FormEvent) => {
+  const handleSaveEditForm = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!onUpdateCharacter || !editName.trim()) return;
     const pendingTag = editTagInput.replace(/,/g, '').trim();
@@ -269,7 +342,7 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
         }))
       : [];
 
-    onUpdateCharacter(character.id, {
+    await onUpdateCharacter(character.id, {
       name: editName.trim(),
       epithet: editEpithet.trim() || 'Nhân vật sổ tay',
       creatorName: editCreatorName.trim() || creator?.name || 'Creator',
@@ -278,13 +351,19 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
         editAvatarSymbol.trim() || editName.trim().slice(0, 2).toUpperCase(),
       tags: finalTags.length > 0 ? finalTags : ['Đời thường'],
       description: editDesc.trim(),
-      openingLine: editOpenScene.trim(),
-      openScene: editOpenScene.trim(),
       creatorNote: editCreatorNote.trim() || undefined,
-      chatUrl: editChatUrl.trim() || 'https://character.ai',
       isLocked: editIsLocked,
       unlockRequirements: cleanReqs,
+      // Ghi vào bảng char_secrets trên Supabase (không lưu vào global state)
+      chatLink: editChatUrl.trim() || 'https://character.ai',
+      openSceneSecret: editOpenScene.trim(),
     });
+    if (loadedSecret) {
+      setLoadedSecret({
+        chatLink: editChatUrl.trim() || 'https://character.ai',
+        openScene: editOpenScene.trim(),
+      });
+    }
     finalTags.forEach((t) => onAddGlobalTag?.(t));
     setEditModalOpen(false);
   };
@@ -951,22 +1030,24 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
           />
         </div>
 
-        {/* Open Scene & Ghi chú của Creator: Chỉ hiện đầy đủ khi ĐÃ MỞ KHÓA */}
-        {!requiresUnlock ? (
-          <div className="space-y-2.5">
+        {/* Open Scene & Link Chat: CHỈ đọc từ char_secrets khi người dùng bấm vào char; rỗng thì hiện bảng yêu cầu mở khóa */}
+        {loadedSecret ? (
+          <div className="space-y-2.5 animate-fadeIn">
             <blockquote className="pl-3.5 py-2 pr-3 rounded-r-2xl bg-[var(--bg)]/80 border-l-3 border-[var(--accent)] text-xs italic text-[var(--muted)] leading-relaxed">
               <div className="not-italic font-bold text-[11px] text-[var(--text)] mb-1 flex items-center gap-1">
                 <BookOpen className="w-3 h-3 text-[var(--accent)]" />
                 <span>Open Scene (Lời mở đầu của cảnh):</span>
               </div>
               <EditableText
-                value={displayOpenScene}
-                onSave={(val) =>
-                  onUpdateCharacter?.(character.id, {
-                    openingLine: val,
-                    openScene: val,
-                  })
-                }
+                value={loadedSecret.openScene || '(Chưa có lời mở đầu)'}
+                onSave={async (val) => {
+                  await onUpdateCharacter?.(character.id, {
+                    openSceneSecret: val,
+                  });
+                  setLoadedSecret((prev) =>
+                    prev ? { ...prev, openScene: val } : prev
+                  );
+                }}
                 editMode={editMode && canEditChar}
                 multiline
               />
@@ -985,87 +1066,109 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
         ) : (
           <div className="p-3.5 rounded-2xl bg-[var(--bg)] border border-dashed border-[var(--accent)] text-xs text-[var(--muted)] flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
-              <Lock className="w-4 h-4 text-[var(--accent)] shrink-0" />
+              {requiresUnlock ? (
+                <Lock className="w-4 h-4 text-[var(--accent)] shrink-0" />
+              ) : (
+                <BookOpen className="w-4 h-4 text-[var(--accent)] shrink-0" />
+              )}
               <span>
-                Open Scene & Link trò chuyện đang được khóa bằng vật phẩm kỷ niệm.
+                {requiresUnlock
+                  ? 'Open Scene & Link trò chuyện được bảo vệ bằng vật phẩm kỷ niệm.'
+                  : 'Bấm vào nhân vật để mở đọc Open Scene & lấy Link trò chuyện.'}
               </span>
             </div>
             <button
               type="button"
-              onClick={() => setUnlockPanelOpen((prev) => !prev)}
-              className="px-3 py-1 rounded-full bg-[var(--accent)]/25 text-[var(--text)] font-bold text-[11px] shrink-0 cursor-pointer hover:bg-[var(--accent)]/40"
+              onClick={handleInspectCharSecret}
+              disabled={loadingSecret}
+              className="px-3 py-1 rounded-full bg-[var(--accent)]/25 text-[var(--text)] font-bold text-[11px] shrink-0 cursor-pointer hover:bg-[var(--accent)]/40 inline-flex items-center gap-1"
             >
-              {unlockPanelOpen ? 'Thu gọn' : 'Xem yêu cầu'}
+              {loadingSecret ? (
+                <>
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  <span>Đang mở...</span>
+                </>
+              ) : (
+                <span>{unlockPanelOpen ? 'Kiểm tra lại' : 'Xem chi tiết'}</span>
+              )}
             </button>
           </div>
         )}
 
-        {/* BẢNG YÊU CẦU MỞ KHÓA BẰNG VẬT PHẨM */}
-        {requiresUnlock && unlockPanelOpen && (
-          <div className="p-4 rounded-2xl border-2 border-[var(--accent)] bg-[var(--bg)] space-y-3 text-xs">
+        {/* BẢNG YÊU CẦU MỞ KHÓA BẰNG VẬT PHẨM (Đọc từ chars.requirements so với bảng inventory) */}
+        {unlockPanelOpen && !loadedSecret && (
+          <div className="p-4 rounded-2xl border-2 border-[var(--accent)] bg-[var(--bg)] space-y-3 text-xs animate-fadeIn">
             <div className="flex items-center justify-between">
               <span className="font-bold text-[var(--text)] flex items-center gap-1.5">
                 <Sparkles className="w-3.5 h-3.5 text-[var(--accent)]" />
                 <span>Yêu cầu vật phẩm mở khóa {character.name}</span>
               </span>
               <span className="text-[11px] text-[var(--muted)]">
-                Mở khóa 1 lần, lưu vĩnh viễn
+                Chỉ tính hoa đã nở / cá đã lớn
               </span>
             </div>
 
-            <div className="space-y-2">
-              {requirementStatus.details.map((detail) => {
-                const catInfo = CATEGORY_LABELS[detail.req.category];
-                return (
-                  <div
-                    key={detail.req.id}
-                    className={`p-2.5 rounded-xl border flex flex-col gap-1 ${
-                      detail.isMet
-                        ? 'border-emerald-400/50 bg-emerald-500/10'
-                        : 'border-rose-300/50 bg-rose-500/5'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-semibold text-[var(--text)]">
-                        {catInfo.emoji} {detail.req.count} {catInfo.name}{' '}
-                        {detail.req.specificItemName ? (
-                          <strong className="text-[var(--accent)]">
-                            “{detail.req.specificItemName}”
-                          </strong>
-                        ) : (
-                          <span className="text-[var(--muted)] font-normal">
-                            (bất kỳ)
-                          </span>
-                        )}
-                      </span>
-                      <span
-                        className={`font-bold text-[11px] ${
-                          detail.isMet ? 'text-emerald-600 dark:text-emerald-300' : 'text-rose-500'
-                        }`}
-                      >
-                        {detail.isMet
-                          ? `✅ Đã đủ (${detail.ownedCount}/${detail.req.count})`
-                          : `❌ Còn thiếu (${detail.ownedCount}/${detail.req.count})`}
-                      </span>
-                    </div>
-                    {!detail.isMet && detail.hintText && (
-                      <div className="text-[11px] text-[var(--muted)] flex items-center justify-between gap-2 pt-0.5">
-                        <span>{detail.hintText}</span>
-                        {onGoToMiniGame && (
-                          <button
-                            type="button"
-                            onClick={onGoToMiniGame}
-                            className="underline font-bold text-[var(--text)] hover:text-[var(--accent)] shrink-0 cursor-pointer"
-                          >
-                            Đến ngay →
-                          </button>
-                        )}
+            {effectiveRequirements.length === 0 ? (
+              <p className="text-xs text-[var(--muted)]">
+                Nhân vật này đang khóa. Hãy bấm Mở khóa ngay bên dưới nhé!
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {requirementStatus.details.map((detail) => {
+                  const catInfo = CATEGORY_LABELS[detail.req.category];
+                  return (
+                    <div
+                      key={detail.req.id}
+                      className={`p-2.5 rounded-xl border flex flex-col gap-1 ${
+                        detail.isMet
+                          ? 'border-emerald-400/50 bg-emerald-500/10'
+                          : 'border-rose-300/50 bg-rose-500/5'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-semibold text-[var(--text)]">
+                          {catInfo.emoji} {detail.req.count} {catInfo.name}{' '}
+                          {detail.req.specificItemName ? (
+                            <strong className="text-[var(--accent)]">
+                              “{detail.req.specificItemName}”
+                            </strong>
+                          ) : (
+                            <span className="text-[var(--muted)] font-normal">
+                              (bất kỳ)
+                            </span>
+                          )}
+                        </span>
+                        <span
+                          className={`font-bold text-[11px] ${
+                            detail.isMet
+                              ? 'text-emerald-600 dark:text-emerald-300'
+                              : 'text-rose-500'
+                          }`}
+                        >
+                          {detail.isMet
+                            ? `✅ Đã đủ (${detail.ownedReadyCount}/${detail.req.count})`
+                            : `❌ Còn thiếu (${detail.ownedReadyCount}/${detail.req.count})`}
+                        </span>
                       </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
+                      {!detail.isMet && detail.hintText && (
+                        <div className="text-[11px] text-[var(--muted)] flex items-center justify-between gap-2 pt-0.5">
+                          <span>{detail.hintText}</span>
+                          {onGoToMiniGame && (
+                            <button
+                              type="button"
+                              onClick={onGoToMiniGame}
+                              className="underline font-bold text-[var(--text)] hover:text-[var(--accent)] shrink-0 cursor-pointer"
+                            >
+                              Đến Kho đồ / Gacha →
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
 
             {unlockFeedback && (
               <p className="text-[11px] text-amber-600 dark:text-amber-300 font-semibold">
@@ -1076,22 +1179,26 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
             <div className="flex items-center justify-between gap-2 pt-1">
               <span className="text-[11px] text-[var(--muted)]">
                 {requirementStatus.allMet
-                  ? '🎉 Bạn đã có đủ vật phẩm để mở khóa!'
-                  : '🌸 Hãy thu thập đủ các mục đánh dấu ✅ để nút Mở khóa sáng lên nhé.'}
+                  ? '🎉 Bạn đã có đủ vật phẩm sẵn sàng trong Kho đồ!'
+                  : '🌸 Chỉ tính hoa/cá có thời gian ready_at đã hoàn tất trong Kho đồ.'}
               </span>
               <button
                 type="button"
-                disabled={isLoggedIn && !requirementStatus.allMet}
+                disabled={unlocking}
                 onClick={handleConfirmItemUnlock}
-                className={`px-4 py-2 rounded-full text-xs font-bold transition-all inline-flex items-center gap-1.5 ${
-                  !isLoggedIn || requirementStatus.allMet
-                    ? 'bg-[var(--accent)] text-[#3a2b30] bouncy-btn cursor-pointer shadow-sm'
-                    : 'bg-[var(--border)] text-[var(--muted)] opacity-60 cursor-not-allowed'
-                }`}
+                className="px-4 py-2 rounded-full text-xs font-bold transition-all inline-flex items-center gap-1.5 bg-[var(--accent)] text-[#3a2b30] bouncy-btn cursor-pointer shadow-sm disabled:opacity-60"
               >
-                <Sparkles className="w-3.5 h-3.5" />
+                {unlocking ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Sparkles className="w-3.5 h-3.5" />
+                )}
                 <span>
-                  {!isLoggedIn ? 'Đăng nhập để mở khóa' : '✨ Mở khóa ngay'}
+                  {!isLoggedIn
+                    ? 'Đăng nhập để mở khóa'
+                    : unlocking
+                    ? 'Đang mở khóa...'
+                    : '✨ Mở khóa'}
                 </span>
               </button>
             </div>
@@ -1099,23 +1206,12 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
         )}
       </div>
 
-      {/* Footer Actions: Chat link, Copy link, Ghi chú cá nhân */}
+      {/* Footer Actions: Xem/Mở khóa char_secrets, Chat link, Copy link, Ghi chú cá nhân */}
       <div className="mt-6 pt-4 border-t border-[var(--border)] space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          {requiresUnlock ? (
-            <button
-              type="button"
-              onClick={() => setUnlockPanelOpen((prev) => !prev)}
-              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full text-xs font-bold bg-[var(--accent)] text-[#3a2b30] bouncy-btn cursor-pointer shadow-xs"
-            >
-              <Lock className="w-3.5 h-3.5" />
-              <span>
-                Mở khóa bằng vật phẩm ({effectiveRequirements.length} yêu cầu)
-              </span>
-            </button>
-          ) : (
+          {loadedSecret?.chatLink ? (
             <a
-              href={character.chatUrl}
+              href={loadedSecret.chatLink}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full text-xs font-bold bg-[var(--accent)] text-[#3a2b30] bouncy-btn shadow-xs"
@@ -1123,10 +1219,42 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
               <span>💬 Trò chuyện</span>
               <ExternalLink className="w-3.5 h-3.5" />
             </a>
+          ) : requiresUnlock ? (
+            <button
+              type="button"
+              onClick={handleInspectCharSecret}
+              disabled={loadingSecret}
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full text-xs font-bold bg-[var(--accent)] text-[#3a2b30] bouncy-btn cursor-pointer shadow-xs"
+            >
+              <Lock className="w-3.5 h-3.5" />
+              <span>
+                {loadingSecret
+                  ? 'Đang kiểm tra...'
+                  : `Mở khóa nhân vật (${effectiveRequirements.length} yêu cầu)`}
+              </span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={handleInspectCharSecret}
+              disabled={loadingSecret}
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full text-xs font-bold bg-[var(--accent)] text-[#3a2b30] bouncy-btn cursor-pointer shadow-xs"
+            >
+              {loadingSecret ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <BookOpen className="w-3.5 h-3.5" />
+              )}
+              <span>
+                {loadingSecret
+                  ? 'Đang tải Open Scene...'
+                  : '💬 Mở Open Scene & Link Chat'}
+              </span>
+            </button>
           )}
 
           <div className="flex items-center gap-1.5">
-            {!requiresUnlock && (
+            {loadedSecret?.chatLink && (
               <button
                 type="button"
                 onClick={handleCopyLink}

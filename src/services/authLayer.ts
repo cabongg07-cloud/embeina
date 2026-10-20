@@ -1,32 +1,36 @@
 /**
- * Lớp xác thực (Auth Layer) & Phân quyền trung tâm (RBAC) cho "Góc Nhỏ Lấp Lánh".
+ * Lớp xác thực (Auth Layer) & Phân quyền trung tâm (RBAC) nối trực tiếp với SUPABASE THẬT.
  *
- * - Hỗ trợ 2 chế độ qua hằng số AUTH_MODE = "demo" | "real":
- *   + "demo": Cho phép chuyển vai nhanh Khách / Người dùng / Creator để thử nghiệm giao diện.
- *             TUYỆT ĐỐI KHÔNG lưu mật khẩu dạng chữ thường trong localStorage (chỉ lưu tên, email và vai trò giả lập).
- *   + "real": Ẩn thanh chuyển vai nhanh, yêu cầu đăng nhập qua signUp / signIn.
- *             Các hàm bên dưới được thiết kế sẵn chữ ký bất đồng bộ chuẩn để bạn nối trực tiếp
- *             với Firebase Auth hoặc Supabase Auth mà không cần sửa giao diện.
+ * GHI CHÚ BẢO MẬT:
+ * - Đã xóa hoàn toàn chế độ demo, thanh "Thử vai" và các tài khoản giả lập.
+ * - Chỉ còn Khách (chưa đăng nhập) và Người dùng đã đăng nhập qua Supabase Auth.
+ * - Vai trò ('user' | 'creator' | 'owner') CHỈ lấy từ bảng `profiles.role` trên Supabase,
+ *   tuyệt đối không có nút tự nâng quyền ở client và không có đường tắt trên URL.
+ * - Ẩn/hiện giao diện ở client chỉ để gọn gàng; bảo mật thực sự nằm ở Row Level Security (RLS) trên Supabase.
  */
 
-import { dataStore } from './dataLayer';
+import { supabase } from '../config/supabaseConfig';
 import { UserRole } from '../data/sampleData';
+import type { User as SupabaseUser } from '@supabase/supabase-js';
 
-export const AUTH_MODE: 'demo' | 'real' = 'demo';
-
-export type CreatorApprovalStatus = 'none' | 'pending' | 'approved' | 'rejected';
+export type DbProfileRole = 'user' | 'creator' | 'owner';
 
 export interface AuthUser {
   id: string;
   email: string;
+  username?: string;
   displayName: string;
-  role: UserRole; // Vai trò hiệu lực hiện tại ('guest' | 'user' | 'creator')
-  requestedRole?: 'user' | 'creator';
-  creatorStatus?: CreatorApprovalStatus;
+  role: UserRole; // 'guest' | 'user' | 'creator' (trong đó 'creator' đại diện cho cả creator & owner trên UI)
+  profileRole: 'guest' | DbProfileRole; // Giá trị gốc từ bảng profiles.role
   avatarEmoji: string;
-  isSiteOwner?: boolean; // Đánh dấu Creator là Chủ web (mở được bảng "Cài đặt trang" & sửa mọi nội dung)
-  linkedCreatorId?: string; // ID hồ sơ Creator gắn với tài khoản này (để Creator thường chỉ sửa nội dung của chính mình)
-  isDemoNote?: string;
+  isSiteOwner?: boolean; // true khi profiles.role === 'owner'
+  linkedCreatorId?: string; // chính là user.id của tài khoản trên Supabase
+}
+
+export interface PublicProfileRow {
+  id: string;
+  display_name: string | null;
+  role: DbProfileRole | string | null;
 }
 
 export type PermissionAction =
@@ -82,6 +86,7 @@ const USER_ACTIONS: PermissionAction[] = [
 const CREATOR_ACTIONS: PermissionAction[] = [
   ...USER_ACTIONS,
   'edit',
+  'site_settings',
   'view_creator_tabs',
   'manage_feedback',
   'creator_edit_mode',
@@ -95,103 +100,40 @@ const CREATOR_ACTIONS: PermissionAction[] = [
   'approve_creator_requests',
 ];
 
-const AUTH_SESSION_KEY = 'auth_current_session_v1';
-const AUTH_ACCOUNTS_LIST_KEY = 'auth_mock_accounts_v1';
-
-export interface StoredSafeAccount {
-  id: string;
-  email: string;
-  displayName: string;
-  role: UserRole;
-  requestedRole: 'user' | 'creator';
-  creatorStatus: CreatorApprovalStatus;
-  avatarEmoji: string;
-  isSiteOwner?: boolean;
-  linkedCreatorId?: string;
-  createdAt: string;
-  // LƯU Ý BẢO MẬT: Tuyệt đối KHÔNG lưu trường password ở đây trong localStorage.
-}
-
-const DEFAULT_GUEST_USER: AuthUser = {
+export const DEFAULT_GUEST_USER: AuthUser = {
   id: 'guest-visitor',
   email: '',
+  username: '',
   displayName: 'Khách ghé thăm',
   role: 'guest',
-  creatorStatus: 'none',
+  profileRole: 'guest',
   avatarEmoji: '🌱',
   isSiteOwner: false,
-  isDemoNote: 'Chế độ Khách (chỉ xem)',
 };
 
-const INITIAL_PENDING_ACCOUNTS: StoredSafeAccount[] = [
-  {
-    id: 'usr_pending_sample_1',
-    email: 'haian.creator@gocnho.local',
-    displayName: 'Hải An (Mây Mùa Thu)',
-    role: 'user',
-    requestedRole: 'creator',
-    creatorStatus: 'pending',
-    avatarEmoji: '🎨',
-    linkedCreatorId: 'creator-hien-suong',
-    createdAt: '2026-10-18T14:20:00Z',
-  },
-  {
-    id: 'usr_pending_sample_2',
-    email: 'linhdan.writer@gocnho.local',
-    displayName: 'Linh Đan (Tiệm Trà Đêm)',
-    role: 'user',
-    requestedRole: 'creator',
-    creatorStatus: 'pending',
-    avatarEmoji: '🫖',
-    linkedCreatorId: 'creator-co-tich',
-    createdAt: '2026-10-19T08:15:00Z',
-  },
-];
-
-function ensureSampleAccounts(): StoredSafeAccount[] {
-  const existing = dataStore.get<StoredSafeAccount[] | null>(
-    AUTH_ACCOUNTS_LIST_KEY,
-    null
-  );
-  if (!existing || !Array.isArray(existing)) {
-    dataStore.set(AUTH_ACCOUNTS_LIST_KEY, INITIAL_PENDING_ACCOUNTS, true);
-    return INITIAL_PENDING_ACCOUNTS;
-  }
-  return existing;
-}
+let currentUserState: AuthUser = DEFAULT_GUEST_USER;
 
 /**
  * Hàm kiểm tra quyền trung tâm `can(action, user?)` dùng trên toàn bộ ứng dụng.
- * Có thể gọi `can("edit")` hoặc `can("edit", currentUser)`.
- * Khách và Người dùng tuyệt đối trả về `false` với `"edit"` và `"site_settings"`.
+ * GHI CHÚ BẢO MẬT: Ẩn giao diện chỉ cho gọn, bảo mật thật nằm ở RLS trên Supabase.
  */
 export function can(
   action: PermissionAction,
   user?: AuthUser | null
 ): boolean {
-  const resolvedUser = user !== undefined ? user : authService.getCurrentUser();
-  const effectiveRole: UserRole = resolvedUser?.role || 'guest';
-
-  if (effectiveRole === 'guest') {
+  const resolvedUser = user !== undefined ? user : currentUserState;
+  if (!resolvedUser || resolvedUser.profileRole === 'guest') {
     return false;
   }
 
-  if (effectiveRole === 'user') {
+  if (resolvedUser.profileRole === 'user') {
     return USER_ACTIONS.includes(action);
   }
 
-  if (effectiveRole === 'creator') {
-    // Nếu tài khoản đăng ký Creator nhưng đang ở trạng thái chờ duyệt ('pending') hoặc bị từ chối,
-    // chỉ có quyền như 'user' cho đến khi được chủ web duyệt.
-    if (
-      resolvedUser?.creatorStatus === 'pending' ||
-      resolvedUser?.creatorStatus === 'rejected'
-    ) {
-      return USER_ACTIONS.includes(action);
-    }
-    if (action === 'site_settings') {
-      return Boolean(resolvedUser?.isSiteOwner);
-    }
+  if (
+    resolvedUser.profileRole === 'creator' ||
+    resolvedUser.profileRole === 'owner'
+  ) {
     return CREATOR_ACTIONS.includes(action);
   }
 
@@ -199,10 +141,8 @@ export function can(
 }
 
 /**
- * Kiểm tra xem người dùng hiện tại có được phép sửa/xóa một mục nội dung cụ thể không:
- * - Phải đang bật `editMode` VÀ `can("edit", user)` === true.
- * - Nếu là Chủ web (`user.isSiteOwner === true`) hoặc mục chung (`!ownerCreatorId`) → được phép sửa tất cả.
- * - Nếu là Creator thường (`!user.isSiteOwner`) → chỉ sửa được nội dung của chính mình (`ownerCreatorId === user.linkedCreatorId`).
+ * Kiểm tra xem người dùng hiện tại có được phép sửa/xóa một mục nội dung cụ thể không.
+ * GHI CHÚ BẢO MẬT: Ẩn giao diện chỉ cho gọn, bảo mật thật nằm ở RLS trên Supabase.
  */
 export function canEditItem(
   user: AuthUser | null | undefined,
@@ -212,20 +152,23 @@ export function canEditItem(
   if (!editMode || !can('edit', user)) {
     return false;
   }
-  if (user?.isSiteOwner) {
+  if (user?.profileRole === 'owner' || user?.isSiteOwner) {
     return true;
   }
   if (!ownerCreatorId) {
     return true;
   }
-  const myCreatorId = user?.linkedCreatorId || 'creator-lam-vong';
-  return ownerCreatorId === myCreatorId || ownerCreatorId === user?.id;
+  return (
+    ownerCreatorId === user?.id ||
+    ownerCreatorId === user?.linkedCreatorId
+  );
 }
 
 type AuthChangeListener = (user: AuthUser) => void;
 const listeners = new Set<AuthChangeListener>();
 
 function notifyListeners(user: AuthUser) {
+  currentUserState = user;
   listeners.forEach((cb) => {
     try {
       cb(user);
@@ -235,343 +178,357 @@ function notifyListeners(user: AuthUser) {
   });
 }
 
+async function buildAuthUserFromSession(
+  sbUser: SupabaseUser | null
+): Promise<AuthUser> {
+  if (!sbUser) {
+    return DEFAULT_GUEST_USER;
+  }
+
+  try {
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('id, username, display_name, role')
+      .eq('id', sbUser.id)
+      .maybeSingle();
+
+    const rawRole = String(profile?.role || 'user').toLowerCase();
+    const profileRole: DbProfileRole =
+      rawRole === 'owner'
+        ? 'owner'
+        : rawRole === 'creator'
+        ? 'creator'
+        : 'user';
+
+    const uiRole: UserRole =
+      profileRole === 'creator' || profileRole === 'owner'
+        ? 'creator'
+        : 'user';
+
+    const username =
+      profile?.username ||
+      (sbUser.user_metadata?.username as string | undefined) ||
+      '';
+    const displayName =
+      profile?.display_name ||
+      username ||
+      (sbUser.user_metadata?.display_name as string | undefined) ||
+      sbUser.email?.split('@')[0] ||
+      'Bạn Nhỏ';
+
+    return {
+      id: sbUser.id,
+      email: sbUser.email || '',
+      username,
+      displayName,
+      role: uiRole,
+      profileRole,
+      avatarEmoji:
+        profileRole === 'owner'
+          ? '👑'
+          : profileRole === 'creator'
+          ? '🎨'
+          : '🌸',
+      isSiteOwner: profileRole === 'owner',
+      linkedCreatorId: sbUser.id,
+    };
+  } catch {
+    const fallbackName =
+      (sbUser.user_metadata?.display_name as string | undefined) ||
+      (sbUser.user_metadata?.username as string | undefined) ||
+      sbUser.email?.split('@')[0] ||
+      'Bạn Nhỏ';
+    return {
+      id: sbUser.id,
+      email: sbUser.email || '',
+      username: (sbUser.user_metadata?.username as string | undefined) || '',
+      displayName: fallbackName,
+      role: 'user',
+      profileRole: 'user',
+      avatarEmoji: '🌸',
+      isSiteOwner: false,
+      linkedCreatorId: sbUser.id,
+    };
+  }
+}
+
+// Khởi tạo lắng nghe phiên đăng nhập từ Supabase Auth
+let authInitialized = false;
+function initSupabaseAuthListener() {
+  if (authInitialized) return;
+  authInitialized = true;
+
+  supabase.auth
+    .getSession()
+    .then(async ({ data }) => {
+      const user = await buildAuthUserFromSession(data.session?.user ?? null);
+      notifyListeners(user);
+    })
+    .catch(() => {
+      notifyListeners(DEFAULT_GUEST_USER);
+    });
+
+  supabase.auth.onAuthStateChange(async (_event, session) => {
+    const user = await buildAuthUserFromSession(session?.user ?? null);
+    notifyListeners(user);
+  });
+}
+
 export const authService = {
-  /**
-   * Lấy người dùng hiện tại
-   * [CHỖ CẦN NỐI BACKEND THẬT]: Thay bằng `firebase.auth().currentUser` hoặc `supabase.auth.getUser()`
-   */
   getCurrentUser(): AuthUser {
-    ensureSampleAccounts();
-    const saved = dataStore.get<AuthUser | null>(AUTH_SESSION_KEY, null);
-    if (!saved || !saved.role) {
-      return DEFAULT_GUEST_USER;
-    }
-    return saved;
+    initSupabaseAuthListener();
+    return currentUserState;
   },
 
-  /**
-   * Lắng nghe sự thay đổi trạng thái đăng nhập
-   * [CHỖ CẦN NỐI BACKEND THẬT]: Thay bằng `onAuthStateChanged(auth, callback)` hoặc `supabase.auth.onAuthStateChange`
-   */
+  async refreshProfile(): Promise<AuthUser> {
+    try {
+      const { data } = await supabase.auth.getSession();
+      const user = await buildAuthUserFromSession(data.session?.user ?? null);
+      notifyListeners(user);
+      return user;
+    } catch {
+      return currentUserState;
+    }
+  },
+
   onAuthChange(callback: AuthChangeListener): () => void {
+    initSupabaseAuthListener();
     listeners.add(callback);
-    callback(this.getCurrentUser());
+    callback(currentUserState);
     return () => {
       listeners.delete(callback);
     };
   },
 
   /**
-   * Đăng ký tài khoản mới
-   * - Nếu chọn "Tôi là creator", tài khoản sẽ ở trạng thái `creatorStatus: 'pending'` (chờ duyệt)
-   *   và trong lúc chờ vẫn dùng với quyền `role: 'user'`.
-   * - KHÔNG lưu mật khẩu chữ thường vào localStorage.
-   * [CHỖ CẦN NỐI BACKEND THẬT]: Thay bằng `createUserWithEmailAndPassword` hoặc `supabase.auth.signUp`
+   * Kiểm tra tên tài khoản (username) có hợp lệ và còn trống không bằng RPC `username_available(p_username)`
+   */
+  async checkUsernameAvailable(username: string): Promise<{
+    valid: boolean;
+    available: boolean;
+    reason?: string;
+  }> {
+    const clean = username.trim().toLowerCase();
+    if (!/^[a-z0-9_.]{3,20}$/.test(clean)) {
+      return {
+        valid: false,
+        available: false,
+        reason:
+          'Tên tài khoản cần từ 3–20 ký tự, chỉ gồm chữ thường a-z, số 0-9, dấu gạch dưới (_) hoặc dấu chấm (.).',
+      };
+    }
+
+    try {
+      const { data, error } = await supabase.rpc('username_available', {
+        p_username: clean,
+      });
+      if (error) {
+        return {
+          valid: true,
+          available: false,
+          reason: 'Chưa kiểm tra được tên tài khoản lúc này, bạn thử lại nhé.',
+        };
+      }
+      const isAvail = Boolean(data);
+      return {
+        valid: true,
+        available: isAvail,
+        reason: isAvail
+          ? '✨ Tên tài khoản này còn trống, bạn có thể dùng nhé!'
+          : '🌸 Tên tài khoản này đã có người dùng rồi, bạn chọn tên khác nhé.',
+      };
+    } catch {
+      return {
+        valid: true,
+        available: false,
+        reason: 'Không thể kết nối máy chủ để kiểm tra tên tài khoản.',
+      };
+    }
+  },
+
+  /**
+   * Đăng ký tài khoản mới trên Supabase Auth:
+   * - Gmail bắt buộc kết thúc bằng @gmail.com
+   * - Tên tài khoản: 3-20 ký tự a-z 0-9 _ . (kiểm tra bằng RPC username_available)
+   * - Mật khẩu >= 8 ký tự
+   * - Gọi supabase.auth.signUp với options.data { username, display_name: username }
    */
   async signUp(params: {
     email: string;
-    password: string; // Chỉ nhận ở form, không bao giờ lưu plaintext xuống localStorage
-    displayName: string;
-    accountType: 'user' | 'creator';
-  }): Promise<{ user: AuthUser; message: string }> {
-    const cleanEmail = params.email.trim().toLowerCase();
-    const cleanName = params.displayName.trim() || 'Bạn Nhỏ Đáng Yêu';
-    const isApplyingCreator = params.accountType === 'creator';
-
-    const newAccount: StoredSafeAccount = {
-      id: `usr_${Date.now()}`,
-      email: cleanEmail,
-      displayName: cleanName,
-      role: 'user',
-      requestedRole: params.accountType,
-      creatorStatus: isApplyingCreator ? 'pending' : 'none',
-      avatarEmoji: isApplyingCreator ? '🎨' : '🌸',
-      isSiteOwner: false,
-      linkedCreatorId: 'creator-lam-vong',
-      createdAt: new Date().toISOString(),
-    };
-
-    const existingList = ensureSampleAccounts();
-    const filtered = existingList.filter((a) => a.email !== cleanEmail);
-    dataStore.set(AUTH_ACCOUNTS_LIST_KEY, [newAccount, ...filtered]);
-
-    const sessionUser: AuthUser = {
-      id: newAccount.id,
-      email: newAccount.email,
-      displayName: newAccount.displayName,
-      role: newAccount.role,
-      requestedRole: newAccount.requestedRole,
-      creatorStatus: newAccount.creatorStatus,
-      avatarEmoji: newAccount.avatarEmoji,
-      isSiteOwner: false,
-      linkedCreatorId: newAccount.linkedCreatorId,
-      isDemoNote:
-        'Bản thử nghiệm: Chỉ lưu tên hiển thị và vai trò giả lập, không lưu mật khẩu.',
-    };
-
-    dataStore.set(AUTH_SESSION_KEY, sessionUser);
-    notifyListeners(sessionUser);
-
-    return {
-      user: sessionUser,
-      message: isApplyingCreator
-        ? '✨ Đăng ký thành công! Tài khoản Creator của bạn đang ở trạng thái "Chờ duyệt", trong lúc chờ bạn vẫn dùng được mọi tính năng của Người dùng nhé!'
-        : '🌸 Chào mừng bạn gia nhập Góc Nhỏ Lấp Lánh!',
-    };
-  },
-
-  /**
-   * Đăng nhập
-   * [CHỖ CẦN NỐI BACKEND THẬT]: Thay bằng `signInWithEmailAndPassword` hoặc `supabase.auth.signInWithPassword`
-   */
-  async signIn(params: {
-    email: string;
+    username: string;
     password: string;
   }): Promise<{ user: AuthUser; message: string }> {
     const cleanEmail = params.email.trim().toLowerCase();
-    const existingList = ensureSampleAccounts();
-    const found = existingList.find((a) => a.email === cleanEmail);
+    const cleanUsername = params.username.trim().toLowerCase();
+    const password = params.password;
 
-    const sessionUser: AuthUser = found
-      ? {
-          id: found.id,
-          email: found.email,
-          displayName: found.displayName,
-          role: found.role,
-          requestedRole: found.requestedRole,
-          creatorStatus: found.creatorStatus,
-          avatarEmoji: found.avatarEmoji,
-          isSiteOwner: Boolean(found.isSiteOwner),
-          linkedCreatorId: found.linkedCreatorId || 'creator-lam-vong',
-          isDemoNote:
-            'Bản thử nghiệm: Không lưu mật khẩu trong localStorage.',
-        }
-      : {
-          id: `usr_${Date.now()}`,
-          email: cleanEmail,
-          displayName: cleanEmail.split('@')[0] || 'Bạn Nhỏ',
-          role: 'user',
-          requestedRole: 'user',
-          creatorStatus: 'none',
-          avatarEmoji: '🌸',
-          isSiteOwner: false,
-          linkedCreatorId: 'creator-lam-vong',
-          isDemoNote:
-            'Bản thử nghiệm: Không lưu mật khẩu trong localStorage.',
-        };
+    if (!cleanEmail.endsWith('@gmail.com') || cleanEmail.length <= 10) {
+      throw new Error('Vui lòng sử dụng địa chỉ Gmail hợp lệ (có đuôi @gmail.com) nhé 🌸');
+    }
 
-    dataStore.set(AUTH_SESSION_KEY, sessionUser);
-    notifyListeners(sessionUser);
+    if (!/^[a-z0-9_.]{3,20}$/.test(cleanUsername)) {
+      throw new Error(
+        'Tên tài khoản phải từ 3–20 ký tự và chỉ gồm chữ cái thường (a-z), chữ số (0-9), dấu _ hoặc dấu . nhé 🌸'
+      );
+    }
 
+    if (password.length < 8) {
+      throw new Error('Mật khẩu cần có tối thiểu 8 ký tự nhé 🔒');
+    }
+
+    // Kiểm tra tên tài khoản qua RPC trước khi đăng ký
+    const availCheck = await this.checkUsernameAvailable(cleanUsername);
+    if (!availCheck.available) {
+      throw new Error(
+        availCheck.reason || 'Tên tài khoản này đã có người sử dụng rồi nhé 🌸'
+      );
+    }
+
+    const { data, error } = await supabase.auth.signUp({
+      email: cleanEmail,
+      password,
+      options: {
+        data: {
+          username: cleanUsername,
+          display_name: cleanUsername,
+        },
+      },
+    });
+
+    if (error) {
+      const msg = error.message.toLowerCase();
+      if (msg.includes('already registered') || msg.includes('already exists')) {
+        throw new Error('Gmail này đã được đăng ký rồi, bạn hãy chuyển sang Đăng nhập nhé 🌸');
+      }
+      throw new Error('Không thể hoàn tất đăng ký lúc này, bạn kiểm tra lại thông tin nhé 🌸');
+    }
+
+    if (data.session?.user) {
+      const authUser = await buildAuthUserFromSession(data.session.user);
+      notifyListeners(authUser);
+      return {
+        user: authUser,
+        message: `🌸 Chào mừng ${authUser.displayName} gia nhập Góc Nhỏ Lấp Lánh!`,
+      };
+    }
+
+    // Trường hợp Supabase yêu cầu xác nhận email hoặc chưa tạo session ngay
     return {
-      user: sessionUser,
-      message: `✨ Chào mừng ${sessionUser.displayName} đã quay trở lại!`,
+      user: currentUserState,
+      message:
+        '💌 Đăng ký thành công! Bạn hãy kiểm tra hộp thư Gmail để xác nhận tài khoản rồi đăng nhập nhé ✨',
     };
   },
 
   /**
-   * Đăng xuất (trở về vai Khách)
-   * [CHỖ CẦN NỐI BACKEND THẬT]: Thay bằng `signOut(auth)` hoặc `supabase.auth.signOut()`
+   * Đăng nhập:
+   * - Ô "Tên tài khoản" + mật khẩu:
+   *   + Nếu không có "@": gọi RPC `email_for_username(p_username)` rồi `signInWithPassword`
+   *   + Nếu có "@": coi là email và đăng nhập thẳng
+   * - Nếu sai ở bất kỳ bước nào thì chỉ báo chung: "Tên tài khoản hoặc mật khẩu chưa đúng nhé"
+   */
+  async signIn(params: {
+    identifier: string;
+    password: string;
+  }): Promise<{ user: AuthUser; message: string }> {
+    const rawId = params.identifier.trim();
+    const password = params.password;
+    const GENERIC_ERR = 'Tên tài khoản hoặc mật khẩu chưa đúng nhé';
+
+    if (!rawId || !password) {
+      throw new Error(GENERIC_ERR);
+    }
+
+    let targetEmail = rawId.toLowerCase();
+
+    if (!rawId.includes('@')) {
+      const cleanUsername = rawId.toLowerCase();
+      const { data: resolvedEmail, error: rpcErr } = await supabase.rpc(
+        'email_for_username',
+        { p_username: cleanUsername }
+      );
+
+      if (rpcErr || !resolvedEmail || typeof resolvedEmail !== 'string') {
+        throw new Error(GENERIC_ERR);
+      }
+      targetEmail = resolvedEmail.trim().toLowerCase();
+    }
+
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email: targetEmail,
+      password,
+    });
+
+    if (error || !data.user) {
+      throw new Error(GENERIC_ERR);
+    }
+
+    const authUser = await buildAuthUserFromSession(data.user);
+    notifyListeners(authUser);
+
+    return {
+      user: authUser,
+      message: `✨ Chào mừng ${authUser.displayName} đã quay trở lại!`,
+    };
+  },
+
+  /**
+   * Đăng xuất khỏi Supabase Auth
    */
   async signOut(): Promise<void> {
-    dataStore.set(AUTH_SESSION_KEY, DEFAULT_GUEST_USER);
+    await supabase.auth.signOut();
     notifyListeners(DEFAULT_GUEST_USER);
   },
 
   /**
-   * Gửi yêu cầu đặt lại mật khẩu (Giao diện sẵn sàng nối backend)
-   * [CHỖ CẦN NỐI BACKEND THẬT]: Thay bằng `sendPasswordResetEmail(auth, email)` hoặc `supabase.auth.resetPasswordForEmail(email)`
+   * Quên mật khẩu: gọi `supabase.auth.resetPasswordForEmail`
    */
-  async requestPasswordReset(email: string): Promise<string> {
-    return `💌 Đã ghi nhận yêu cầu khôi phục mật khẩu cho ${email.trim()}. (Khi nối Firebase/Supabase Auth, liên kết đặt lại mật khẩu sẽ được gửi về hộp thư của bạn).`;
-  },
+  async requestPasswordReset(emailOrUsername: string): Promise<string> {
+    let targetEmail = emailOrUsername.trim().toLowerCase();
 
-  /**
-   * Chuyển vai nhanh trong chế độ AUTH_MODE === "demo"
-   */
-  switchDemoRole(role: UserRole): AuthUser {
-    if (role === 'guest') {
-      dataStore.set(AUTH_SESSION_KEY, DEFAULT_GUEST_USER);
-      notifyListeners(DEFAULT_GUEST_USER);
-      return DEFAULT_GUEST_USER;
+    if (!targetEmail.includes('@')) {
+      const { data: resolvedEmail } = await supabase.rpc('email_for_username', {
+        p_username: targetEmail,
+      });
+      if (resolvedEmail && typeof resolvedEmail === 'string') {
+        targetEmail = resolvedEmail.trim().toLowerCase();
+      } else {
+        throw new Error('Vui lòng nhập đúng địa chỉ Gmail hoặc Tên tài khoản đã đăng ký nhé 🌸');
+      }
     }
 
-    const demoUser: AuthUser =
-      role === 'creator'
-        ? {
-            id: 'demo-creator',
-            email: 'creator.demo@gocnho.local',
-            displayName: 'Lâm Vọng Nguyệt (Chủ web)',
-            role: 'creator',
-            requestedRole: 'creator',
-            creatorStatus: 'approved',
-            avatarEmoji: '👑',
-            isSiteOwner: true,
-            linkedCreatorId: 'creator-lam-vong',
-            isDemoNote:
-              'Vai trò giả lập Creator (Chủ web - mở được Cài đặt trang & sửa mọi mục)',
-          }
-        : {
-            id: 'demo-user',
-            email: 'user.demo@gocnho.local',
-            displayName: 'Miên Miên (Người dùng)',
-            role: 'user',
-            requestedRole: 'user',
-            creatorStatus: 'none',
-            avatarEmoji: '🌸',
-            isSiteOwner: false,
-            isDemoNote: 'Vai trò giả lập bản thử (không lưu mật khẩu)',
-          };
+    const { error } = await supabase.auth.resetPasswordForEmail(targetEmail, {
+      redirectTo: typeof window !== 'undefined' ? window.location.origin : undefined,
+    });
 
-    dataStore.set(AUTH_SESSION_KEY, demoUser);
-    notifyListeners(demoUser);
-    return demoUser;
-  },
-
-  /**
-   * Đổi qua lại giữa "Creator Chủ web" (sửa toàn trang + mở bảng Cài đặt trang)
-   * và "Creator thường" (chỉ sửa được char, lệnh, giveaway, commission của chính mình)
-   */
-  setCreatorOwnerMode(isOwner: boolean, linkedCreatorId = 'creator-lam-vong'): AuthUser {
-    const current = this.getCurrentUser();
-    if (current.role !== 'creator') return current;
-
-    const updated: AuthUser = {
-      ...current,
-      isSiteOwner: isOwner,
-      linkedCreatorId,
-      avatarEmoji: isOwner ? '👑' : '🎨',
-      displayName: isOwner
-        ? 'Lâm Vọng Nguyệt (Chủ web)'
-        : 'Lâm Vọng Nguyệt (Creator thường)',
-      isDemoNote: isOwner
-        ? 'Chủ web: Mở được Cài đặt trang & chỉnh sửa mọi nội dung.'
-        : 'Creator thường: Chỉ chỉnh sửa nội dung của chính mình (Lâm Vọng Nguyệt).',
-    };
-    dataStore.set(AUTH_SESSION_KEY, updated);
-    notifyListeners(updated);
-    return updated;
-  },
-
-  /**
-   * Duyệt tài khoản Creator đang chờ của phiên hiện tại
-   */
-  approvePendingCreator(): AuthUser {
-    const current = this.getCurrentUser();
-    const updated: AuthUser = {
-      ...current,
-      role: 'creator',
-      requestedRole: 'creator',
-      creatorStatus: 'approved',
-      avatarEmoji: '✨',
-      isSiteOwner: true,
-      linkedCreatorId: current.linkedCreatorId || 'creator-lam-vong',
-    };
-    dataStore.set(AUTH_SESSION_KEY, updated);
-
-    const existingList = ensureSampleAccounts();
-    const nextList = existingList.map((acc) =>
-      acc.email === current.email
-        ? {
-            ...acc,
-            role: 'creator' as UserRole,
-            creatorStatus: 'approved' as CreatorApprovalStatus,
-          }
-        : acc
-    );
-    dataStore.set(AUTH_ACCOUNTS_LIST_KEY, nextList);
-
-    notifyListeners(updated);
-    return updated;
-  },
-
-  /**
-   * Lấy danh sách các tài khoản đăng ký làm Creator (để Chủ web duyệt / từ chối trong bảng Cài đặt trang)
-   */
-  listCreatorApplications(): StoredSafeAccount[] {
-    const all = ensureSampleAccounts();
-    return all.filter((acc) => acc.requestedRole === 'creator');
-  },
-
-  /**
-   * Chủ web duyệt một tài khoản Creator đang chờ theo ID
-   */
-  approveCreatorById(accountId: string): StoredSafeAccount[] {
-    const all = ensureSampleAccounts();
-    const next = all.map((acc) =>
-      acc.id === accountId
-        ? {
-            ...acc,
-            role: 'creator' as UserRole,
-            creatorStatus: 'approved' as CreatorApprovalStatus,
-          }
-        : acc
-    );
-    dataStore.set(AUTH_ACCOUNTS_LIST_KEY, next);
-
-    const current = this.getCurrentUser();
-    if (current.id === accountId) {
-      const updatedCurrent: AuthUser = {
-        ...current,
-        role: 'creator',
-        creatorStatus: 'approved',
-      };
-      dataStore.set(AUTH_SESSION_KEY, updatedCurrent);
-      notifyListeners(updatedCurrent);
+    if (error) {
+      throw new Error('Chưa thể gửi email khôi phục lúc này, bạn vui lòng thử lại sau ít phút nhé 🌸');
     }
-    return next.filter((acc) => acc.requestedRole === 'creator');
+
+    return `💌 Đã gửi hướng dẫn đặt lại mật khẩu về hộp thư Gmail của bạn. Bạn nhớ kiểm tra cả mục Thư rác (Spam) nhé!`;
   },
 
   /**
-   * Chủ web từ chối một tài khoản Creator đang chờ theo ID
+   * Cấp quyền vai trò cho tài khoản bằng RPC `set_role(p_username, p_role)` (Chỉ Owner mới gọi được qua RLS/RPC)
    */
-  rejectCreatorById(accountId: string): StoredSafeAccount[] {
-    const all = ensureSampleAccounts();
-    const next = all.map((acc) =>
-      acc.id === accountId
-        ? {
-            ...acc,
-            role: 'user' as UserRole,
-            creatorStatus: 'rejected' as CreatorApprovalStatus,
-          }
-        : acc
-    );
-    dataStore.set(AUTH_ACCOUNTS_LIST_KEY, next);
-
-    const current = this.getCurrentUser();
-    if (current.id === accountId) {
-      const updatedCurrent: AuthUser = {
-        ...current,
-        role: 'user',
-        creatorStatus: 'rejected',
-      };
-      dataStore.set(AUTH_SESSION_KEY, updatedCurrent);
-      notifyListeners(updatedCurrent);
+  async setUserRoleByRpc(
+    username: string,
+    role: DbProfileRole
+  ): Promise<string> {
+    const cleanUsername = username.trim().toLowerCase();
+    if (!cleanUsername) {
+      throw new Error('Vui lòng nhập tên tài khoản (username) cần phân quyền.');
     }
-    return next.filter((acc) => acc.requestedRole === 'creator');
-  },
-
-  /**
-   * Tạo thêm một hồ sơ đăng ký Creator mẫu đang chờ duyệt để Chủ web thử nghiệm
-   */
-  addSamplePendingCreator(name?: string, email?: string): StoredSafeAccount[] {
-    const all = ensureSampleAccounts();
-    const cleanName = name?.trim() || `Tác giả Mới #${all.length + 1}`;
-    const cleanEmail =
-      email?.trim().toLowerCase() || `creator${Date.now().toString().slice(-4)}@gocnho.local`;
-    const newAcc: StoredSafeAccount = {
-      id: `usr_pending_${Date.now()}`,
-      email: cleanEmail,
-      displayName: cleanName,
-      role: 'user',
-      requestedRole: 'creator',
-      creatorStatus: 'pending',
-      avatarEmoji: '🌸',
-      linkedCreatorId: 'creator-lam-vong',
-      createdAt: new Date().toISOString(),
-    };
-    const next = [newAcc, ...all];
-    dataStore.set(AUTH_ACCOUNTS_LIST_KEY, next);
-    return next.filter((acc) => acc.requestedRole === 'creator');
+    const { error } = await supabase.rpc('set_role', {
+      p_username: cleanUsername,
+      p_role: role,
+    });
+    if (error) {
+      throw new Error(
+        error.message || 'Không thể đổi vai trò (chỉ Owner mới có quyền thực hiện thao tác này).'
+      );
+    }
+    await this.refreshProfile();
+    return `✨ Đã cập nhật vai trò của @${cleanUsername} thành "${role}" trên Supabase!`;
   },
 };
