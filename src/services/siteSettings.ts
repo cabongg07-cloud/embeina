@@ -115,7 +115,7 @@ export function buildWebTracksFromUrls(
   // Chỉ giữ lại các bài từ link MP3 ('url') hoặc hộp nhạc mặc định ('builtin-synth')
   // Tuyệt đối không lưu bài tải từ máy ('indexeddb') vào playlist web trên Supabase
   const validTracks = existingTracks.filter(
-    (t) => t.sourceType === 'url' || t.sourceType === 'builtin-synth'
+    (t) => t.sourceType === 'url' || t.sourceType === 'builtin-synth' || t.sourceType === 'youtube' || t.sourceType === 'spotify'
   );
 
   const baseList: MusicTrack[] =
@@ -360,7 +360,7 @@ export async function fetchSiteSettingsFromSupabase(
       ? (webPlaylistVal.tracks as MusicTrack[]).filter(
           (t) =>
             t &&
-            (t.sourceType === 'url' || t.sourceType === 'builtin-synth')
+            (t.sourceType === 'url' || t.sourceType === 'builtin-synth' || t.sourceType === 'youtube' || t.sourceType === 'spotify')
         )
       : [];
 
@@ -550,7 +550,7 @@ function buildSiteSettingsPayloadForKeys(
     } else if (key === 'web_playlist') {
       // Chỉ lưu các bài nhạc URL mp3 trực tiếp hoặc hộp nhạc mặc định, tuyệt đối không lưu file tải từ máy
       const cleanWebTracks = cfg.webPlaylistTracks.filter(
-        (t) => t.sourceType === 'url' || t.sourceType === 'builtin-synth'
+        (t) => t.sourceType === 'url' || t.sourceType === 'builtin-synth' || t.sourceType === 'youtube' || t.sourceType === 'spotify'
       );
       const urlListFromTracks = cleanWebTracks
         .filter((t) => t.sourceType === 'url' && t.url)

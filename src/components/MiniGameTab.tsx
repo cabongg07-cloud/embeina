@@ -18,6 +18,7 @@ import {
   Coins,
   Store,
   X,
+  Lock,
 } from 'lucide-react';
 import {
   CharacterItem,
@@ -42,8 +43,10 @@ import {
   DailyQuestItem,
   DEFAULT_MARKET_PRICES,
   emitGameQuestAction,
-  onGameQuestAction,
-  doesQuestMatchAction,
+  logGameActionViaRpc,
+  onQuestActionLogged,
+  getQuestHintForAction,
+  ownerRefillViaRpc,
 } from '../services/supabaseService';
 import {
   GeneratedGameItem,
@@ -233,6 +236,22 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
   initialTargetKind,
 }) => {
   const canEdit = Boolean(editMode && can('edit', currentUser));
+  const isOwner = Boolean(currentUser?.profileRole === 'owner');
+
+  // Điều hướng 6 khu vực trong Mini Game (bao gồm Chợ Nhỏ)
+  const [activeZone, setActiveZone] = useState<MiniZone>(() =>
+    initialSubZone === 'market' ? 'market' : 'gacha_inv'
+  );
+
+  useEffect(() => {
+    if (isOwner) {
+      ownerRefillViaRpc().then((res) => {
+        if (res.ok && typeof res.coins === 'number') {
+          setCoins(res.coins);
+        }
+      }).catch(() => {});
+    }
+  }, [isOwner, activeZone]);
 
   const effectiveTagVoices = useMemo(
     () =>
@@ -250,10 +269,6 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     [tagPets]
   );
 
-  // Điều hướng 6 khu vực trong Mini Game (bao gồm Chợ Nhỏ)
-  const [activeZone, setActiveZone] = useState<MiniZone>(() =>
-    initialSubZone === 'market' ? 'market' : 'gacha_inv'
-  );
 
   // ============================================================================
   // STATE CHỢ NHỎ: TIỀN XU (profiles.coins), BẢNG GIÁ & NHIỆM VỤ NGÀY
@@ -409,11 +424,11 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
         }
       }
     } else {
-      // Khách: nhiệm vụ xem trước
+      // Khách: nhiệm vụ xem trước mẫu
       setDailyQuests([
-        { index: 0, id: 1, title: 'Tưới nước cho một mầm hoa trong Vườn', reward: 5, completed: false },
-        { index: 1, id: 2, title: 'Thả một lá thư tại Góc yêu thương', reward: 5, completed: false },
-        { index: 2, id: 3, title: 'Cho cá ăn trong Hồ cá đêm', reward: 5, completed: false },
+        { index: 0, id: 1, title: 'Tưới nước cho Vườn hoa ban mai', reward: 6, completed: false, action: 'water', target: 2, progress: 0 },
+        { index: 1, id: 2, title: 'Mở Phòng tri kỷ ghé thăm người thương', reward: 5, completed: false, action: 'visit_room', target: 1, progress: 0 },
+        { index: 2, id: 3, title: 'Lắng nghe trọn vẹn một bản nhạc êm', reward: 8, completed: false, action: 'listen_song', target: 1, progress: 0 },
       ]);
       const tomorrow = new Date();
       tomorrow.setUTCHours(24, 0, 0, 0);
@@ -421,9 +436,50 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     }
   }, [currentUser]);
 
+  const loadDailyQuests = useCallback(async () => {
+    if (!currentUser || currentUser.role === 'guest' || !currentUser.id) return;
+    try {
+      const qRes = await getDailyQuestsViaRpc();
+      if (qRes.ok) {
+        setDailyQuests(qRes.quests);
+        if (qRes.resetsAt) setResetsAtIso(qRes.resetsAt);
+        if (typeof qRes.coins === 'number') {
+          setCoins(qRes.coins);
+        }
+      }
+    } catch {
+      // Bỏ qua lỗi
+    }
+  }, [currentUser]);
+
   useEffect(() => {
     loadMarketDataAndCoins();
   }, [loadMarketDataAndCoins]);
+
+  // Làm mới tiến độ khi mở tab Chợ nhỏ
+  useEffect(() => {
+    if (activeZone === 'market') {
+      loadMarketDataAndCoins();
+    }
+  }, [activeZone, loadMarketDataAndCoins]);
+
+  // Làm mới tiến độ sau mỗi hành động trong game (qua log_action)
+  useEffect(() => {
+    const unsub = onQuestActionLogged(() => {
+      loadDailyQuests();
+    });
+    return unsub;
+  }, [loadDailyQuests]);
+
+  // Làm mới tiến độ mỗi 30 giây khi tab Chợ nhỏ đang mở
+  useEffect(() => {
+    if (activeZone !== 'market') return;
+    if (!currentUser || currentUser.role === 'guest' || !currentUser.id) return;
+    const interval = setInterval(() => {
+      loadDailyQuests();
+    }, 30000);
+    return () => clearInterval(interval);
+  }, [activeZone, currentUser, loadDailyQuests]);
 
   // Đồng hồ đếm ngược đến resets_at (khi về 0 tự động đổi bộ mới qua loadMarketDataAndCoins)
   useEffect(() => {
@@ -449,41 +505,6 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     const timer = setInterval(tickCountdown, 1000);
     return () => clearInterval(timer);
   }, [resetsAtIso, loadMarketDataAndCoins]);
-
-  // Lắng nghe hành động trong game để tự động hoàn thành nhiệm vụ
-  useEffect(() => {
-    const unsub = onGameQuestAction(async (action) => {
-      if (!currentUser || currentUser.role === 'guest' || !currentUser.id) return;
-      const foundIdx = dailyQuests.findIndex(
-        (q) => !q.completed && doesQuestMatchAction(q.title, action)
-      );
-      if (foundIdx === -1) return;
-
-      const q = dailyQuests[foundIdx];
-      const res = await completeQuestViaRpc(foundIdx);
-      if (res.ok) {
-        if (!res.alreadyDone) {
-          setQuestSparkleEffect({
-            questTitle: q.title,
-            reward: res.reward ?? q.reward,
-          });
-          setTimeout(() => setQuestSparkleEffect(null), 4000);
-          showToast(`✨ Đã hoàn thành "${q.title}"! Nhận +${res.reward ?? q.reward} ${coinCurrencyName}!`);
-        }
-        if (typeof res.coins === 'number') {
-          setCoins(res.coins);
-        } else {
-          const fresh = await fetchMyCoinsFromSupabase();
-          setCoins(fresh);
-        }
-        setDailyQuests((prev) =>
-          prev.map((item, i) => (i === foundIdx ? { ...item, completed: true } : item))
-        );
-      }
-    });
-
-    return () => unsub();
-  }, [dailyQuests, currentUser, coinCurrencyName]);
 
   // Xử lý chuyển zone và cuộn nhanh từ CharTab
   useEffect(() => {
@@ -530,37 +551,64 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     }
   };
 
-  const handleManualCompleteQuest = async (index: number) => {
+  const [isClaimingQuestIndex, setIsClaimingQuestIndex] = useState<number | null>(null);
+
+  const handleClaimQuestReward = async (index: number) => {
     if (!currentUser || currentUser.role === 'guest') {
       onRequireAuth?.(`Mời bạn đăng nhập để làm nhiệm vụ và nhận ${coinCurrencyName} nhé 🌸`);
       return;
     }
     const targetQuest = dailyQuests[index];
-    if (!targetQuest || targetQuest.completed) return;
+    if (!targetQuest) return;
 
-    const res = await completeQuestViaRpc(index);
-    if (res.ok) {
-      if (!res.alreadyDone) {
-        setQuestSparkleEffect({
-          questTitle: targetQuest.title,
-          reward: res.reward ?? targetQuest.reward,
-        });
-        setTimeout(() => setQuestSparkleEffect(null), 4000);
-        showToast(`✨ Đã hoàn thành "${targetQuest.title}"! Nhận +${res.reward ?? targetQuest.reward} ${coinCurrencyName}!`);
+    if (targetQuest.completed) {
+      showToast('Nhiệm vụ này đã nhận thưởng rồi nè ✨');
+      return;
+    }
+
+    const target = Math.max(1, targetQuest.target || 1);
+    const progress = targetQuest.progress || 0;
+    if (progress < target) {
+      const hint = getQuestHintForAction(targetQuest.action, targetQuest.title);
+      showToast(`Bạn chưa làm xong nhiệm vụ này nhé (${progress}/${target}). ${hint}`);
+      return;
+    }
+
+    setIsClaimingQuestIndex(index);
+    try {
+      const res = await completeQuestViaRpc(index);
+      if (res.ok) {
+        if (!res.alreadyDone) {
+          setQuestSparkleEffect({
+            questTitle: targetQuest.title,
+            reward: res.reward ?? targetQuest.reward,
+          });
+          setTimeout(() => setQuestSparkleEffect(null), 4000);
+          showToast(`✨ Đã nhận thưởng "${targetQuest.title}"! Nhận +${res.reward ?? targetQuest.reward} ${coinCurrencyName}!`);
+        } else {
+          showToast('Nhiệm vụ này đã nhận thưởng rồi nè ✨');
+        }
+        if (typeof res.coins === 'number') {
+          setCoins(res.coins);
+        } else {
+          const c = await fetchMyCoinsFromSupabase();
+          setCoins(c);
+        }
+        await loadDailyQuests();
       } else {
-        showToast('Nhiệm vụ này đã hoàn thành rồi.');
+        if (res.notFinished) {
+          const hint = getQuestHintForAction(targetQuest.action, targetQuest.title);
+          showToast(`Bạn chưa làm xong nhiệm vụ này nhé. ${hint}`);
+        } else if (res.alreadyDone) {
+          showToast('Nhiệm vụ này đã nhận thưởng rồi nè ✨');
+        } else if (res.notLoggedIn) {
+          onRequireAuth?.(`Mời bạn đăng nhập để nhận thưởng nhé 🌸`);
+        } else {
+          showToast(res.message || 'Chưa thể nhận thưởng nhiệm vụ lúc này.');
+        }
       }
-      if (typeof res.coins === 'number') {
-        setCoins(res.coins);
-      } else {
-        const c = await fetchMyCoinsFromSupabase();
-        setCoins(c);
-      }
-      setDailyQuests((prev) =>
-        prev.map((q, idx) => (idx === index ? { ...q, completed: true } : q))
-      );
-    } else {
-      showToast(res.message || 'Chưa thể hoàn thành nhiệm vụ.');
+    } finally {
+      setIsClaimingQuestIndex(null);
     }
   };
 
@@ -832,7 +880,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     }
 
     // Mở thêm bằng Cánh hoa
-    if (petalsBalance < rollCost) {
+    if (!isOwner && petalsBalance < rollCost) {
       showToast(
         `Bạn cần ${rollCost} ${currencyName} để mở thêm hộp quà Gacha nhé 🌸`
       );
@@ -952,6 +1000,9 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     saveGardenPlots(nextPlots);
     markDailyTaskReady('water');
     emitGameQuestAction('water');
+    if (currentUser && currentUser.role !== 'guest') {
+      logGameActionViaRpc('water');
+    }
     if (stageAdvancedName) {
       showToast(stageAdvancedName);
     }
@@ -1009,6 +1060,10 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     // Đánh dấu ready_at = null (đã thu hoạch xong, sẵn sàng dùng để mở khóa Char)
     await updateInventoryItemReadyAt(harvestedFlower.id, null);
 
+    if (currentUser && currentUser.role !== 'guest') {
+      logGameActionViaRpc('harvest');
+    }
+
     if (sellForPetals) {
       const price =
         harvestedFlower.rarity === 'legendary'
@@ -1053,7 +1108,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
   // ============================================================================
   const handleBuyFishFood = () => {
     const cost = 8;
-    if (petalsBalance < cost) {
+    if (!isOwner && petalsBalance < cost) {
       showToast(`Bạn cần ${cost} ${currencyName} để mua túi 3 Hạt cá nhé 🌸`);
       return;
     }
@@ -1105,7 +1160,25 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     savePondFishList(nextFish);
     markDailyTaskReady('feed_fish');
     emitGameQuestAction('fish');
+    if (currentUser && currentUser.role !== 'guest') {
+      logGameActionViaRpc('feed_fish');
+    }
     showToast('🐟 Đã thả Hạt cá! Cá no bụng đang vui vẻ tiết ra thêm Cánh hoa!');
+  };
+
+  const [isCastingRod, setIsCastingRod] = useState(false);
+
+  const handleFishCast = () => {
+    if (isCastingRod) return;
+    setIsCastingRod(true);
+    if (currentUser && currentUser.role !== 'guest') {
+      logGameActionViaRpc('fish_cast');
+    }
+    showToast('🎣 Bạn vung nhẹ cần câu xuống mặt hồ êm đềm... Đàn cá tò mò quẫy đuôi!');
+    setTimeout(() => {
+      setIsCastingRod(false);
+      showToast('✨ Một làn gợn sóng lấp lánh xuất hiện trên mặt hồ!');
+    }, 1800);
   };
 
   const handleCollectFishPetals = (fishId: string) => {
@@ -1127,7 +1200,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
 
   const handleHatchNewFishEgg = () => {
     const cost = 12;
-    if (petalsBalance < cost) {
+    if (!isOwner && petalsBalance < cost) {
       showToast(`Cần ${cost} ${currencyName} để thả thêm trứng cá mới vào hồ 🌸`);
       return;
     }
@@ -1230,6 +1303,9 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     saveCompanionRoomState(next);
     markDailyTaskReady('chat_partner');
     emitGameQuestAction('chat_companion');
+    if (currentUser && currentUser.role !== 'guest') {
+      logGameActionViaRpc('chat_companion');
+    }
 
     triggerCompanionDialogue(situation, {
       bondOverride: nextBond,
@@ -1263,6 +1339,9 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
         itemName: item.name,
       });
       emitGameQuestAction('gift_drink');
+      if (currentUser && currentUser.role !== 'guest') {
+        logGameActionViaRpc('gift_drink');
+      }
     }
     showToast(
       `💝 Đã tặng "${item.name}" cho người thương! (+${bondGain} Gắn bó)`
@@ -1271,7 +1350,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
 
   const handleBuyPetFood = () => {
     const cost = 8;
-    if (petalsBalance < cost) {
+    if (!isOwner && petalsBalance < cost) {
       showToast(
         `Bạn cần ${cost} ${currencyName} để mua túi 3 Thức ăn thú cưng nhé 🐾`
       );
@@ -1285,6 +1364,33 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     setRoomState(next);
     saveCompanionRoomState(next);
     showToast('🐾 Đã mua +3 phần Thức ăn thú cưng!');
+  };
+
+  const handleStrokePet = (petId: string) => {
+    const targetPet = inventory.find((it) => it.id === petId);
+    const sound = targetPet?.petSound || 'Meo~ 🌸';
+    setActivePetSpeech({
+      petId,
+      text: `❤️ ${sound}`,
+    });
+    setTimeout(() => {
+      setActivePetSpeech((prev) => (prev?.petId === petId ? null : prev));
+    }, 3200);
+
+    const nextRoom = {
+      ...roomState,
+      happiness: Math.min(100, roomState.happiness + 4),
+      bondPoints: roomState.bondPoints + 2,
+    };
+    setRoomState(nextRoom);
+    saveCompanionRoomState(nextRoom);
+
+    if (currentUser && currentUser.role !== 'guest') {
+      logGameActionViaRpc('pet_stroke');
+    }
+    showToast(
+      `🐾 Bạn nhẹ nhàng vuốt ve ${targetPet?.name || 'bé thú cưng'}, bé rúc vào tay kêu "${sound}"!`
+    );
   };
 
   const handleFeedPet = (petId: string) => {
@@ -1320,6 +1426,9 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     setInventory(nextInv);
     saveInventoryItems(nextInv);
     emitGameQuestAction('feed_pet');
+    if (currentUser && currentUser.role !== 'guest') {
+      logGameActionViaRpc('feed_pet');
+    }
     showToast(
       `🐾 ${targetPet?.name || 'Thú cưng'} kêu "${
         targetPet?.petSound || 'Meo~'
@@ -1329,7 +1438,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
 
   const handleBrewNewDrinkAtBar = async () => {
     const cost = 10;
-    if (petalsBalance < cost) {
+    if (!isOwner && petalsBalance < cost) {
       showToast(
         `Cần ${cost} ${currencyName} để pha chế một ly thức uống mới tại quầy nhé ☕`
       );
@@ -1418,11 +1527,11 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
         <div className="flex flex-wrap items-center gap-2.5 text-xs">
           <div className="px-4 py-2 rounded-full border-2 border-[var(--accent)] bg-[var(--surface)] font-bold text-[var(--text)] shadow-xs flex items-center gap-1.5">
             <span>{currencyEmoji}</span>
-            <span>Số dư: {petalsBalance} {currencyName}</span>
+            <span>Số dư: {isOwner ? 'Đầy' : petalsBalance} {currencyName}</span>
           </div>
           <div className="px-4 py-2 rounded-full border-2 border-amber-400 bg-amber-500/10 font-black text-amber-700 dark:text-amber-300 shadow-xs flex items-center gap-1.5">
             <span>{coinCurrencyEmoji}</span>
-            <span>{coins} {coinCurrencyName}</span>
+            <span>{isOwner ? 'Đầy' : coins} {coinCurrencyName}</span>
           </div>
           <div className="sticker-chip font-bold">
             🐟 Hạt cá: {roomState.fishFoodCount}
@@ -1474,7 +1583,16 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
             <button
               key={tab.id}
               type="button"
-              onClick={() => setActiveZone(tab.id)}
+              onClick={() => {
+                setActiveZone(tab.id);
+                if (currentUser && currentUser.role !== 'guest') {
+                  if (tab.id === 'companion') {
+                    logGameActionViaRpc('visit_room');
+                  } else if (tab.id === 'drinks') {
+                    logGameActionViaRpc('visit_drinks');
+                  }
+                }
+              }}
               className={`px-4 py-2.5 rounded-full text-xs font-bold transition-all cursor-pointer flex items-center gap-2 bouncy-btn ${
                 active
                   ? 'bg-[var(--accent)] text-[#3a2b30] shadow-sm'
@@ -1543,7 +1661,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                 </p>
                 <div className="flex items-baseline gap-1.5">
                   <span className="font-serif-title text-2xl font-black text-amber-600 dark:text-amber-400">
-                    {coins}
+                    {isOwner ? 'Đầy' : coins}
                   </span>
                   <span className="text-xs font-bold text-[var(--text)]">
                     {coinCurrencyName}
@@ -1649,48 +1767,125 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
               </div>
 
               {/* 3 Thẻ nhiệm vụ */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                {dailyQuests.map((quest, index) => (
-                  <div
-                    key={quest.id || index}
-                    className={`p-3.5 rounded-2xl border flex flex-col justify-between gap-3 transition-all ${
-                      quest.completed
-                        ? 'border-emerald-400/50 bg-emerald-500/10'
-                        : 'border-[var(--border)] bg-[var(--surface)]'
-                    }`}
-                  >
-                    <div className="space-y-1.5">
-                      <div className="flex items-center justify-between">
-                        <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--muted)]">
-                          Nhiệm vụ #{index + 1}
-                        </span>
-                        <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-amber-500/20 text-amber-700 dark:text-amber-300">
-                          +{quest.reward} {coinCurrencyName}
-                        </span>
-                      </div>
-                      <p className="text-xs font-bold text-[var(--text)] leading-snug">
-                        {quest.title}
-                      </p>
-                    </div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
+                {dailyQuests.map((quest, index) => {
+                  const target = Math.max(1, quest.target || 1);
+                  const progress = Math.min(
+                    target,
+                    Math.max(0, quest.progress || (quest.completed ? target : 0))
+                  );
+                  const isReadyToClaim = !quest.completed && progress >= target;
+                  const percent = Math.min(100, Math.round((progress / target) * 100));
+                  const hint = getQuestHintForAction(quest.action, quest.title);
 
-                    <div className="pt-2 border-t border-[var(--border)]/40">
-                      {quest.completed ? (
-                        <div className="py-1.5 text-center text-[11px] font-extrabold text-emerald-600 dark:text-emerald-300 flex items-center justify-center gap-1">
-                          <CheckCircle2 className="w-3.5 h-3.5" />
-                          <span>Đã xong (+{quest.reward} {coinCurrencyName})</span>
+                  return (
+                    <div
+                      key={quest.id || index}
+                      className={`p-4 rounded-2xl border flex flex-col justify-between gap-3.5 transition-all shadow-2xs ${
+                        quest.completed
+                          ? 'border-emerald-400/50 bg-emerald-500/10'
+                          : isReadyToClaim
+                          ? 'border-amber-400/70 bg-gradient-to-b from-amber-500/10 to-amber-500/5 ring-2 ring-amber-400/30'
+                          : 'border-[var(--border)] bg-[var(--surface)]'
+                      }`}
+                    >
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--muted)]">
+                            Nhiệm vụ #{index + 1}
+                          </span>
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-amber-500/20 text-amber-700 dark:text-amber-300">
+                            +{quest.reward} {coinCurrencyName}
+                          </span>
                         </div>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => handleManualCompleteQuest(index)}
-                          className="w-full py-1.5 rounded-xl border border-[var(--border)] bg-[var(--bg)] text-[11px] font-bold text-[var(--text)] hover:border-[var(--accent)] hover:bg-[var(--accent)]/15 transition-all cursor-pointer flex items-center justify-center gap-1 shadow-2xs"
-                        >
-                          <span>✨ Mình đã làm xong</span>
-                        </button>
-                      )}
+
+                        <p className="text-xs font-bold text-[var(--text)] leading-snug">
+                          {quest.title}
+                        </p>
+
+                        {/* Thanh tiến độ */}
+                        <div className="space-y-1 pt-1">
+                          <div className="flex items-center justify-between text-[11px] font-bold">
+                            <span className="text-[var(--muted)] text-[10px]">Tiến độ</span>
+                            <span
+                              className={`font-mono text-xs ${
+                                quest.completed
+                                  ? 'text-emerald-600 dark:text-emerald-400 font-extrabold'
+                                  : isReadyToClaim
+                                  ? 'text-amber-600 dark:text-amber-400 font-extrabold'
+                                  : 'text-[var(--text)]'
+                              }`}
+                            >
+                              {progress}/{target}
+                            </span>
+                          </div>
+                          <div className="w-full h-2 rounded-full bg-[var(--bg)] border border-[var(--border)] overflow-hidden">
+                            <div
+                              className={`h-full rounded-full transition-all duration-500 ${
+                                quest.completed
+                                  ? 'bg-emerald-500'
+                                  : isReadyToClaim
+                                  ? 'bg-gradient-to-r from-amber-400 to-emerald-400'
+                                  : 'bg-[var(--accent)]'
+                              }`}
+                              style={{ width: `${percent}%` }}
+                            />
+                          </div>
+                        </div>
+
+                        {/* Gợi ý nhẹ nhàng nơi để làm khi chưa xong */}
+                        {!quest.completed && !isReadyToClaim && (
+                          <p className="text-[10.5px] text-[var(--muted)] leading-relaxed italic bg-[var(--bg)]/70 p-2 rounded-xl border border-[var(--border)]/50">
+                            💡 {hint}
+                          </p>
+                        )}
+                      </div>
+
+                      <div className="pt-2 border-t border-[var(--border)]/40">
+                        {quest.completed ? (
+                          <div className="py-2 text-center text-[11px] font-extrabold text-emerald-600 dark:text-emerald-300 flex items-center justify-center gap-1.5 bg-emerald-500/15 rounded-xl border border-emerald-400/30">
+                            <CheckCircle2 className="w-4 h-4 text-emerald-500" />
+                            <span>Đã nhận (+{quest.reward} {coinCurrencyName})</span>
+                          </div>
+                        ) : isReadyToClaim ? (
+                          <button
+                            type="button"
+                            onClick={() => handleClaimQuestReward(index)}
+                            disabled={isClaimingQuestIndex === index}
+                            className="w-full py-2 rounded-xl bg-gradient-to-r from-amber-400 via-amber-300 to-amber-400 text-stone-900 font-extrabold text-xs shadow-md hover:brightness-105 active:scale-95 transition-all cursor-pointer flex items-center justify-center gap-1.5 animate-pulse"
+                          >
+                            <Sparkles className="w-3.5 h-3.5 text-amber-900" />
+                            <span>
+                              {isClaimingQuestIndex === index
+                                ? 'Đang nhận Xu...'
+                                : `Nhận thưởng (+${quest.reward} ${coinCurrencyName})`}
+                            </span>
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (!currentUser || currentUser.role === 'guest') {
+                                onRequireAuth?.(
+                                  `Mời bạn đăng nhập để làm nhiệm vụ và nhận ${coinCurrencyName} nhé 🌸`
+                                );
+                              } else {
+                                showToast(
+                                  `Bạn chưa làm xong nhiệm vụ này nhé (${progress}/${target}). ${hint}`
+                                );
+                              }
+                            }}
+                            className="w-full py-2 rounded-xl border border-[var(--border)] bg-[var(--bg)]/50 text-[11px] font-medium text-[var(--muted)] opacity-60 cursor-not-allowed flex items-center justify-center gap-1.5"
+                            title={hint}
+                          >
+                            <Lock className="w-3 h-3 opacity-60" />
+                            <span>Chưa hoàn thành ({progress}/{target})</span>
+                          </button>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           </div>
@@ -2397,6 +2592,15 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                 </button>
                 <button
                   type="button"
+                  onClick={handleFishCast}
+                  disabled={isCastingRod}
+                  className="px-4 py-2 rounded-full text-xs font-bold border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] hover:border-[var(--accent)] cursor-pointer inline-flex items-center gap-1.5"
+                  title="Thả cần câu tìm niềm vui ở mặt hồ"
+                >
+                  <span>{isCastingRod ? '🎣 Đang thả câu...' : '🎣 Thả cần câu'}</span>
+                </button>
+                <button
+                  type="button"
                   onClick={handleHatchNewFishEgg}
                   className="px-4 py-2 rounded-full text-xs font-bold border border-[var(--accent)] bg-[var(--surface)] text-[var(--text)] hover:bg-[var(--accent)]/20 cursor-pointer inline-flex items-center gap-1.5"
                 >
@@ -2799,8 +3003,8 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                                 ? 'left 0.9s ease-in-out, top 0.45s ease-out'
                                 : 'left 1.6s ease-in-out, top 1.2s ease-in-out',
                           }}
-                          onClick={() => handleFeedPet(pet.id)}
-                          title="Bấm để nghe tiếng kêu & cho thú cưng ăn"
+                          onClick={() => handleStrokePet(pet.id)}
+                          title="Bấm để vuốt ve & nghe tiếng kêu của bé thú cưng"
                           className="absolute flex flex-col items-center cursor-pointer hover:scale-110 transition-transform"
                         >
                           {isSpeaking && pet.petSound && (
@@ -2847,13 +3051,22 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                             </div>
                           </div>
 
-                          <button
-                            type="button"
-                            onClick={() => handleFeedPet(pet.id)}
-                            className="px-3 py-1 rounded-full bg-[var(--accent)] text-[#3a2b30] font-bold text-[11px] shrink-0 cursor-pointer"
-                          >
-                            Cho ăn (-1)
-                          </button>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => handleStrokePet(pet.id)}
+                              className="px-2.5 py-1 rounded-full border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] font-bold text-[10px] cursor-pointer hover:border-[var(--accent)]"
+                            >
+                              🐾 Vuốt ve
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleFeedPet(pet.id)}
+                              className="px-3 py-1 rounded-full bg-[var(--accent)] text-[#3a2b30] font-bold text-[11px] cursor-pointer"
+                            >
+                              Cho ăn (-1)
+                            </button>
+                          </div>
                         </div>
 
                         <p className="text-[11px] text-[var(--muted)] bg-[var(--surface)] p-2 rounded-xl border border-[var(--border)]">

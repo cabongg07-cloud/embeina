@@ -288,6 +288,10 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
     }
   };
 
+  const [loadingEditSecret, setLoadingEditSecret] = useState(false);
+  const [editSaveError, setEditSaveError] = useState<string | null>(null);
+  const [savingEdit, setSavingEdit] = useState(false);
+
   const openEditForm = async () => {
     setEditName(character.name);
     setEditEpithet(character.epithet);
@@ -309,22 +313,28 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
         : [{ id: `req_${Date.now()}`, category: 'flower', count: 2 }]
     );
 
-    // Đọc char_secrets để điền vào form sửa cho Creator
-    if (loadedSecret) {
-      setEditChatUrl(loadedSecret.chatLink);
-      setEditOpenScene(loadedSecret.openScene);
-    } else {
-      setEditChatUrl('');
-      setEditOpenScene('');
-      fetchCharSecretOnDemand(character.id).then((sec) => {
-        if (sec) {
-          setEditChatUrl(sec.chatLink);
-          setEditOpenScene(sec.openScene);
-        }
-      });
-    }
-
+    setEditChatUrl('');
+    setEditOpenScene('');
+    setEditSaveError(null);
+    setLoadingEditSecret(true);
     setEditModalOpen(true);
+
+    try {
+      if (loadedSecret) {
+        setEditChatUrl(loadedSecret.chatLink || '');
+        setEditOpenScene(loadedSecret.openScene || '');
+      } else {
+        const sec = await fetchCharSecretOnDemand(character.id);
+        if (sec) {
+          setEditChatUrl(sec.chatLink || '');
+          setEditOpenScene(sec.openScene || '');
+        }
+      }
+    } catch {
+      // ignore
+    } finally {
+      setLoadingEditSecret(false);
+    }
   };
 
   const handleEditTagKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -340,7 +350,24 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
 
   const handleSaveEditForm = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!onUpdateCharacter || !editName.trim()) return;
+    if (!onUpdateCharacter || !editName.trim() || loadingEditSecret || savingEdit) return;
+    setEditSaveError(null);
+
+    // Trim and normalize chatLink and openScene
+    let rawChatLink = editChatUrl.trim();
+    if (rawChatLink && !rawChatLink.startsWith('http://') && !rawChatLink.startsWith('https://')) {
+      rawChatLink = `https://${rawChatLink}`;
+    }
+    const rawOpenScene = editOpenScene.trim();
+
+    // Check if user is emptying existing stored secrets
+    if (loadedSecret && ((loadedSecret.chatLink && !rawChatLink) || (loadedSecret.openScene && !rawOpenScene))) {
+      const confirmed = window.confirm('Bạn muốn xóa link chat hoặc open scene đã lưu?');
+      if (!confirmed) {
+        return;
+      }
+    }
+
     const pendingTag = editTagInput.replace(/,/g, '').trim();
     const finalTags =
       pendingTag && !editTagsList.includes(pendingTag)
@@ -355,30 +382,38 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
         }))
       : [];
 
-    await onUpdateCharacter(character.id, {
-      name: editName.trim(),
-      epithet: editEpithet.trim() || 'Nhân vật sổ tay',
-      creatorName: character.creatorName || creator?.name || 'Chủ web',
-      imageUrl: editImageUrl.trim() || undefined,
-      avatarSymbol:
-        editAvatarSymbol.trim() || editName.trim().slice(0, 2).toUpperCase(),
-      tags: finalTags.length > 0 ? finalTags : ['Đời thường'],
-      description: editDesc.trim(),
-      creatorNote: editCreatorNote.trim() || undefined,
-      isLocked: editIsLocked,
-      unlockRequirements: cleanReqs,
-      // Ghi vào bảng char_secrets trên Supabase (không lưu vào global state)
-      chatLink: editChatUrl.trim() || 'https://character.ai',
-      openSceneSecret: editOpenScene.trim(),
-    });
-    if (loadedSecret) {
-      setLoadedSecret({
-        chatLink: editChatUrl.trim() || 'https://character.ai',
-        openScene: editOpenScene.trim(),
+    setSavingEdit(true);
+    try {
+      await onUpdateCharacter(character.id, {
+        name: editName.trim(),
+        epithet: editEpithet.trim() || 'Nhân vật sổ tay',
+        creatorName: character.creatorName || creator?.name || 'Chủ web',
+        imageUrl: editImageUrl.trim() || undefined,
+        avatarSymbol:
+          editAvatarSymbol.trim() || editName.trim().slice(0, 2).toUpperCase(),
+        tags: finalTags.length > 0 ? finalTags : ['Đời thường'],
+        description: editDesc.trim(),
+        creatorNote: editCreatorNote.trim() || undefined,
+        isLocked: editIsLocked,
+        unlockRequirements: cleanReqs,
+        chatLink: rawChatLink,
+        openSceneSecret: rawOpenScene,
       });
+
+      setLoadedSecret({
+        chatLink: rawChatLink,
+        openScene: rawOpenScene,
+      });
+
+      finalTags.forEach((t) => onAddGlobalTag?.(t));
+      setEditModalOpen(false);
+    } catch (err) {
+      setEditSaveError(
+        err instanceof Error ? err.message : 'Không thể lưu thay đổi. Vui lòng thử lại.'
+      );
+    } finally {
+      setSavingEdit(false);
     }
-    finalTags.forEach((t) => onAddGlobalTag?.(t));
-    setEditModalOpen(false);
   };
 
   // Gắn tag trực tiếp trên thẻ nhân vật cho Creator
@@ -797,20 +832,45 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
             )}
           </div>
 
-          <div className="flex justify-end gap-2 pt-1">
-            <button
-              type="button"
-              onClick={() => setEditModalOpen(false)}
-              className="px-3 py-1.5 rounded-full border border-[var(--border)] text-[var(--muted)] cursor-pointer"
-            >
-              Hủy
-            </button>
-            <button
-              type="submit"
-              className="px-4 py-1.5 rounded-full bg-[var(--accent)] text-[#3a2b30] font-bold cursor-pointer"
-            >
-              Lưu thay đổi
-            </button>
+          {loadingEditSecret && (
+            <div className="p-2 rounded-xl bg-[var(--surface)] text-center text-xs text-[var(--muted)] animate-pulse">
+              ⏳ Đang tải link chat và open scene từ máy chủ...
+            </div>
+          )}
+
+          {editSaveError && (
+            <div className="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-xs text-rose-500 font-semibold">
+              ⚠️ {editSaveError}
+            </div>
+          )}
+
+          <div className="flex items-center justify-between gap-2 pt-1">
+            <span className="text-[11px] text-[var(--muted)]">
+              {loadingEditSecret ? 'Đang đồng bộ dữ liệu...' : 'Sẵn sàng lưu'}
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setEditModalOpen(false)}
+                className="px-3 py-1.5 rounded-full border border-[var(--border)] text-[var(--muted)] cursor-pointer"
+              >
+                Hủy
+              </button>
+              <button
+                type="submit"
+                disabled={loadingEditSecret || savingEdit}
+                className="px-4 py-1.5 rounded-full bg-[var(--accent)] text-[#3a2b30] font-bold cursor-pointer disabled:opacity-50 inline-flex items-center gap-1.5"
+              >
+                {savingEdit ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Đang lưu...</span>
+                  </>
+                ) : (
+                  <span>Lưu thay đổi</span>
+                )}
+              </button>
+            </div>
           </div>
         </form>
       )}

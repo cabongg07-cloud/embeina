@@ -386,7 +386,7 @@ export async function updateCharOnSupabase(
       .update(dbPatch)
       .eq('id', charId);
     if (error) {
-      throw new Error(error.message || 'Không thể cập nhật thông tin nhân vật.');
+      throw new Error(error.message || 'Lỗi cập nhật bảng chars.');
     }
   }
 
@@ -402,7 +402,7 @@ export async function updateCharOnSupabase(
       .from('char_secrets')
       .upsert(secretPayload, { onConflict: 'char_id' });
     if (secErr) {
-      throw new Error(secErr.message || 'Không thể cập nhật char_secrets.');
+      throw new Error(secErr.message || 'Lỗi cập nhật bảng char_secrets.');
     }
   }
 }
@@ -1584,11 +1584,77 @@ export const DEFAULT_MARKET_PRICES: MarketPriceRow[] = [
   { kind: 'pet', buy_price: 20, sell_price: 8, enabled: true },
 ];
 
+export type QuestActionType =
+  | 'water'
+  | 'harvest'
+  | 'feed_fish'
+  | 'fish_cast'
+  | 'gift_drink'
+  | 'pet_stroke'
+  | 'feed_pet'
+  | 'chat_companion'
+  | 'visit_room'
+  | 'visit_drinks'
+  | 'love_letter'
+  | 'like_char'
+  | 'view_ranking'
+  | 'write_doc'
+  | 'listen_song';
+
+export interface QuestActionDefinition {
+  action: QuestActionType;
+  label: string;
+  defaultTarget: number;
+  hint: string;
+  location: string;
+}
+
+export const QUEST_ACTION_DEFINITIONS: QuestActionDefinition[] = [
+  { action: 'water', label: 'Tưới cây (Vườn hoa)', defaultTarget: 1, hint: 'Ghé Vườn hoa tưới nước cho các luống hoa nhé 🌸', location: 'Vườn hoa' },
+  { action: 'harvest', label: 'Thu hoạch hoa (Vườn hoa)', defaultTarget: 1, hint: 'Thu hoạch một bông hoa đã nở rộ trong Vườn hoa nhé 🌷', location: 'Vườn hoa' },
+  { action: 'feed_fish', label: 'Cho cá ăn (Hồ cá)', defaultTarget: 1, hint: 'Ghé Hồ cá và rắc chút Hạt cá cho đàn cá nhé 🐟', location: 'Hồ cá' },
+  { action: 'fish_cast', label: 'Thả cần câu (Hồ cá)', defaultTarget: 1, hint: 'Ghé Hồ cá và bấm nút "Thả cần câu" một lần nhé 🎣', location: 'Hồ cá' },
+  { action: 'gift_drink', label: 'Tặng nước cho người thương', defaultTarget: 1, hint: 'Ghé Quầy thức uống hoặc Phòng tri kỷ tặng ly nước ấm cho người thương nhé ☕', location: 'Phòng tri kỷ / Quầy' },
+  { action: 'pet_stroke', label: 'Vuốt ve thú cưng', defaultTarget: 1, hint: 'Ghé Phòng tri kỷ vuốt ve bé thú cưng một chút nhé 🐾', location: 'Phòng tri kỷ' },
+  { action: 'feed_pet', label: 'Cho thú ăn', defaultTarget: 1, hint: 'Cho bé thú cưng trong Phòng tri kỷ ăn món ngon nhé 🥕', location: 'Phòng tri kỷ' },
+  { action: 'chat_companion', label: 'Trò chuyện với người thương', defaultTarget: 1, hint: 'Vào Phòng tri kỷ nhắn lời tâm tình với người bạn đồng hành nhé 💬', location: 'Phòng tri kỷ' },
+  { action: 'visit_room', label: 'Mở Phòng tri kỷ', defaultTarget: 1, hint: 'Mở Phòng tri kỷ để ghé thăm người thương và thú cưng nhé 🛋️', location: 'Phòng tri kỷ' },
+  { action: 'visit_drinks', label: 'Mở Quầy thức uống', defaultTarget: 1, hint: 'Ghé Quầy thức uống ngắm các món trà bánh ngọt ngào nhé 🍵', location: 'Quầy thức uống' },
+  { action: 'love_letter', label: 'Gửi thư ở Góc yêu thương', defaultTarget: 1, hint: 'Ghé Góc yêu thương gửi gắm một lá thư nặc danh ngọt ngào nhé 💌', location: 'Góc yêu thương' },
+  { action: 'like_char', label: 'Thả tim một nhân vật', defaultTarget: 1, hint: 'Ghé Danh sách nhân vật và thả tim lưu một nhân vật bạn yêu thích nhé ❤️', location: 'Danh sách nhân vật' },
+  { action: 'view_ranking', label: 'Mở Bảng xếp hạng', defaultTarget: 1, hint: 'Mở Bảng xếp hạng để ngắm những nhân vật được mến mộ nhất nhé 🏆', location: 'Bảng xếp hạng' },
+  { action: 'write_doc', label: 'Lưu một đoạn ở Kho Docs', defaultTarget: 1, hint: 'Lưu một bản ghi chép hoặc tài liệu tại Kho Docs nhé 📝', location: 'Kho Docs' },
+  { action: 'listen_song', label: 'Nghe hết một bài nhạc', defaultTarget: 1, hint: 'Bật nhạc và lắng nghe trọn vẹn một bài hát êm dịu nhé 🎶', location: 'Trình phát nhạc' },
+];
+
+export function getQuestHintForAction(action?: string, title?: string): string {
+  if (action) {
+    const found = QUEST_ACTION_DEFINITIONS.find((def) => def.action === action);
+    if (found) return found.hint;
+  }
+  const t = (title || '').toLowerCase();
+  if (t.includes('tưới') || t.includes('nước') || t.includes('vườn')) return 'Ghé Vườn hoa tưới nước cho các luống hoa nhé 🌸';
+  if (t.includes('thu hoạch') || t.includes('hái hoa')) return 'Thu hoạch một bông hoa đã nở rộ trong Vườn hoa nhé 🌷';
+  if (t.includes('cá ăn') || t.includes('hạt cá')) return 'Ghé Hồ cá và rắc chút Hạt cá cho đàn cá nhé 🐟';
+  if (t.includes('câu') || t.includes('cần')) return 'Ghé Hồ cá và bấm nút "Thả cần câu" một lần nhé 🎣';
+  if (t.includes('thư') || t.includes('yêu thương')) return 'Ghé Góc yêu thương gửi gắm một lá thư ngọt ngào nhé 💌';
+  if (t.includes('tri kỷ') || t.includes('phòng')) return 'Mở Phòng tri kỷ để ghé thăm người thương nhé 🛋️';
+  if (t.includes('thức uống') || t.includes('trà') || t.includes('quầy')) return 'Ghé Quầy thức uống ngắm các món trà bánh nhé 🍵';
+  if (t.includes('thú') || t.includes('vuốt')) return 'Ghé Phòng tri kỷ vuốt ve bé thú cưng nhé 🐾';
+  if (t.includes('tim') || t.includes('nhân vật')) return 'Thả tim lưu một nhân vật vào danh sách yêu thích nhé ❤️';
+  if (t.includes('nhạc') || t.includes('bài hát')) return 'Bật nhạc và lắng nghe trọn vẹn một bài hát nhé 🎶';
+  if (t.includes('docs') || t.includes('ghi chép')) return 'Lưu một bản ghi chép tại Kho Docs nhé 📝';
+  if (t.includes('xếp hạng')) return 'Mở Bảng xếp hạng để ngắm các nhân vật nổi bật nhé 🏆';
+  return 'Hãy thực hiện hoạt động tương ứng trong game để tích lũy tiến độ nhé ✨';
+}
+
 export interface QuestPoolRow {
   id: string | number;
   title: string;
   reward: number;
   active: boolean;
+  action: QuestActionType;
+  target: number;
 }
 
 export interface DailyQuestItem {
@@ -1597,6 +1663,9 @@ export interface DailyQuestItem {
   title: string;
   reward: number;
   completed: boolean;
+  action?: QuestActionType | string;
+  target: number;
+  progress: number;
 }
 
 export interface DailyQuestsResult {
@@ -1693,13 +1762,13 @@ export async function updateMarketPriceOnSupabase(
 }
 
 /**
- * Đọc bảng `quest_pool` (id, title, reward, active) (Dành cho Chủ web)
+ * Đọc bảng `quest_pool` (id, title, reward, active, action, target) (Dành cho Chủ web)
  */
 export async function fetchQuestPoolFromSupabase(): Promise<QuestPoolRow[]> {
   try {
     const { data, error } = await supabase
       .from('quest_pool')
-      .select('id, title, reward, active')
+      .select('id, title, reward, active, action, target')
       .order('id', { ascending: true });
 
     if (error || !Array.isArray(data)) {
@@ -1709,8 +1778,10 @@ export async function fetchQuestPoolFromSupabase(): Promise<QuestPoolRow[]> {
     return data.map((r: Record<string, unknown>) => ({
       id: r.id as string | number,
       title: String(r.title || ''),
-      reward: Math.max(0, Number(r.reward) || 5),
+      reward: Math.max(1, Number(r.reward) || 5),
       active: r.active !== false,
+      action: ((r.action as string) || 'water') as QuestActionType,
+      target: Math.max(1, Number(r.target) || 1),
     }));
   } catch {
     return [];
@@ -1724,12 +1795,16 @@ export async function createQuestPoolRow(params: {
   title: string;
   reward: number;
   active?: boolean;
+  action?: QuestActionType | string;
+  target?: number;
 }): Promise<boolean> {
   try {
     const { error } = await supabase.from('quest_pool').insert({
       title: params.title.trim(),
       reward: Math.max(1, Math.floor(params.reward)),
       active: params.active ?? true,
+      action: params.action || 'water',
+      target: Math.max(1, Math.floor(params.target || 1)),
     });
     return !error;
   } catch {
@@ -1749,6 +1824,8 @@ export async function updateQuestPoolRow(
     if (patch.title !== undefined) payload.title = patch.title.trim();
     if (patch.reward !== undefined) payload.reward = Math.max(1, Math.floor(patch.reward));
     if (patch.active !== undefined) payload.active = Boolean(patch.active);
+    if (patch.action !== undefined) payload.action = patch.action;
+    if (patch.target !== undefined) payload.target = Math.max(1, Math.floor(patch.target));
 
     const { error } = await supabase
       .from('quest_pool')
@@ -1847,7 +1924,16 @@ export async function fetchDailyQuestsFromSupabase(): Promise<DailyQuestsResult>
           : idx;
 
       const isCompleted = Boolean(
-        item.completed ?? item.done ?? item.is_completed ?? item.claimed ?? item.is_done
+        item.done ?? item.completed ?? item.is_completed ?? item.claimed ?? item.is_done
+      );
+
+      const rawTarget = Math.max(
+        1,
+        Number(item.target ?? item.target_count ?? item.required ?? 1)
+      );
+      const rawProgress = Math.max(
+        0,
+        Number(item.progress ?? item.current_progress ?? (isCompleted ? rawTarget : 0))
       );
 
       return {
@@ -1856,6 +1942,9 @@ export async function fetchDailyQuestsFromSupabase(): Promise<DailyQuestsResult>
         title: String(item.title || item.name || `Nhiệm vụ #${idx + 1}`),
         reward: Math.max(1, Number(item.reward ?? item.reward_coins ?? 5)),
         completed: isCompleted,
+        action: (item.action as QuestActionType) || undefined,
+        target: rawTarget,
+        progress: Math.min(rawTarget, rawProgress),
       };
     });
 
@@ -1969,12 +2058,13 @@ export async function claimDailyCoinsViaRpc(): Promise<{
 
 /**
  * Gọi RPC `complete_quest(p_index)`
- * Lỗi `already_done` thì bỏ qua nhẹ nhàng.
+ * Bắt lỗi not_finished ("Bạn chưa làm xong nhiệm vụ này nhé"), already_done, not_logged_in.
  */
 export async function completeQuestViaRpc(
   p_index: number
 ): Promise<{
   ok: boolean;
+  notFinished?: boolean;
   alreadyDone?: boolean;
   notLoggedIn?: boolean;
   reward?: number;
@@ -1997,14 +2087,33 @@ export async function completeQuestViaRpc(
 
     if (error) {
       const msg = `${error.message || ''} ${error.details || ''} ${error.hint || ''}`.toLowerCase();
-      if (msg.includes('already_done') || msg.includes('already') || msg.includes('đã hoàn thành')) {
+      if (
+        msg.includes('not_finished') ||
+        msg.includes('not finished') ||
+        msg.includes('chưa đủ') ||
+        msg.includes('chưa xong') ||
+        msg.includes('chưa làm xong')
+      ) {
         return {
-          ok: true,
-          alreadyDone: true,
-          message: 'Nhiệm vụ này đã hoàn thành rồi.',
+          ok: false,
+          notFinished: true,
+          message: 'Bạn chưa làm xong nhiệm vụ này nhé',
         };
       }
-      if (msg.includes('not_logged_in') || error.code === '42501') {
+      if (
+        msg.includes('already_done') ||
+        msg.includes('already done') ||
+        msg.includes('already') ||
+        msg.includes('đã hoàn thành') ||
+        msg.includes('đã nhận')
+      ) {
+        return {
+          ok: false,
+          alreadyDone: true,
+          message: 'Nhiệm vụ này đã nhận thưởng rồi nè',
+        };
+      }
+      if (msg.includes('not_logged_in') || msg.includes('permission denied') || error.code === '42501') {
         return {
           ok: false,
           notLoggedIn: true,
@@ -2013,7 +2122,7 @@ export async function completeQuestViaRpc(
       }
       return {
         ok: false,
-        message: error.message || 'Không thể hoàn thành nhiệm vụ.',
+        message: error.message || 'Không thể nhận thưởng nhiệm vụ.',
       };
     }
 
@@ -2024,11 +2133,18 @@ export async function completeQuestViaRpc(
       coins = data;
     } else if (data && typeof data === 'object') {
       const obj = data as Record<string, unknown>;
-      if (obj.already_done) {
+      if (obj.not_finished || obj.error === 'not_finished') {
         return {
-          ok: true,
+          ok: false,
+          notFinished: true,
+          message: 'Bạn chưa làm xong nhiệm vụ này nhé',
+        };
+      }
+      if (obj.already_done || obj.error === 'already_done') {
+        return {
+          ok: false,
           alreadyDone: true,
-          message: 'Nhiệm vụ này đã hoàn thành rồi.',
+          message: 'Nhiệm vụ này đã nhận thưởng rồi nè',
         };
       }
       if (typeof obj.coins === 'number') coins = obj.coins;
@@ -2048,17 +2164,77 @@ export async function completeQuestViaRpc(
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err || '');
-    if (msg.toLowerCase().includes('already_done')) {
+    const low = msg.toLowerCase();
+    if (low.includes('not_finished') || low.includes('chưa đủ') || low.includes('chưa làm xong')) {
       return {
-        ok: true,
+        ok: false,
+        notFinished: true,
+        message: 'Bạn chưa làm xong nhiệm vụ này nhé',
+      };
+    }
+    if (low.includes('already_done') || low.includes('đã nhận') || low.includes('đã hoàn thành')) {
+      return {
+        ok: false,
         alreadyDone: true,
-        message: 'Nhiệm vụ này đã hoàn thành.',
+        message: 'Nhiệm vụ này đã nhận thưởng rồi nè',
       };
     }
     return {
       ok: false,
       message: msg || 'Không thể hoàn thành nhiệm vụ.',
     };
+  }
+}
+
+type QuestActionLoggedListener = (action: QuestActionType) => void;
+const questActionLoggedListeners = new Set<QuestActionLoggedListener>();
+
+export function onQuestActionLogged(cb: QuestActionLoggedListener): () => void {
+  questActionLoggedListeners.add(cb);
+  return () => {
+    questActionLoggedListeners.delete(cb);
+  };
+}
+
+export function emitQuestActionLogged(action: QuestActionType) {
+  questActionLoggedListeners.forEach((listener) => {
+    try {
+      listener(action);
+    } catch {
+      // ignore
+    }
+  });
+}
+
+/**
+ * GỌI `log_action` ĐÚNG LÚC khi người chơi thật sự làm hành động trong game.
+ * (Mỗi lần chỉ gọi 1 lần cho mỗi hành động, không gọi lặp, không gọi khi mới mở trang).
+ *
+ * Chỉ gọi log_action khi đã đăng nhập; bỏ qua lỗi nhẹ nhàng, không làm hỏng trò chơi.
+ */
+export async function logGameActionViaRpc(
+  action: QuestActionType
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    if (!sessionData.session?.user?.id) {
+      return { ok: false, error: 'not_logged_in' };
+    }
+
+    const { error } = await supabase.rpc('log_action', {
+      p_action: action,
+    });
+
+    if (error) {
+      // Bỏ qua lỗi nhẹ nhàng, không làm hỏng trò chơi
+      return { ok: false, error: error.message };
+    }
+
+    // Phát sự kiện nội bộ để các tab làm mới tiến độ nhiệm vụ
+    emitQuestActionLogged(action);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : 'Lỗi log_action' };
   }
 }
 
@@ -2377,4 +2553,69 @@ export function doesQuestMatchAction(
       return false;
   }
 }
+
+/**
+ * Gọi RPC `claim_welcome_gift()` để nhận quà chào mừng cho người dùng mới
+ */
+export async function claimWelcomeGiftViaRpc(): Promise<{
+  ok: boolean;
+  claimed?: boolean;
+  flowers?: number;
+  coins?: number;
+  reason?: string;
+  message?: string;
+}> {
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    if (!sessionData.session?.user?.id) {
+      return { ok: false, message: 'Not logged in' };
+    }
+    const { data, error } = await supabase.rpc('claim_welcome_gift');
+    if (error) {
+      return { ok: false, message: error.message };
+    }
+    const res = (data || {}) as Record<string, unknown>;
+    return {
+      ok: true,
+      claimed: Boolean(res.claimed),
+      flowers: typeof res.flowers === 'number' ? res.flowers : undefined,
+      coins: typeof res.coins === 'number' ? res.coins : undefined,
+      reason: typeof res.reason === 'string' ? res.reason : undefined,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      message: err instanceof Error ? err.message : 'Error claiming welcome gift',
+    };
+  }
+}
+
+/**
+ * Gọi RPC `owner_refill()` để chủ web luôn đầy Xu và hoa
+ */
+export async function ownerRefillViaRpc(): Promise<{
+  ok: boolean;
+  coins?: number;
+  flowers?: number;
+}> {
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    if (!sessionData.session?.user?.id) {
+      return { ok: false };
+    }
+    const { data, error } = await supabase.rpc('owner_refill');
+    if (error) {
+      return { ok: false };
+    }
+    const res = (data || {}) as Record<string, unknown>;
+    return {
+      ok: true,
+      coins: typeof res.coins === 'number' ? res.coins : undefined,
+      flowers: typeof res.flowers === 'number' ? res.flowers : undefined,
+    };
+  } catch {
+    return { ok: false };
+  }
+}
+
 

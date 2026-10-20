@@ -21,6 +21,7 @@ import {
   insertRequestOnSupabase,
   updateRequestOnSupabase,
   emitGameQuestAction,
+  logGameActionViaRpc,
 } from '../services/supabaseService';
 import { AuthUser, can } from '../services/authLayer';
 import { EditableText } from './EditableText';
@@ -123,6 +124,9 @@ export const LoveCornerTab: React.FC<LoveCornerTabProps> = ({
     onUpdateLoveMessages?.(next, 'Thêm lời nhắn Góc yêu thương');
     setMessageText('');
     emitGameQuestAction('love_letter');
+    if (currentUser && currentUser.role !== 'guest') {
+      logGameActionViaRpc('love_letter');
+    }
   };
 
   const handleHeartLove = (id: string) => {

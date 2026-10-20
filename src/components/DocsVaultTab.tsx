@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { DocItem, SAMPLE_DOCS } from '../data/sampleData';
 import { EditableText } from './EditableText';
+import { logGameActionViaRpc } from '../services/supabaseService';
 
 interface DocsVaultTabProps {
   editMode?: boolean;
@@ -91,6 +92,7 @@ export const DocsVaultTab: React.FC<DocsVaultTabProps> = ({
       d.id === activeDoc.id ? { ...d, ...patch, updatedAt: nowStr } : d
     );
     syncDocs(next, `Cập nhật tài liệu "${activeDoc.title}"`);
+    logGameActionViaRpc('write_doc');
     setTimeout(() => setAutoSaveStatus('Đã lưu tự động'), 400);
   };
 
@@ -106,6 +108,7 @@ export const DocsVaultTab: React.FC<DocsVaultTabProps> = ({
     };
     const updatedList = [added, ...docs];
     syncDocs(updatedList, 'Tạo tài liệu mới trong Kho Docs');
+    logGameActionViaRpc('write_doc');
     setActiveDocId(added.id);
   };
 

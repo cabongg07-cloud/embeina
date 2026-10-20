@@ -48,6 +48,9 @@ import {
   fetchInventoryFromSupabase,
   fetchUnlockedCharIdsFromSupabase,
   SupabaseInventoryItem,
+  logGameActionViaRpc,
+  claimWelcomeGiftViaRpc,
+  ownerRefillViaRpc,
 } from './services/supabaseService';
 import { SparkleCanvas } from './components/SparkleCanvas';
 import { GateOverlay } from './components/GateOverlay';
@@ -170,6 +173,31 @@ export default function App() {
   const [authPromptReason, setAuthPromptReason] = useState<string | null>(null);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
 
+  // Tiền tệ phụ trợ trong mini game & danh sách char đã mở khóa đọc từ bảng `unlocks` của Supabase
+  const [petalsBalance, setPetalsBalance] = useState<number>(() =>
+    dataStore.get<number>(PETALS_STORAGE_KEY, 45)
+  );
+  const [unlockedCharIds, setUnlockedCharIds] = useState<string[]>([]);
+  const [supabaseInventory, setSupabaseInventory] = useState<
+    SupabaseInventoryItem[]
+  >([]);
+  const [activeTabId, setActiveTabId] = useState<string>('char');
+
+  // Khi người dùng đăng nhập / đổi phiên, tải `inventory` và `unlocks` từ Supabase
+  const refreshUserInventoryAndUnlocks = useCallback(async () => {
+    if (!currentUser || currentUser.profileRole === 'guest') {
+      setUnlockedCharIds([]);
+      setSupabaseInventory([]);
+      return;
+    }
+    const [inv, unl] = await Promise.all([
+      fetchInventoryFromSupabase(),
+      fetchUnlockedCharIdsFromSupabase(),
+    ]);
+    setSupabaseInventory(inv);
+    setUnlockedCharIds(unl);
+  }, [currentUser]);
+
   // Trạng thái CHẾ ĐỘ CHỈNH SỬA & Ngăn kéo Cài đặt trang (Chỉ dành cho vai `owner` qua can("edit", currentUser))
   const [editMode, setEditMode] = useState(false);
   const [settingsDrawerOpen, setSettingsDrawerOpen] = useState(false);
@@ -224,14 +252,48 @@ export default function App() {
     setAuthModalOpen(true);
   }, []);
 
-  // Tiền tệ phụ trợ trong mini game & danh sách char đã mở khóa đọc từ bảng `unlocks` của Supabase
-  const [petalsBalance, setPetalsBalance] = useState<number>(() =>
-    dataStore.get<number>(PETALS_STORAGE_KEY, 45)
-  );
-  const [unlockedCharIds, setUnlockedCharIds] = useState<string[]>([]);
-  const [supabaseInventory, setSupabaseInventory] = useState<
-    SupabaseInventoryItem[]
-  >([]);
+  const isOwner = Boolean(currentUser.profileLoaded && currentUser.profileRole === 'owner');
+
+  // Quà chào mừng khi đăng nhập thành công
+  const [welcomeGiftModalData, setWelcomeGiftModalData] = useState<{
+    flowers: number;
+    coins: number;
+  } | null>(null);
+  const welcomeCheckedRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (currentUser.profileLoaded && currentUser.profileRole !== 'guest' && currentUser.id) {
+      if (welcomeCheckedRef.current !== currentUser.id) {
+        welcomeCheckedRef.current = currentUser.id;
+        claimWelcomeGiftViaRpc().then((res) => {
+          if (res.ok && res.claimed) {
+            setWelcomeGiftModalData({
+              flowers: res.flowers ?? 15,
+              coins: res.coins ?? 10,
+            });
+            refreshUserInventoryAndUnlocks();
+          }
+        }).catch(() => {});
+      }
+    } else {
+      welcomeCheckedRef.current = null;
+    }
+  }, [currentUser, refreshUserInventoryAndUnlocks]);
+
+  // Chủ web luôn đầy
+  useEffect(() => {
+    if (isOwner) {
+      ownerRefillViaRpc().catch(() => {});
+    }
+  }, [isOwner]);
+
+  useEffect(() => {
+    if (activeTabId === 'mini-game' && isOwner) {
+      ownerRefillViaRpc().catch(() => {});
+    }
+  }, [activeTabId, isOwner]);
+
+
   const [isLoadingChars, setIsLoadingChars] = useState<boolean>(true);
   const [dailyToast, setDailyToast] = useState<string | null>(null);
 
@@ -265,6 +327,7 @@ export default function App() {
     };
   }, []);
 
+
   // Danh sách tab hiển thị theo cấu hình trang & phân quyền:
   // Ba tab Commission, Request, Kho lệnh chỉ hiện với vai Creator (kiểm tra bằng can('view_creator_tabs', currentUser))
   const canViewCreatorTabs = can('view_creator_tabs', currentUser);
@@ -285,8 +348,16 @@ export default function App() {
     [siteConfig.tabs, canViewCreatorTabs]
   );
 
-  // Tab điều hướng hiện tại
-  const [activeTabId, setActiveTabId] = useState<string>('char');
+
+  const handleSelectTab = useCallback(
+    (tabId: string) => {
+      setActiveTabId(tabId);
+      if (tabId === 'xep-hang' && currentUser && currentUser.role !== 'guest') {
+        logGameActionViaRpc('view_ranking');
+      }
+    },
+    [currentUser]
+  );
 
   useEffect(() => {
     if (
@@ -316,21 +387,6 @@ export default function App() {
   useEffect(() => {
     refreshLibraryData();
   }, [refreshLibraryData]);
-
-  // Khi người dùng đăng nhập / đổi phiên, tải `inventory` và `unlocks` từ Supabase
-  const refreshUserInventoryAndUnlocks = useCallback(async () => {
-    if (!currentUser || currentUser.profileRole === 'guest') {
-      setUnlockedCharIds([]);
-      setSupabaseInventory([]);
-      return;
-    }
-    const [inv, unl] = await Promise.all([
-      fetchInventoryFromSupabase(),
-      fetchUnlockedCharIdsFromSupabase(),
-    ]);
-    setSupabaseInventory(inv);
-    setUnlockedCharIds(unl);
-  }, [currentUser]);
 
   useEffect(() => {
     refreshUserInventoryAndUnlocks();
@@ -628,10 +684,14 @@ export default function App() {
         return;
       }
       setFavoriteIds((prev) => {
-        const next = prev.includes(charId)
-          ? prev.filter((id) => id !== charId)
-          : [...prev, charId];
+        const isAdding = !prev.includes(charId);
+        const next = isAdding
+          ? [...prev, charId]
+          : prev.filter((id) => id !== charId);
         dataStore.set(FAVORITES_STORAGE_KEY, next, true);
+        if (isAdding && currentUser && currentUser.role !== 'guest') {
+          logGameActionViaRpc('like_char');
+        }
         return next;
       });
     },
@@ -941,6 +1001,33 @@ export default function App() {
     async (trackToPlay: MusicTrack, startFromTime?: number) => {
       const effectiveVol = isMuted ? 0 : volume;
       try {
+        // Trường hợp YouTube
+        if (trackToPlay.sourceType === 'youtube' && trackToPlay.youtubeId) {
+          if (audioElRef.current) audioElRef.current.pause();
+          stopWebAudioSynth();
+          if (window.ytPlayerInstance && typeof window.ytPlayerInstance.loadVideoById === 'function') {
+            window.ytPlayerInstance.loadVideoById(trackToPlay.youtubeId);
+            window.ytPlayerInstance.playVideo();
+          }
+          loadedTrackIdRef.current = trackToPlay.id;
+          setDuration(trackToPlay.duration || 180);
+          setIsPlaying(true);
+          return;
+        }
+
+        // Trường hợp Spotify
+        if (trackToPlay.sourceType === 'spotify') {
+          if (audioElRef.current) audioElRef.current.pause();
+          stopWebAudioSynth();
+          if (window.ytPlayerInstance && typeof window.ytPlayerInstance.pauseVideo === 'function') {
+            window.ytPlayerInstance.pauseVideo();
+          }
+          loadedTrackIdRef.current = trackToPlay.id;
+          setDuration(trackToPlay.duration || 180);
+          setIsPlaying(true);
+          return;
+        }
+
         // Trường hợp 1: Giai điệu Hộp nhạc Web Audio mặc định
         if (trackToPlay.sourceType === 'builtin-synth') {
           if (audioElRef.current) {
@@ -1037,6 +1124,9 @@ export default function App() {
         audioElRef.current.pause();
       }
       stopWebAudioSynth();
+      if (window.ytPlayerInstance && typeof window.ytPlayerInstance.pauseVideo === 'function') {
+        window.ytPlayerInstance.pauseVideo();
+      }
       setIsPlaying(false);
     } catch {
       setIsPlaying(false);
@@ -1084,6 +1174,9 @@ export default function App() {
     };
 
     const handleEnded = () => {
+      if (currentUser && currentUser.role !== 'guest') {
+        logGameActionViaRpc('listen_song');
+      }
       if (playMode === 'repeat-one') {
         audio.currentTime = 0;
         audio.play().catch(() => {});
@@ -1665,7 +1758,7 @@ export default function App() {
         isOpen={paletteOpen}
         onClose={() => setPaletteOpen(false)}
         activeTabId={activeTabId}
-        onSelectTab={setActiveTabId}
+        onSelectTab={handleSelectTab}
         themes={activeThemesList}
         onSelectTheme={setActiveThemeId}
         onToggleMusic={toggleMusic}
@@ -1735,7 +1828,7 @@ export default function App() {
                 className="sticker-chip text-xs inline-flex items-center gap-1 cursor-pointer tabular-nums shrink-0"
               >
                 <span>{siteConfig.currencyEmoji}</span>
-                <span>{petalsBalance}</span>
+                <span>{isOwner ? 'Đầy' : petalsBalance}</span>
                 <span className="hidden sm:inline">
                   {siteConfig.currencyName}
                 </span>
@@ -1869,7 +1962,7 @@ export default function App() {
                   key={tab.id}
                   type="button"
                   onClick={() => {
-                    setActiveTabId(tab.id);
+                    handleSelectTab(tab.id);
                   }}
                   className={`px-3.5 py-1.5 rounded-full text-xs sm:text-[13px] whitespace-nowrap shrink-0 bouncy-btn cursor-pointer flex items-center gap-1.5 ${
                     isActive
@@ -2292,6 +2385,40 @@ export default function App() {
         currentTheme={currentTheme}
         onSelectTheme={setActiveThemeId}
       />
+
+      {welcomeGiftModalData && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4 animate-fadeIn">
+          <div className="bg-[var(--card)] border-2 border-[var(--accent)] rounded-2xl p-6 max-w-sm w-full text-center shadow-2xl relative">
+            <div className="text-4xl mb-2">🎁✨</div>
+            <h3 className="text-lg font-bold text-[var(--text)] mb-2">Quà Chào Mừng</h3>
+            <p className="text-sm text-[var(--muted)] mb-4 leading-relaxed">
+              Chào mừng bạn mới! Tặng bạn {welcomeGiftModalData.flowers} 🌸 Hoa và {welcomeGiftModalData.coins} 🪙 Xu.
+            </p>
+            <div className="flex gap-2 justify-center">
+              <button
+                type="button"
+                onClick={() => {
+                  setWelcomeGiftModalData(null);
+                  setActiveTabId('mini-game');
+                }}
+                className="px-4 py-2 bg-[var(--accent)] text-[#3a2b30] font-bold rounded-xl text-xs hover:opacity-90 shadow-2xs cursor-pointer"
+              >
+                Xem Kho đồ ✨
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setWelcomeGiftModalData(null);
+                  setActiveTabId('mini-game');
+                }}
+                className="px-4 py-2 bg-[var(--border)] text-[var(--text)] font-bold rounded-xl text-xs hover:opacity-80 shadow-2xs cursor-pointer"
+              >
+                Đi mua sắm 🛍️
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

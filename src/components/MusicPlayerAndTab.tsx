@@ -37,6 +37,9 @@ import {
   musicIdbStorage,
   inferTitleFromUrl,
   formatAudioTime,
+  parseYouTubeId,
+  parseSpotifyEmbedUrl,
+  fetchYouTubeTitle,
 } from '../services/musicService';
 import { ColorMode, ThemeConfig } from '../constants/themes';
 import { EditableText } from './EditableText';
@@ -84,18 +87,74 @@ export const AddMusicPanel: React.FC<AddMusicPanelProps> = ({
     setUrlError(null);
     setUrlHintNote(null);
 
-    if (!urlInput.trim()) {
-      setUrlError('Bạn hãy dán link nhạc trực tiếp (.mp3, .m4a, .wav, .ogg) vào ô nhé 🌸');
+    const trimmedUrl = urlInput.trim();
+    if (!trimmedUrl) {
+      setUrlError('Bạn hãy dán link YouTube, Spotify hoặc link file MP3 vào ô nhé 🌸');
       return;
     }
 
     setValidatingUrl(true);
     try {
-      const result = await validateAndNormalizeAudioUrl(urlInput);
+      const targetSource: 'web' | 'personal' =
+        playlistSource === 'web' && canEditWebPlaylist ? 'web' : 'personal';
+
+      // 1. Check YouTube link
+      const ytId = parseYouTubeId(trimmedUrl);
+      if (ytId) {
+        const fetchedTitle = await fetchYouTubeTitle(ytId);
+        const finalTitle = titleInput.trim() || fetchedTitle;
+        const newTrack: MusicTrack = {
+          id: `track-yt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          title: finalTitle,
+          artist: artistInput.trim() || 'YouTube 🎥',
+          coverUrl: coverInput.trim() || `https://i.ytimg.com/vi/${ytId}/hqdefault.jpg`,
+          sourceType: 'youtube',
+          youtubeId: ytId,
+          url: trimmedUrl,
+          isWebTrack: targetSource === 'web',
+          createdAt: new Date().toISOString(),
+        };
+        onAddTrack(newTrack, true, targetSource);
+        setTitleInput('');
+        setUrlInput('');
+        setCoverInput('');
+        setArtistInput('');
+        if (onClose) onClose();
+        setValidatingUrl(false);
+        return;
+      }
+
+      // 2. Check Spotify link
+      const spEmbed = parseSpotifyEmbedUrl(trimmedUrl);
+      if (spEmbed) {
+        const finalTitle = titleInput.trim() || 'Spotify Track/Playlist 🎧';
+        const newTrack: MusicTrack = {
+          id: `track-sp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          title: finalTitle,
+          artist: artistInput.trim() || 'Spotify 🎧',
+          coverUrl: coverInput.trim() || undefined,
+          sourceType: 'spotify',
+          spotifyEmbedUrl: spEmbed,
+          url: trimmedUrl,
+          isWebTrack: targetSource === 'web',
+          createdAt: new Date().toISOString(),
+        };
+        onAddTrack(newTrack, true, targetSource);
+        setTitleInput('');
+        setUrlInput('');
+        setCoverInput('');
+        setArtistInput('');
+        if (onClose) onClose();
+        setValidatingUrl(false);
+        return;
+      }
+
+      // 3. Check direct MP3 link
+      const result = await validateAndNormalizeAudioUrl(trimmedUrl);
       if (!result.ok) {
         setUrlError(
           result.errorMessage ||
-            'Không thể phát được link nhạc này. Bạn kiểm tra lại link trực tiếp nhé!'
+            'Chỉ hỗ trợ link YouTube, Spotify hoặc link file MP3 trực tiếp (.mp3, .m4a, .wav, .ogg) 🌸'
         );
         if (result.wasConverted && result.normalizedUrl) {
           setUrlInput(result.normalizedUrl);
@@ -110,9 +169,6 @@ export const AddMusicPanel: React.FC<AddMusicPanelProps> = ({
 
       const finalTitle =
         titleInput.trim() || inferTitleFromUrl(result.normalizedUrl);
-
-      const targetSource: 'web' | 'personal' =
-        playlistSource === 'web' && canEditWebPlaylist ? 'web' : 'personal';
 
       const newTrack: MusicTrack = {
         id: `track-url-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -134,7 +190,7 @@ export const AddMusicPanel: React.FC<AddMusicPanelProps> = ({
       if (onClose) onClose();
     } catch {
       setUrlError(
-        'Có chút trục trặc khi kiểm tra link nhạc. Bạn thử lại với link .mp3 trực tiếp nhé 🌸'
+        'Chỉ hỗ trợ link YouTube, Spotify hoặc link file MP3 trực tiếp (.mp3, .m4a, .wav, .ogg) 🌸'
       );
     } finally {
       setValidatingUrl(false);
@@ -846,6 +902,10 @@ export const CornerMusicWidget: React.FC<CornerMusicWidgetProps> = ({
                         ? '💾 Từ máy'
                         : currentTrack.sourceType === 'url'
                         ? '🔗 Link MP3'
+                        : currentTrack.sourceType === 'youtube'
+                        ? '🎥 YouTube'
+                        : currentTrack.sourceType === 'spotify'
+                        ? '🎧 Spotify'
                         : '🎐 Hộp nhạc'}
                     </span>
                     {isPlaying && (
@@ -862,6 +922,34 @@ export const CornerMusicWidget: React.FC<CornerMusicWidgetProps> = ({
                   </div>
                 </div>
               </div>
+
+              {/* Trình phát nhúng YouTube (khoảng 200x112px, bo góc) */}
+              {currentTrack.sourceType === 'youtube' && (
+                <div className="flex justify-center my-1">
+                  <div
+                    id="youtube-embed-player"
+                    className="w-[200px] h-[112px] rounded-xl overflow-hidden border border-[var(--border)] bg-black shadow-sm shrink-0"
+                  />
+                </div>
+              )}
+
+              {/* Trình phát nhúng Spotify */}
+              {currentTrack.sourceType === 'spotify' && currentTrack.spotifyEmbedUrl && (
+                <div className="space-y-1 my-1">
+                  <iframe
+                    src={currentTrack.spotifyEmbedUrl}
+                    width="100%"
+                    height="80"
+                    frameBorder="0"
+                    allow="encrypted-media"
+                    title={currentTrack.title}
+                    className="rounded-xl border border-[var(--border)] bg-black"
+                  />
+                  <p className="text-[10px] text-[var(--muted)] text-center leading-tight">
+                    Spotify chỉ phát đầy đủ khi bạn đã đăng nhập Spotify trên trình duyệt này, nếu không sẽ chỉ nghe được bản nghe thử 30 giây.
+                  </p>
+                </div>
+              )}
 
               {/* Thanh tua (Seek Bar) */}
               <div className="space-y-1">
@@ -935,7 +1023,7 @@ export const CornerMusicWidget: React.FC<CornerMusicWidgetProps> = ({
               </div>
 
               {/* Thanh âm lượng trong bảng Playlist */}
-              <div className="flex items-center gap-2 pt-1 border-t border-[var(--border)]/60">
+              <div className={`flex items-center gap-2 pt-1 border-t border-[var(--border)]/60 ${currentTrack.sourceType === 'spotify' ? 'opacity-40 pointer-events-none' : ''}`}>
                 <button
                   type="button"
                   onClick={onToggleMute}
@@ -963,6 +1051,11 @@ export const CornerMusicWidget: React.FC<CornerMusicWidgetProps> = ({
                   {Math.round((isMuted ? 0 : volume) * 100)}%
                 </span>
               </div>
+              {currentTrack.sourceType === 'spotify' && (
+                <p className="text-[10px] text-[var(--muted)] text-center italic">
+                  Spotify không hỗ trợ điều chỉnh âm lượng từ web 🎧
+                </p>
+              )}
             </div>
 
             {/* Danh sách các bài trong Playlist */}

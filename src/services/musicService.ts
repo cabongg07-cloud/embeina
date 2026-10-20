@@ -15,7 +15,7 @@ import { dataStore } from './dataLayer';
 
 export type PlayMode = 'repeat-all' | 'repeat-one' | 'shuffle';
 
-export type TrackSourceType = 'builtin-synth' | 'url' | 'indexeddb';
+export type TrackSourceType = 'builtin-synth' | 'url' | 'indexeddb' | 'youtube' | 'spotify';
 
 export type SynthPresetId =
   | 'starlight-box'
@@ -31,6 +31,10 @@ export interface MusicTrack {
   sourceType: TrackSourceType;
   /** Đường dẫn trực tiếp cho bài nhạc dạng 'url' */
   url?: string;
+  /** YouTube video ID */
+  youtubeId?: string;
+  /** Spotify embed URL */
+  spotifyEmbedUrl?: string;
   /** Khóa lưu trữ trong IndexedDB cho bài nhạc tải từ máy ('indexeddb') */
   idbKey?: string;
   /** Giai điệu Web Audio API cho bài nhạc hộp nhạc mặc định ('builtin-synth') */
@@ -45,6 +49,46 @@ export interface MusicTrack {
   isWebTrack?: boolean;
   createdAt: string;
 }
+
+export function parseYouTubeId(url: string): string | null {
+  if (!url) return null;
+  const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
+  const match = url.match(regExp);
+  if (match && match[2].length === 11) {
+    return match[2];
+  }
+  const shortsMatch = url.match(/\/shorts\/([\w-]{11})/);
+  if (shortsMatch && shortsMatch[1]) {
+    return shortsMatch[1];
+  }
+  return null;
+}
+
+export function parseSpotifyEmbedUrl(url: string): string | null {
+  if (!url) return null;
+  if (url.includes('open.spotify.com/embed/')) {
+    return url;
+  }
+  const match = url.match(/open\.spotify\.com\/(track|album|playlist|episode)\/([a-zA-Z0-9]+)/);
+  if (match && match[1] && match[2]) {
+    return `https://open.spotify.com/embed/${match[1]}/${match[2]}?utm_source=generator`;
+  }
+  return null;
+}
+
+export async function fetchYouTubeTitle(videoId: string): Promise<string> {
+  try {
+    const res = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data && typeof data.title === 'string') {
+        return data.title;
+      }
+    }
+  } catch {}
+  return `YouTube Video (${videoId})`;
+}
+
 
 export interface PersistedPlayerState {
   currentTrackId: string;
@@ -570,3 +614,12 @@ export function savePlayerState(patch: Partial<PersistedPlayerState>): void {
     // Ignore storage error
   }
 }
+
+declare global {
+  interface Window {
+    YT?: any;
+    ytPlayerInstance?: any;
+    onYouTubeIframeAPIReady?: () => void;
+  }
+}
+

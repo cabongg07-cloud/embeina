@@ -43,6 +43,8 @@ import {
   MarketPriceRow,
   QuestPoolRow,
   DEFAULT_MARKET_PRICES,
+  QUEST_ACTION_DEFINITIONS,
+  QuestActionType,
 } from '../services/supabaseService';
 import {
   SiteConfig,
@@ -156,6 +158,8 @@ export const EditModeSystem: React.FC<EditModeSystemProps> = ({
   const [marketLoading, setMarketLoading] = useState(false);
   const [marketFeedbackMsg, setMarketFeedbackMsg] = useState<string | null>(null);
   const [newQuestTitle, setNewQuestTitle] = useState('');
+  const [newQuestAction, setNewQuestAction] = useState<QuestActionType>('water');
+  const [newQuestTarget, setNewQuestTarget] = useState<number>(1);
   const [newQuestReward, setNewQuestReward] = useState<number>(5);
 
   const flashMarketFeedback = (msg: string) => {
@@ -226,11 +230,14 @@ export const EditModeSystem: React.FC<EditModeSystemProps> = ({
     const ok = await createQuestPoolRow({
       title,
       reward: newQuestReward || 5,
+      action: newQuestAction || 'water',
+      target: newQuestTarget || 1,
       active: true,
     });
     if (ok) {
       setNewQuestTitle('');
       setNewQuestReward(5);
+      setNewQuestTarget(1);
       flashMarketFeedback(`Đã thêm nhiệm vụ "${title}" (+${newQuestReward} Xu)!`);
       const refreshed = await fetchQuestPoolFromSupabase();
       setQuestPoolList(refreshed);
@@ -2103,18 +2110,62 @@ export const EditModeSystem: React.FC<EditModeSystemProps> = ({
                   </div>
 
                   {/* Danh sách nhiệm vụ trong pool */}
-                  <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+                  <div className="space-y-2.5 max-h-80 overflow-y-auto pr-1">
                     {questPoolList.length === 0 ? (
-                      <p className="text-[11px] text-[var(--muted)] py-3 text-center italic">
-                        Chưa có nhiệm vụ nào trong kho quest_pool. Hãy thêm nhiệm vụ đầu tiên bên dưới nhé!
-                      </p>
+                      <div className="text-center py-4 space-y-2">
+                        <p className="text-[11px] text-[var(--muted)] italic">
+                          Chưa có nhiệm vụ nào trong kho quest_pool.
+                        </p>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            const templates: {
+                              title: string;
+                              action: QuestActionType;
+                              target: number;
+                              reward: number;
+                            }[] = [
+                              { title: 'Tưới nước cho Vườn hoa ban mai', action: 'water', target: 2, reward: 6 },
+                              { title: 'Thu hoạch hoa tươi đã nở rộ', action: 'harvest', target: 1, reward: 8 },
+                              { title: 'Cho đàn cá trong hồ ăn no bụng', action: 'feed_fish', target: 2, reward: 6 },
+                              { title: 'Thả cần câu tìm niềm vui ở Hồ cá', action: 'fish_cast', target: 1, reward: 5 },
+                              { title: 'Tặng ly nước ấm cho người thương', action: 'gift_drink', target: 1, reward: 8 },
+                              { title: 'Vuốt ve âu yếm bé thú cưng', action: 'pet_stroke', target: 2, reward: 5 },
+                              { title: 'Cho bé thú cưng ăn bữa ngon', action: 'feed_pet', target: 1, reward: 7 },
+                              { title: 'Trò chuyện tâm tình với tri kỷ', action: 'chat_companion', target: 2, reward: 6 },
+                              { title: 'Ghé thăm Phòng tri kỷ ấm cúng', action: 'visit_room', target: 1, reward: 5 },
+                              { title: 'Ghé Quầy thức uống ngắm trà hoa', action: 'visit_drinks', target: 1, reward: 5 },
+                              { title: 'Gửi một lá thư ở Góc yêu thương', action: 'love_letter', target: 1, reward: 10 },
+                              { title: 'Thả tim yêu mến một nhân vật', action: 'like_char', target: 1, reward: 5 },
+                              { title: 'Mở Bảng xếp hạng ngắm top nhân vật', action: 'view_ranking', target: 1, reward: 5 },
+                              { title: 'Lưu một ghi chép mới tại Kho Docs', action: 'write_doc', target: 1, reward: 7 },
+                              { title: 'Lắng nghe trọn vẹn một bản nhạc êm', action: 'listen_song', target: 1, reward: 8 },
+                            ];
+                            for (const t of templates) {
+                              await createQuestPoolRow({
+                                title: t.title,
+                                action: t.action,
+                                target: t.target,
+                                reward: t.reward,
+                                active: true,
+                              });
+                            }
+                            const fresh = await fetchQuestPoolFromSupabase();
+                            setQuestPoolList(fresh);
+                            flashMarketFeedback('Đã nạp 15 nhiệm vụ mẫu cho 15 hành động!');
+                          }}
+                          className="px-3 py-1.5 rounded-xl bg-[var(--accent)] text-[#3a2b30] text-xs font-bold cursor-pointer hover:opacity-90 shadow-2xs"
+                        >
+                          ⚡ Nạp 15 nhiệm vụ mẫu chuẩn hành động
+                        </button>
+                      </div>
                     ) : (
                       questPoolList.map((quest) => (
                         <div
                           key={quest.id}
-                          className="p-2.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] flex flex-wrap items-center gap-2 justify-between"
+                          className="p-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] space-y-2.5"
                         >
-                          <div className="flex-1 min-w-[200px] flex items-center gap-2">
+                          <div className="flex flex-col sm:flex-row sm:items-center gap-2">
                             <input
                               type="text"
                               value={quest.title}
@@ -2126,32 +2177,11 @@ export const EditModeSystem: React.FC<EditModeSystemProps> = ({
                                   )
                                 );
                               }}
-                              className="flex-1 px-2.5 py-1 rounded-lg border border-[var(--border)] bg-[var(--bg)] text-xs text-[var(--text)]"
+                              className="flex-1 px-2.5 py-1.5 rounded-lg border border-[var(--border)] bg-[var(--bg)] text-xs text-[var(--text)] font-medium"
                               placeholder="Tiêu đề nhiệm vụ..."
                             />
-                          </div>
 
-                          <div className="flex items-center gap-2 shrink-0">
-                            <div className="flex items-center gap-1">
-                              <span className="text-[10px] text-[var(--muted)]">Thưởng:</span>
-                              <input
-                                type="number"
-                                min={1}
-                                value={quest.reward}
-                                onChange={(e) => {
-                                  const val = Math.max(1, parseInt(e.target.value) || 1);
-                                  setQuestPoolList((prev) =>
-                                    prev.map((q) =>
-                                      q.id === quest.id ? { ...q, reward: val } : q
-                                    )
-                                  );
-                                }}
-                                className="w-14 px-2 py-1 rounded-lg border border-[var(--border)] bg-[var(--bg)] text-xs text-[var(--text)] font-bold text-center"
-                              />
-                              <span className="text-[10px] text-[var(--muted)]">Xu</span>
-                            </div>
-
-                            <label className="flex items-center gap-1 cursor-pointer text-[10px] text-[var(--muted)]">
+                            <label className="flex items-center gap-1.5 cursor-pointer text-[11px] text-[var(--muted)] shrink-0 self-end sm:self-auto">
                               <input
                                 type="checkbox"
                                 checked={quest.active}
@@ -2160,31 +2190,101 @@ export const EditModeSystem: React.FC<EditModeSystemProps> = ({
                                 }}
                                 className="rounded text-[var(--accent)]"
                               />
-                              <span>{quest.active ? 'Bật' : 'Tắt'}</span>
+                              <span className={quest.active ? 'text-emerald-600 dark:text-emerald-400 font-bold' : ''}>
+                                {quest.active ? 'Bật' : 'Tắt'}
+                              </span>
                             </label>
+                          </div>
 
-                            <button
-                              type="button"
-                              onClick={() =>
-                                handleUpdateQuestField(quest.id, {
-                                  title: quest.title,
-                                  reward: quest.reward,
-                                })
-                              }
-                              className="px-2.5 py-1 rounded-lg bg-[var(--accent)] text-[#3a2b30] text-[10px] font-bold cursor-pointer hover:opacity-90"
-                              title="Lưu nhiệm vụ này"
-                            >
-                              Lưu
-                            </button>
+                          <div className="flex flex-wrap items-center gap-2 justify-between pt-1 border-t border-[var(--border)]/40">
+                            <div className="flex flex-wrap items-center gap-2 text-xs">
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-[10px] text-[var(--muted)] font-bold">Hành động:</span>
+                                <select
+                                  value={quest.action || 'water'}
+                                  onChange={(e) => {
+                                    const nextAction = e.target.value as QuestActionType;
+                                    setQuestPoolList((prev) =>
+                                      prev.map((q) =>
+                                        q.id === quest.id ? { ...q, action: nextAction } : q
+                                      )
+                                    );
+                                  }}
+                                  className="px-2 py-1 rounded-lg border border-[var(--border)] bg-[var(--bg)] text-[11px] text-[var(--text)] font-medium"
+                                >
+                                  {QUEST_ACTION_DEFINITIONS.map((def) => (
+                                    <option key={def.action} value={def.action}>
+                                      {def.label}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
 
-                            <button
-                              type="button"
-                              onClick={() => handleDeleteQuest(quest.id)}
-                              className="p-1 rounded-lg text-rose-500 hover:bg-rose-500/10 cursor-pointer"
-                              title="Xóa nhiệm vụ"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
+                              <div className="flex items-center gap-1">
+                                <span className="text-[10px] text-[var(--muted)] font-bold">Số lần:</span>
+                                <input
+                                  type="number"
+                                  min={1}
+                                  value={quest.target || 1}
+                                  onChange={(e) => {
+                                    const val = Math.max(1, parseInt(e.target.value) || 1);
+                                    setQuestPoolList((prev) =>
+                                      prev.map((q) =>
+                                        q.id === quest.id ? { ...q, target: val } : q
+                                      )
+                                    );
+                                  }}
+                                  className="w-12 px-1.5 py-1 rounded-lg border border-[var(--border)] bg-[var(--bg)] text-[11px] text-[var(--text)] font-bold text-center"
+                                />
+                              </div>
+
+                              <div className="flex items-center gap-1">
+                                <span className="text-[10px] text-[var(--muted)] font-bold">Thưởng:</span>
+                                <input
+                                  type="number"
+                                  min={1}
+                                  value={quest.reward}
+                                  onChange={(e) => {
+                                    const val = Math.max(1, parseInt(e.target.value) || 1);
+                                    setQuestPoolList((prev) =>
+                                      prev.map((q) =>
+                                        q.id === quest.id ? { ...q, reward: val } : q
+                                      )
+                                    );
+                                  }}
+                                  className="w-12 px-1.5 py-1 rounded-lg border border-[var(--border)] bg-[var(--bg)] text-[11px] text-[var(--text)] font-bold text-center"
+                                />
+                                <span className="text-[10px] text-[var(--muted)]">Xu</span>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleUpdateQuestField(quest.id, {
+                                    title: quest.title,
+                                    reward: quest.reward,
+                                    action: quest.action || 'water',
+                                    target: quest.target || 1,
+                                    active: quest.active,
+                                  })
+                                }
+                                className="px-3 py-1 rounded-lg bg-[var(--accent)] text-[#3a2b30] text-[11px] font-bold cursor-pointer hover:opacity-90"
+                                title="Lưu nhiệm vụ này"
+                              >
+                                Lưu
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteQuest(quest.id)}
+                                className="p-1 rounded-lg text-rose-500 hover:bg-rose-500/10 cursor-pointer"
+                                title="Xóa nhiệm vụ"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
                           </div>
                         </div>
                       ))
@@ -2194,36 +2294,75 @@ export const EditModeSystem: React.FC<EditModeSystemProps> = ({
                   {/* Form thêm nhiệm vụ mới */}
                   <form
                     onSubmit={handleCreateNewQuest}
-                    className="pt-2 border-t border-[var(--border)]/60 flex flex-wrap items-center gap-2"
+                    className="pt-3 border-t border-[var(--border)]/60 space-y-2.5"
                   >
-                    <input
-                      type="text"
-                      value={newQuestTitle}
-                      onChange={(e) => setNewQuestTitle(e.target.value)}
-                      placeholder="Thêm nhiệm vụ mới (VD: Tưới hoa ban mai, Thả thư yêu thương, Cho cá ăn...)"
-                      className="flex-1 min-w-[220px] px-2.5 py-1.5 rounded-xl border border-[var(--border)] bg-[var(--bg)] text-xs text-[var(--text)]"
-                    />
-                    <div className="flex items-center gap-1">
-                      <span className="text-[10px] text-[var(--muted)]">Thưởng:</span>
-                      <input
-                        type="number"
-                        min={1}
-                        value={newQuestReward}
-                        onChange={(e) =>
-                          setNewQuestReward(Math.max(1, parseInt(e.target.value) || 1))
-                        }
-                        className="w-16 px-2 py-1.5 rounded-xl border border-[var(--border)] bg-[var(--bg)] text-xs text-[var(--text)] font-bold text-center"
-                      />
-                      <span className="text-[10px] text-[var(--muted)]">Xu</span>
+                    <div className="text-[11px] font-bold text-[var(--text)]">
+                      ➕ Thêm nhiệm vụ mới vào kho:
                     </div>
-                    <button
-                      type="submit"
-                      disabled={!newQuestTitle.trim()}
-                      className="px-3.5 py-1.5 rounded-xl bg-[var(--accent)] text-[#3a2b30] font-bold text-xs cursor-pointer inline-flex items-center gap-1 disabled:opacity-50 shadow-2xs shrink-0"
-                    >
-                      <Plus className="w-3.5 h-3.5" />
-                      <span>Thêm nhiệm vụ</span>
-                    </button>
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <input
+                        type="text"
+                        value={newQuestTitle}
+                        onChange={(e) => setNewQuestTitle(e.target.value)}
+                        placeholder="Tiêu đề nhiệm vụ (VD: Tưới nước cho vườn hoa, Cho thú cưng ăn ngon...)"
+                        className="flex-1 px-2.5 py-1.5 rounded-xl border border-[var(--border)] bg-[var(--bg)] text-xs text-[var(--text)]"
+                      />
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2 justify-between">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="flex items-center gap-1">
+                          <span className="text-[10px] text-[var(--muted)] font-bold">Hành động:</span>
+                          <select
+                            value={newQuestAction}
+                            onChange={(e) => setNewQuestAction(e.target.value as QuestActionType)}
+                            className="px-2 py-1.5 rounded-xl border border-[var(--border)] bg-[var(--bg)] text-xs text-[var(--text)] font-medium"
+                          >
+                            {QUEST_ACTION_DEFINITIONS.map((def) => (
+                              <option key={def.action} value={def.action}>
+                                {def.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div className="flex items-center gap-1">
+                          <span className="text-[10px] text-[var(--muted)] font-bold">Số lần:</span>
+                          <input
+                            type="number"
+                            min={1}
+                            value={newQuestTarget}
+                            onChange={(e) =>
+                              setNewQuestTarget(Math.max(1, parseInt(e.target.value) || 1))
+                            }
+                            className="w-14 px-2 py-1.5 rounded-xl border border-[var(--border)] bg-[var(--bg)] text-xs text-[var(--text)] font-bold text-center"
+                          />
+                        </div>
+
+                        <div className="flex items-center gap-1">
+                          <span className="text-[10px] text-[var(--muted)] font-bold">Thưởng:</span>
+                          <input
+                            type="number"
+                            min={1}
+                            value={newQuestReward}
+                            onChange={(e) =>
+                              setNewQuestReward(Math.max(1, parseInt(e.target.value) || 1))
+                            }
+                            className="w-16 px-2 py-1.5 rounded-xl border border-[var(--border)] bg-[var(--bg)] text-xs text-[var(--text)] font-bold text-center"
+                          />
+                          <span className="text-[10px] text-[var(--muted)]">Xu</span>
+                        </div>
+                      </div>
+
+                      <button
+                        type="submit"
+                        disabled={!newQuestTitle.trim()}
+                        className="px-3.5 py-1.5 rounded-xl bg-[var(--accent)] text-[#3a2b30] font-bold text-xs cursor-pointer inline-flex items-center gap-1 disabled:opacity-50 shadow-2xs shrink-0"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>Thêm nhiệm vụ</span>
+                      </button>
+                    </div>
                   </form>
                 </div>
               </section>
