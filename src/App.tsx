@@ -47,7 +47,10 @@ import {
   deleteCharOnSupabase,
   fetchInventoryFromSupabase,
   fetchUnlockedCharIdsFromSupabase,
+  fetchGardenPlotsFromSupabase,
+  fetchMyProfileGameStatsFromSupabase,
   SupabaseInventoryItem,
+  SupabaseGardenPlotRow,
   logGameActionViaRpc,
   claimWelcomeGiftViaRpc,
   ownerRefillViaRpc,
@@ -178,25 +181,88 @@ export default function App() {
     dataStore.get<number>(PETALS_STORAGE_KEY, 45)
   );
   const [unlockedCharIds, setUnlockedCharIds] = useState<string[]>([]);
+  const [activeTabId, setActiveTabId] = useState<string>('char');
+  const [miniGameInitialZone, setMiniGameInitialZone] = useState<string | undefined>(undefined);
+  const [miniGameTargetKind, setMiniGameTargetKind] = useState<string | undefined>(undefined);
+
+  // 1. MỘT state inventory + gardenPlots + profilePlots dùng chung cho cả app và hàm refreshInventory() đặt ở phía trên
   const [supabaseInventory, setSupabaseInventory] = useState<
     SupabaseInventoryItem[]
   >([]);
-  const [activeTabId, setActiveTabId] = useState<string>('char');
+  const [gardenPlots, setGardenPlots] = useState<SupabaseGardenPlotRow[]>([]);
+  const [profilePlots, setProfilePlots] = useState<number>(10);
+  const [inventoryLoading, setInventoryLoading] = useState<boolean>(false);
+  const [inventoryError, setInventoryError] = useState<string | null>(null);
 
-  // Khi người dùng đăng nhập / đổi phiên, tải `inventory` và `unlocks` từ Supabase
-  const refreshUserInventoryAndUnlocks = useCallback(async () => {
-    if (!currentUser || currentUser.profileRole === 'guest') {
-      setUnlockedCharIds([]);
+  // Xóa bỏ dữ liệu vật phẩm cũ trong localStorage để tránh hai nguồn song song
+  useEffect(() => {
+    try {
+      localStorage.removeItem('item_sys_inventory_v1');
+      localStorage.removeItem('item_sys_garden_plots_v1');
+      localStorage.removeItem('item_sys_pond_fish_v1');
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const refreshInventory = useCallback(async () => {
+    if (!currentUser || currentUser.profileRole === 'guest' || !currentUser.id) {
       setSupabaseInventory([]);
+      setGardenPlots([]);
+      setProfilePlots(10);
+      setInventoryLoading(false);
+      setInventoryError(null);
       return;
     }
-    const [inv, unl] = await Promise.all([
-      fetchInventoryFromSupabase(),
-      fetchUnlockedCharIdsFromSupabase(),
-    ]);
-    setSupabaseInventory(inv);
+    setInventoryLoading(true);
+    setInventoryError(null);
+    try {
+      const [inv, plotsData, profileStats] = await Promise.all([
+        fetchInventoryFromSupabase(),
+        fetchGardenPlotsFromSupabase(),
+        fetchMyProfileGameStatsFromSupabase(),
+      ]);
+      setSupabaseInventory(inv);
+      setGardenPlots(plotsData);
+      setProfilePlots(profileStats.plots);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err || 'Không thể tải kho đồ từ Supabase');
+      setInventoryError(msg);
+      console.error('refreshInventory error:', err);
+    } finally {
+      setInventoryLoading(false);
+    }
+  }, [currentUser]);
+
+  const handleOptimisticAddInventoryItem = useCallback((newItem: SupabaseInventoryItem) => {
+    setSupabaseInventory((prev) => {
+      if (prev.some((it) => it.id === newItem.id)) return prev;
+      return [newItem, ...prev];
+    });
+  }, []);
+
+  const refreshUnlocks = useCallback(async () => {
+    if (!currentUser || currentUser.profileRole === 'guest') {
+      setUnlockedCharIds([]);
+      return;
+    }
+    const unl = await fetchUnlockedCharIdsFromSupabase();
     setUnlockedCharIds(unl);
   }, [currentUser]);
+
+  const refreshInventoryAndUnlocks = useCallback(async () => {
+    await Promise.all([refreshInventory(), refreshUnlocks()]);
+  }, [refreshInventory, refreshUnlocks]);
+
+  useEffect(() => {
+    refreshInventoryAndUnlocks();
+  }, [refreshInventoryAndUnlocks]);
+
+  useEffect(() => {
+    if (activeTabId === 'mini-game') {
+      refreshInventory();
+    }
+  }, [activeTabId, refreshInventory]);
 
   // Trạng thái CHẾ ĐỘ CHỈNH SỬA & Ngăn kéo Cài đặt trang (Chỉ dành cho vai `owner` qua can("edit", currentUser))
   const [editMode, setEditMode] = useState(false);
@@ -271,27 +337,35 @@ export default function App() {
               flowers: res.flowers ?? 15,
               coins: res.coins ?? 10,
             });
-            refreshUserInventoryAndUnlocks();
+            refreshInventoryAndUnlocks();
           }
         }).catch(() => {});
       }
     } else {
       welcomeCheckedRef.current = null;
     }
-  }, [currentUser, refreshUserInventoryAndUnlocks]);
+  }, [currentUser, refreshInventoryAndUnlocks]);
 
   // Chủ web luôn đầy
   useEffect(() => {
     if (isOwner) {
-      ownerRefillViaRpc().catch(() => {});
+      ownerRefillViaRpc()
+        .then(() => {
+          refreshInventory();
+        })
+        .catch(() => {});
     }
-  }, [isOwner]);
+  }, [isOwner, refreshInventory]);
 
   useEffect(() => {
     if (activeTabId === 'mini-game' && isOwner) {
-      ownerRefillViaRpc().catch(() => {});
+      ownerRefillViaRpc()
+        .then(() => {
+          refreshInventory();
+        })
+        .catch(() => {});
     }
-  }, [activeTabId, isOwner]);
+  }, [activeTabId, isOwner, refreshInventory]);
 
 
   const [isLoadingChars, setIsLoadingChars] = useState<boolean>(true);
@@ -389,8 +463,8 @@ export default function App() {
   }, [refreshLibraryData]);
 
   useEffect(() => {
-    refreshUserInventoryAndUnlocks();
-  }, [refreshUserInventoryAndUnlocks]);
+    refreshInventoryAndUnlocks();
+  }, [refreshInventoryAndUnlocks]);
 
   // Danh sách yêu thích & ghi chú cá nhân
   const [favoriteIds, setFavoriteIds] = useState<string[]>(() =>
@@ -636,14 +710,14 @@ export default function App() {
       setUnlockedCharIds((prev) =>
         prev.includes(charId) ? prev : [...prev, charId]
       );
-      await refreshUserInventoryAndUnlocks();
+      await refreshInventoryAndUnlocks();
       const target = libraryData.characters.find((c) => c.id === charId);
       notifyToast(
         `✨ Đã mở khóa vĩnh viễn nhân vật "${target?.name || 'Char'}"! Link chat và Open Scene đã sẵn sàng.`,
         5000
       );
     },
-    [libraryData.characters, notifyToast, refreshUserInventoryAndUnlocks]
+    [libraryData.characters, notifyToast, refreshInventoryAndUnlocks]
   );
 
   // Lưu âm lượng, bài đang chọn & chế độ phát vào localStorage (try/catch)
@@ -2035,7 +2109,11 @@ export default function App() {
             onUnlockWithPetals={handleUnlockCharWithPetals}
             onUnlockWithItems={handleUnlockCharWithItems}
             onRequireAuth={handleRequireAuth}
-            onGoToMiniGame={() => setActiveTabId('mini-game')}
+            onGoToMiniGame={(subZone?: string, targetKind?: string) => {
+              setMiniGameInitialZone(subZone);
+              setMiniGameTargetKind(targetKind);
+              setActiveTabId('mini-game');
+            }}
             searchInputRef={searchInputRef}
             currentUser={currentUser}
             editMode={isEditActive}
@@ -2180,9 +2258,16 @@ export default function App() {
               currencyEmoji={siteConfig.currencyEmoji}
               customTexts={siteConfig.customTexts}
               onUpdateCustomText={handleUpdateCustomText}
-              onInventoryChange={() => {
-                refreshUserInventoryAndUnlocks();
-              }}
+              supabaseInventory={supabaseInventory}
+              gardenPlots={gardenPlots}
+              profilePlots={profilePlots}
+              inventoryLoading={inventoryLoading}
+              inventoryError={inventoryError}
+              onRefreshInventory={refreshInventory}
+              onOptimisticAddInventoryItem={handleOptimisticAddInventoryItem}
+              onRequireAuth={handleRequireAuth}
+              initialSubZone={miniGameInitialZone}
+              initialTargetKind={miniGameTargetKind}
             />
           ) : (
             renderGuestGatePrompt(

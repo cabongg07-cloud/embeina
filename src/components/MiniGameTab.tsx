@@ -27,18 +27,24 @@ import { AuthUser, can } from '../services/authLayer';
 import { EditableText } from './EditableText';
 import {
   DbInventoryRow,
+  SupabaseInventoryItem,
+  SupabaseGardenPlotRow,
   fetchMyInventoryFromSupabase,
   fetchMyDailyRollToday,
   rollGachaOnSupabase,
   updateInventoryItemReadyAt,
   insertCraftedDrinkToInventory,
   fetchMyCoinsFromSupabase,
+  fetchMyProfileGameStatsFromSupabase,
   fetchMarketPricesFromSupabase,
   claimDailyCoinsViaRpc,
   getDailyQuestsViaRpc,
   completeQuestViaRpc,
   buyItemViaRpc,
   sellItemViaRpc,
+  plantSeedViaRpc,
+  harvestPlotViaRpc,
+  buyPlotViaRpc,
   MarketPriceRow,
   DailyQuestItem,
   DEFAULT_MARKET_PRICES,
@@ -60,6 +66,8 @@ import {
   CATEGORY_LABELS,
   STAGE_DURATIONS_MS,
   GARDEN_STAGE_NAMES,
+  formatSeedName,
+  formatFlowerNameFromSeed,
   generateUniqueGameItem,
   getInventoryItems,
   saveInventoryItems,
@@ -89,34 +97,71 @@ import {
   DEFAULT_GACHA_DAILY_DESC,
   getSiteConfig,
 } from '../services/siteSettings';
-import { ProceduralItemSvg } from './ProceduralItemSvg';
+import { ProceduralItemSvg, renderItem } from './ProceduralItemSvg';
+
+const PET_CARE_STORAGE_KEY = 'pet_care_stats_by_id_v1';
+
+interface PetCareStat {
+  fullness: number;
+  happiness: number;
+  updatedAt: number;
+}
+
+function loadPetCareStatsMap(): Record<string, PetCareStat> {
+  try {
+    const raw = localStorage.getItem(PET_CARE_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function savePetCareStatsMap(map: Record<string, PetCareStat>): void {
+  try {
+    localStorage.setItem(PET_CARE_STORAGE_KEY, JSON.stringify(map));
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export type ExtendedGameItem = GeneratedGameItem & {
+  seed: string;
+};
 
 function mapDbInvRowToGameItem(
   row: DbInventoryRow,
   companionCharTags: string[] = ['Dịu dàng'],
   customPets: TagPetProfile[] = DEFAULT_TAG_PETS
-): GeneratedGameItem {
-  const rawType = String(row.item_type || 'flower').toLowerCase();
+): ExtendedGameItem {
+  const rawType = String(row.kind || row.item_type || 'flower').toLowerCase();
   const category: ItemCategory =
-    rawType === 'fish' || rawType === 'ca' || rawType === 'cá'
+    rawType === 'seed' || rawType === 'hat_giong' || rawType === 'hạt giống'
+      ? 'seed'
+      : rawType === 'fish' || rawType === 'ca' || rawType === 'cá'
       ? 'fish'
-      : rawType === 'pet' || rawType === 'thu_cung' || rawType === 'thú cưng'
+      : rawType === 'pet' || rawType === 'thu_cung' || rawType === 'thú cưng' || rawType === 'thú'
       ? 'pet'
-      : rawType === 'drink' || rawType === 'thuc_uong' || rawType === 'thức uống'
+      : rawType === 'drink' || rawType === 'thuc_uong' || rawType === 'thức uống' || rawType === 'nước'
       ? 'drink'
       : 'flower';
   const rawRarity = String(row.rarity || 'common').toLowerCase();
   const rarity: ItemRarity =
-    rawRarity === 'legendary' || rawRarity === 'hiếm' || rawRarity === 'hiem'
+    rawRarity === 'legendary' || rawRarity === 'hiếm' || rawRarity === 'hiem' || rawRarity === 'epic' || rawRarity === 'ssr'
       ? 'legendary'
-      : rawRarity === 'rare' || rawRarity === 'quý' || rawRarity === 'quy'
+      : rawRarity === 'rare' || rawRarity === 'quý' || rawRarity === 'quy' || rawRarity === 'sr'
       ? 'rare'
       : 'common';
 
+  const rawName = String(row.name || row.item_name || 'Vật phẩm bí ẩn');
+  const displayName = category === 'seed' ? formatSeedName(rawName) : rawName;
+  const seedStr = String(row.seed || rawName || row.id);
+  const hashKey = `${category === 'seed' ? 'flower' : category}_${seedStr}`;
+
   let h = 2166136261;
-  const seedStr = row.item_name || row.id;
-  for (let i = 0; i < seedStr.length; i++) {
-    h ^= seedStr.charCodeAt(i);
+  for (let i = 0; i < hashKey.length; i++) {
+    h ^= hashKey.charCodeAt(i);
     h = Math.imul(h, 16777619);
   }
   const absH = Math.abs(h);
@@ -130,10 +175,10 @@ function mapDbInvRowToGameItem(
   const pal = palettes[absH % palettes.length];
 
   if (category === 'pet') {
-    let petTrait = getPersistedTraitForPet(row.id, row.item_name, customPets);
+    let petTrait = getPersistedTraitForPet(row.id, displayName, customPets);
     if (!petTrait) {
       petTrait = selectPetTraitForCompanionTags(companionCharTags, customPets);
-      persistTraitForPet(row.id, row.item_name, petTrait);
+      persistTraitForPet(row.id, displayName, petTrait);
     }
     const cleanVibe = sanitizePetVibeNote(
       petTrait.vibeReason,
@@ -142,7 +187,8 @@ function mapDbInvRowToGameItem(
     );
     return {
       id: row.id,
-      name: row.item_name,
+      name: displayName,
+      seed: seedStr,
       category,
       rarity,
       visual: {
@@ -168,7 +214,8 @@ function mapDbInvRowToGameItem(
 
   return {
     id: row.id,
-    name: row.item_name,
+    name: displayName,
+    seed: seedStr,
     category,
     rarity,
     visual: {
@@ -200,6 +247,13 @@ interface MiniGameTabProps {
   customTexts?: Record<string, string>;
   onUpdateCustomText?: (key: string, val: string) => void;
   onInventoryChange?: (rows: DbInventoryRow[]) => void;
+  supabaseInventory?: SupabaseInventoryItem[];
+  gardenPlots?: SupabaseGardenPlotRow[];
+  profilePlots?: number;
+  inventoryLoading?: boolean;
+  inventoryError?: string | null;
+  onRefreshInventory?: () => Promise<void>;
+  onOptimisticAddInventoryItem?: (item: SupabaseInventoryItem) => void;
   tagVoices?: TagVoiceProfile[];
   tagPets?: TagPetProfile[];
   initialSubZone?: string;
@@ -209,11 +263,48 @@ interface MiniGameTabProps {
 type MiniZone = 'market' | 'gacha_inv' | 'garden' | 'pond' | 'companion' | 'drinks';
 
 function formatCountdown(msRemaining: number): string {
-  if (msRemaining <= 0) return 'Sẵn sàng!';
+  if (msRemaining <= 0) return '00:00';
   const totalSec = Math.ceil(msRemaining / 1000);
   const mins = Math.floor(totalSec / 60);
   const secs = totalSec % 60;
   return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+}
+
+function computePlotGardenStage(
+  plantedAtIso: string | undefined,
+  nowMs: number
+): {
+  stage: GardenStage;
+  isBloomed: boolean;
+  remainingMs: number;
+  progressPercent: number;
+} {
+  const TOTAL_GROW_MS = 30 * 60 * 1000; // 30 phút
+  const STAGE_MS = 6 * 60 * 1000; // 6 phút mỗi giai đoạn
+  if (!plantedAtIso) {
+    return { stage: 0, isBloomed: false, remainingMs: TOTAL_GROW_MS, progressPercent: 0 };
+  }
+  const plantedMs = new Date(plantedAtIso).getTime();
+  if (Number.isNaN(plantedMs)) {
+    return { stage: 0, isBloomed: false, remainingMs: TOTAL_GROW_MS, progressPercent: 0 };
+  }
+  const bloomMs = plantedMs + TOTAL_GROW_MS;
+  if (nowMs >= bloomMs) {
+    return { stage: 4, isBloomed: true, remainingMs: 0, progressPercent: 100 };
+  }
+  const elapsedMs = Math.max(0, nowMs - plantedMs);
+  const remainingMs = Math.max(0, bloomMs - nowMs);
+  const progressPercent = Math.min(99, Math.round((elapsedMs / TOTAL_GROW_MS) * 100));
+  if (elapsedMs < STAGE_MS) {
+    return { stage: 0, isBloomed: false, remainingMs, progressPercent }; // Hạt giống (0-6p)
+  }
+  if (elapsedMs < STAGE_MS * 2) {
+    return { stage: 1, isBloomed: false, remainingMs, progressPercent }; // Nảy mầm (6-12p)
+  }
+  if (elapsedMs < STAGE_MS * 3) {
+    return { stage: 2, isBloomed: false, remainingMs, progressPercent }; // Cây con (12-18p)
+  }
+  return { stage: 3, isBloomed: false, remainingMs, progressPercent }; // Kết nụ (18-30p)
 }
 
 export const MiniGameTab: React.FC<MiniGameTabProps> = ({
@@ -229,7 +320,13 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
   coinCurrencyEmoji = '🪙',
   customTexts = {},
   onUpdateCustomText,
-  onInventoryChange,
+  supabaseInventory = [],
+  gardenPlots = [],
+  profilePlots = 10,
+  inventoryLoading = false,
+  inventoryError = null,
+  onRefreshInventory,
+  onOptimisticAddInventoryItem,
   tagVoices,
   tagPets,
   initialSubZone,
@@ -240,18 +337,30 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
 
   // Điều hướng 6 khu vực trong Mini Game (bao gồm Chợ Nhỏ)
   const [activeZone, setActiveZone] = useState<MiniZone>(() =>
-    initialSubZone === 'market' ? 'market' : 'gacha_inv'
+    initialSubZone === 'market'
+      ? 'market'
+      : initialSubZone === 'garden'
+      ? 'garden'
+      : 'gacha_inv'
   );
+
+  // Gọi refreshInventory() mỗi khi mở từng tab con (activeZone)
+  useEffect(() => {
+    onRefreshInventory?.();
+  }, [activeZone, onRefreshInventory]);
 
   useEffect(() => {
     if (isOwner) {
-      ownerRefillViaRpc().then((res) => {
-        if (res.ok && typeof res.coins === 'number') {
-          setCoins(res.coins);
-        }
-      }).catch(() => {});
+      ownerRefillViaRpc()
+        .then((res) => {
+          if (res.ok && typeof res.coins === 'number') {
+            setCoins(res.coins);
+          }
+          onRefreshInventory?.();
+        })
+        .catch(() => {});
     }
-  }, [isOwner, activeZone]);
+  }, [isOwner, activeZone, onRefreshInventory]);
 
   const effectiveTagVoices = useMemo(
     () =>
@@ -269,7 +378,6 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     [tagPets]
   );
 
-
   // ============================================================================
   // STATE CHỢ NHỎ: TIỀN XU (profiles.coins), BẢNG GIÁ & NHIỆM VỤ NGÀY
   // ============================================================================
@@ -282,11 +390,13 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
   const [isBuyingKind, setIsBuyingKind] = useState<string | null>(null);
   const [isSellingItemId, setIsSellingItemId] = useState<string | null>(null);
   const [boughtItemModal, setBoughtItemModal] = useState<{
-    item: DbInventoryRow;
+    item: ExtendedGameItem;
+    kind: ItemCategory;
+    buyPrice: number;
     message: string;
   } | null>(null);
   const [itemToSellConfirm, setItemToSellConfirm] = useState<{
-    item: GeneratedGameItem;
+    item: ExtendedGameItem;
     price: number;
   } | null>(null);
   const [questSparkleEffect, setQuestSparkleEffect] = useState<{
@@ -294,27 +404,156 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     reward: number;
   } | null>(null);
 
-  // Đồng hồ thời gian thực (cập nhật mỗi giây cho Vườn hoa & Hồ cá)
+  // Đánh dấu món vừa nhận ("Mới") trong phiên hiện tại
+  const [newlyReceivedIds, setNewlyReceivedIds] = useState<Set<string>>(() => new Set());
+  // Ghi nhận hiệu ứng tưới nước cho ô vườn trong phiên
+  const [wateredPlotSlots, setWateredPlotSlots] = useState<Set<number>>(() => new Set());
+  // Trạng thái Vườn hoa mới: Hộp chọn gieo hạt, Kết quả thu hoạch, Mua thêm ô vườn
+  const [localPlotsCount, setLocalPlotsCount] = useState<number>(profilePlots || 10);
+  useEffect(() => {
+    if (typeof profilePlots === 'number' && profilePlots >= 10) {
+      setLocalPlotsCount(profilePlots);
+    }
+  }, [profilePlots]);
+  const [plantingModal, setPlantingModal] = useState<{
+    slot: number;
+    preselectedSeedId?: string | null;
+    insufficientCoinsDiff?: number | null;
+    errorMsg?: string | null;
+  } | null>(null);
+  const [isPlantingSeed, setIsPlantingSeed] = useState<boolean>(false);
+  const [harvestingSlot, setHarvestingSlot] = useState<number | null>(null);
+  const [harvestResultModal, setHarvestResultModal] = useState<{
+    flowerItem: ExtendedGameItem;
+    slot: number;
+  } | null>(null);
+  const [isBuyingPlot, setIsBuyingPlot] = useState<boolean>(false);
+  const [newlyBoughtPlotSlot, setNewlyBoughtPlotSlot] = useState<number | null>(null);
+  const [plotBuyShortfallDiff, setPlotBuyShortfallDiff] = useState<number | null>(null);
+
+  // Ghi nhận các ly nước đã tặng trong phiên (ẩn khỏi quầy thức uống, không tự xóa khỏi kho server)
+  const [giftedDrinkIds, setGiftedDrinkIds] = useState<Set<string>>(() => new Set());
+  // Chỉ số độ no / niềm vui của thú cưng lưu phụ ở localStorage theo pet.id
+  const [petCareMap, setPetCareMap] = useState<Record<string, PetCareStat>>(() =>
+    loadPetCareStatsMap()
+  );
+  // Chỉ số chăm cá trong hồ theo fish.id
+  const [fishCareMap, setFishCareMap] = useState<
+    Record<string, { fullUntil: number; xp: number; pendingPetals: number }>
+  >({});
+
+  // Đồng hồ thời gian thực (cập nhật mỗi giây cho Kho đồ, Vườn hoa & Hồ cá)
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
 
-  // State chính: Kho đồ đọc từ bảng inventory trên Supabase
-  const [inventory, setInventory] = useState<GeneratedGameItem[]>(() =>
-    getInventoryItems()
-  );
-  const [gardenPlots, setGardenPlots] = useState<GardenPlotState[]>(() =>
-    getGardenPlots()
-  );
-  const [pondFish, setPondFish] = useState<PondFishState[]>(() =>
-    getPondFishList()
-  );
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setNowMs(Date.now());
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  // State chính: Phòng tri kỷ
   const [roomState, setRoomState] = useState<CompanionRoomState>(() =>
     getCompanionRoomState(characters[0]?.id || 'char-ta-khanh-inh')
   );
 
+  const companionChar = useMemo(
+    () =>
+      characters.find((c) => c.id === roomState?.companionCharId) ||
+      characters[0],
+    [characters, roomState?.companionCharId]
+  );
+
+  // NGUỒN DUY NHẤT: Tất cả vật phẩm đọc trực tiếp từ supabaseInventory
+  const inventory = useMemo<ExtendedGameItem[]>(() => {
+    const charTagsForPet = companionChar?.tags || ['Dịu dàng'];
+    return (supabaseInventory || []).map((item) => {
+      const dbRow: DbInventoryRow = {
+        id: item.id,
+        user_id: '',
+        kind: item.kind || item.category,
+        item_type: item.kind || item.category,
+        name: item.name,
+        item_name: item.name,
+        rarity: item.rarity,
+        seed: item.seed || `${item.name}_${item.id}`,
+        ready_at: item.readyAt,
+        created_at: item.createdAt,
+        count: item.count,
+      };
+      return mapDbInvRowToGameItem(dbRow, charTagsForPet, effectiveTagPets);
+    });
+  }, [supabaseInventory, companionChar?.tags, effectiveTagPets]);
+
+  // Phân loại từ nguồn duy nhất inventory (Hạt giống kind='seed' tách riêng với Hoa đã nở kind='flower')
+  const ownedSeeds = useMemo(
+    () => inventory.filter((i) => i.category === 'seed'),
+    [inventory]
+  );
+  const ownedFlowers = useMemo(
+    () => inventory.filter((i) => i.category === 'flower'),
+    [inventory]
+  );
+  const ownedFish = useMemo(
+    () => inventory.filter((i) => i.category === 'fish'),
+    [inventory]
+  );
+  const ownedPets = useMemo(
+    () => inventory.filter((i) => i.category === 'pet'),
+    [inventory]
+  );
+  const ownedDrinks = useMemo(
+    () => inventory.filter((i) => i.category === 'drink'),
+    [inventory]
+  );
+  const barDrinks = useMemo(
+    () => ownedDrinks.filter((d) => !giftedDrinkIds.has(d.id)),
+    [ownedDrinks, giftedDrinkIds]
+  );
+
+  // Ánh xạ các ô vườn đang trồng từ bảng garden_plots
+  const plantedBySlot = useMemo(() => {
+    const map = new Map<number, SupabaseGardenPlotRow>();
+    for (const row of gardenPlots || []) {
+      map.set(Number(row.slot), row);
+    }
+    return map;
+  }, [gardenPlots]);
+
+  const plantedSlotBySeedId = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const row of gardenPlots || []) {
+      if (row.seed_id) {
+        map.set(String(row.seed_id), Number(row.slot));
+      }
+    }
+    return map;
+  }, [gardenPlots]);
+
+  const unplantedSeeds = useMemo(
+    () => ownedSeeds.filter((s) => !plantedSlotBySeedId.has(s.id)),
+    [ownedSeeds, plantedSlotBySeedId]
+  );
+
+  const effectivePlotsCount = Math.max(
+    10,
+    Math.min(40, localPlotsCount || profilePlots || 10)
+  );
+
+  const emptySlots = useMemo(() => {
+    const list: number[] = [];
+    for (let s = 0; s < effectivePlotsCount; s++) {
+      if (!plantedBySlot.has(s)) {
+        list.push(s);
+      }
+    }
+    return list;
+  }, [effectivePlotsCount, plantedBySlot]);
+
   // Trạng thái Gacha & Kho đồ
   const [isRollingGacha, setIsRollingGacha] = useState(false);
   const [lastGachaResult, setLastGachaResult] = useState<{
-    item: GeneratedGameItem;
+    item: ExtendedGameItem;
     destinationNote: string;
   } | null>(null);
   const [invCategoryFilter, setInvCategoryFilter] = useState<
@@ -338,14 +577,6 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
       setGameToast((prev) => (prev === msg ? null : prev));
     }, 4200);
   };
-
-  // Nhân vật đồng hành hiện tại ở Phòng tri kỷ
-  const companionChar = useMemo(
-    () =>
-      characters.find((c) => c.id === roomState.companionCharId) ||
-      characters[0],
-    [characters, roomState.companionCharId]
-  );
 
   // Giọng văn kết hợp từ 2-3 tag đầu của nhân vật đang đồng hành
   const companionBlendedVoices = useMemo(
@@ -373,46 +604,30 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
   const hasFreeGachaToday = roomState.lastFreeGachaDate !== todayStr;
 
   const refreshSupabaseInventoryAndRoll = useCallback(async () => {
-    if (!currentUser || currentUser.role === 'guest' || !currentUser.id) return;
-    const [invRows, rolledToday] = await Promise.all([
-      fetchMyInventoryFromSupabase(),
-      fetchMyDailyRollToday(),
+    const [, profileStats] = await Promise.all([
+      onRefreshInventory ? onRefreshInventory() : Promise.resolve(),
+      fetchMyProfileGameStatsFromSupabase(),
     ]);
-    onInventoryChange?.(invRows);
-    const charTagsForPet = companionChar?.tags || ['Dịu dàng'];
-    const mapped = invRows.map((r) =>
-      mapDbInvRowToGameItem(r, charTagsForPet, effectiveTagPets)
-    );
-    setInventory(mapped);
-    saveInventoryItems(mapped);
-
-    if (rolledToday) {
-      setRoomState((prev) => {
-        if (prev.lastFreeGachaDate === todayStr) return prev;
-        const next = { ...prev, lastFreeGachaDate: todayStr };
-        saveCompanionRoomState(next);
-        return next;
-      });
+    setCoins(profileStats.coins);
+    if (profileStats.plots >= 10) {
+      setLocalPlotsCount(profileStats.plots);
     }
-  }, [
-    currentUser,
-    onInventoryChange,
-    todayStr,
-    companionChar?.tags,
-    effectiveTagPets,
-  ]);
+  }, [onRefreshInventory]);
 
   useEffect(() => {
     refreshSupabaseInventoryAndRoll();
   }, [refreshSupabaseInventoryAndRoll]);
 
   const loadMarketDataAndCoins = useCallback(async () => {
-    const [prices, currentCoins] = await Promise.all([
+    const [prices, profileStats] = await Promise.all([
       fetchMarketPricesFromSupabase(),
-      fetchMyCoinsFromSupabase(),
+      fetchMyProfileGameStatsFromSupabase(),
     ]);
     setMarketPrices(prices);
-    setCoins(currentCoins);
+    setCoins(profileStats.coins);
+    if (profileStats.plots >= 10) {
+      setLocalPlotsCount(profileStats.plots);
+    }
 
     if (currentUser && currentUser.role !== 'guest' && currentUser.id) {
       const qRes = await getDailyQuestsViaRpc();
@@ -424,7 +639,6 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
         }
       }
     } else {
-      // Khách: nhiệm vụ xem trước mẫu
       setDailyQuests([
         { index: 0, id: 1, title: 'Tưới nước cho Vườn hoa ban mai', reward: 6, completed: false, action: 'water', target: 2, progress: 0 },
         { index: 1, id: 2, title: 'Mở Phòng tri kỷ ghé thăm người thương', reward: 5, completed: false, action: 'visit_room', target: 1, progress: 0 },
@@ -456,14 +670,12 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     loadMarketDataAndCoins();
   }, [loadMarketDataAndCoins]);
 
-  // Làm mới tiến độ khi mở tab Chợ nhỏ
   useEffect(() => {
     if (activeZone === 'market') {
       loadMarketDataAndCoins();
     }
   }, [activeZone, loadMarketDataAndCoins]);
 
-  // Làm mới tiến độ sau mỗi hành động trong game (qua log_action)
   useEffect(() => {
     const unsub = onQuestActionLogged(() => {
       loadDailyQuests();
@@ -471,7 +683,6 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     return unsub;
   }, [loadDailyQuests]);
 
-  // Làm mới tiến độ mỗi 30 giây khi tab Chợ nhỏ đang mở
   useEffect(() => {
     if (activeZone !== 'market') return;
     if (!currentUser || currentUser.role === 'guest' || !currentUser.id) return;
@@ -481,7 +692,6 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     return () => clearInterval(interval);
   }, [activeZone, currentUser, loadDailyQuests]);
 
-  // Đồng hồ đếm ngược đến resets_at (khi về 0 tự động đổi bộ mới qua loadMarketDataAndCoins)
   useEffect(() => {
     if (!resetsAtIso) return;
 
@@ -506,9 +716,10 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     return () => clearInterval(timer);
   }, [resetsAtIso, loadMarketDataAndCoins]);
 
-  // Xử lý chuyển zone và cuộn nhanh từ CharTab
   useEffect(() => {
-    if (initialSubZone === 'market') {
+    if (initialSubZone === 'garden') {
+      setActiveZone('garden');
+    } else if (initialSubZone === 'market') {
       setActiveZone('market');
       if (initialTargetKind) {
         setTimeout(() => {
@@ -525,7 +736,6 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     }
   }, [initialSubZone, initialTargetKind]);
 
-  // Handlers cho Chợ nhỏ
   const handleClaimDailyCoins = async () => {
     if (!currentUser || currentUser.role === 'guest') {
       onRequireAuth?.(`Mời bạn đăng nhập để nhận quà 10 ${coinCurrencyName} mỗi ngày nhé 🌸`);
@@ -612,6 +822,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     }
   };
 
+  // Mua vật phẩm ở Chợ: cập nhật lạc quan ngay + gọi refreshInventory()
   const handleBuyMarketItem = async (kind: ItemCategory) => {
     if (!currentUser || currentUser.role === 'guest') {
       onRequireAuth?.(`Mời bạn đăng nhập để mua vật phẩm tại Chợ nhỏ nhé 🌸`);
@@ -621,19 +832,40 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     setIsBuyingKind(kind);
     try {
       const res = await buyItemViaRpc(kind);
-      if (res.ok && res.item) {
+      if (res.ok) {
         if (typeof res.coins === 'number') {
           setCoins(res.coins);
         } else {
           const c = await fetchMyCoinsFromSupabase();
           setCoins(c);
         }
-        setBoughtItemModal({
-          item: res.item,
-          message: res.message,
-        });
-        emitGameQuestAction('buy_market');
+        if (res.normalizedItem) {
+          onOptimisticAddInventoryItem?.(res.normalizedItem);
+          setNewlyReceivedIds((prev) => {
+            const next = new Set(prev);
+            next.add(res.normalizedItem!.id);
+            return next;
+          });
+        }
         await refreshSupabaseInventoryAndRoll();
+
+        if (res.item) {
+          const mapped = mapDbInvRowToGameItem(
+            res.item,
+            companionChar?.tags || ['Dịu dàng'],
+            effectiveTagPets
+          );
+          const priceRow = marketPrices.find((p) => p.kind === kind);
+          setBoughtItemModal({
+            item: mapped,
+            kind,
+            buyPrice: priceRow?.buy_price || 5,
+            message: res.message,
+          });
+        } else {
+          showToast(res.message);
+        }
+        emitGameQuestAction('buy_market');
       } else {
         showToast(res.message);
       }
@@ -642,7 +874,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     }
   };
 
-  const handleSellItem = async (item: GeneratedGameItem) => {
+  const handleSellItem = async (item: ExtendedGameItem) => {
     if (!currentUser || currentUser.role === 'guest') {
       onRequireAuth?.(`Mời bạn đăng nhập để bán vật phẩm nhé 🌸`);
       return;
@@ -668,64 +900,6 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
       setIsSellingItemId(null);
     }
   };
-
-  // Cập nhật đồng hồ thời gian thực & sự phát triển tự nhiên của Cá trong hồ
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      const currentNow = Date.now();
-      setNowMs(currentNow);
-
-      // Cá đang no sẽ lớn dần và tiết ra thêm Cánh hoa theo thời gian (mỗi 45 giây tiết 2 Cánh hoa)
-      setPondFish((prevFish) => {
-        let changed = false;
-        const nextFish = prevFish.map((f) => {
-          let nextStage = f.stage;
-          let nextXp = f.xp;
-          let nextPending = f.pendingPetals;
-          let nextLastPetal = f.lastPetalGeneratedAt;
-
-          // Tự nở từ trứng sau 60 giây hoặc khi được chăm
-          if (f.stage === 'egg' && currentNow - f.hatchedAt >= 60 * 1000) {
-            nextStage = 'baby';
-            nextXp = Math.max(nextXp, 20);
-            changed = true;
-          }
-
-          // Nếu cá đang no, tiết ra Cánh hoa mỗi 45 giây
-          if (
-            f.fullUntil > currentNow &&
-            currentNow - f.lastPetalGeneratedAt >= 45 * 1000
-          ) {
-            nextPending = Math.min(25, f.pendingPetals + 2);
-            nextLastPetal = currentNow;
-            nextXp = f.xp + 5;
-            if (nextXp >= 80 && nextStage !== 'adult') {
-              nextStage = 'adult';
-            } else if (nextXp >= 40 && nextStage === 'baby') {
-              nextStage = 'juvenile';
-            }
-            changed = true;
-          }
-
-          if (!changed) return f;
-          return {
-            ...f,
-            stage: nextStage,
-            xp: nextXp,
-            pendingPetals: nextPending,
-            lastPetalGeneratedAt: nextLastPetal,
-          };
-        });
-
-        if (changed) {
-          savePondFishList(nextFish);
-        }
-        return changed ? nextFish : prevFish;
-      });
-    }, 1000);
-
-    return () => window.clearInterval(timer);
-  }, []);
 
   // Helper đánh dấu hoàn thành nhiệm vụ nhỏ mỗi ngày để nhận Cánh hoa
   const markDailyTaskReady = (taskKey: string) => {
@@ -762,8 +936,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
   };
 
   // ============================================================================
-  // 1. XỬ LÝ GACHA MỖI NGÀY: Gọi rpc roll_gacha trên Supabase
-  //    Lỗi already_rolled -> báo "Hôm nay bạn đã nhận rồi, mai quay lại nhé"
+  // 1. XỬ LÝ GACHA MỖI NGÀY: Gọi rpc roll_gacha trên Supabase + cập nhật lạc quan + refreshInventory()
   // ============================================================================
   const handleRollGacha = async (useFreeRoll: boolean) => {
     if (!currentUser || currentUser.role === 'guest') {
@@ -806,6 +979,15 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
         saveCompanionRoomState(nextRoom);
         markDailyTaskReady('gacha');
 
+        if (res.normalizedItem) {
+          onOptimisticAddInventoryItem?.(res.normalizedItem);
+          setNewlyReceivedIds((prev) => {
+            const next = new Set(prev);
+            next.add(res.normalizedItem!.id);
+            return next;
+          });
+        }
+
         await refreshSupabaseInventoryAndRoll();
 
         if (res.item) {
@@ -814,61 +996,24 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
             companionChar?.tags || ['Dịu dàng'],
             effectiveTagPets
           );
-          let destinationNote =
-            '✨ Đã cất vật phẩm vào Kho đồ!';
-          if (newItem.category === 'flower') {
-            // Đưa hạt giống vào Vườn hoa
-            const currentPlots = [...gardenPlots];
-            const emptyIdx = currentPlots.findIndex((p) => p.seedItem === null);
-            const now = Date.now();
-            const newPlotData: GardenPlotState = {
-              id:
-                emptyIdx !== -1
-                  ? currentPlots[emptyIdx].id
-                  : `plot_${now}_${Math.random().toString(36).slice(2, 5)}`,
-              seedItem: newItem,
-              stage: 0,
-              stageStartedAt: now,
-              stageDurationMs: STAGE_DURATIONS_MS[0],
-              wateredInCurrentStage: false,
-            };
-            if (emptyIdx !== -1) {
-              currentPlots[emptyIdx] = newPlotData;
-            } else {
-              currentPlots.push(newPlotData);
-            }
-            setGardenPlots(currentPlots);
-            saveGardenPlots(currentPlots);
-            destinationNote =
-              '🌱 Đã nhận vào Kho đồ & gieo hạt giống vào Vườn hoa!';
+          let destinationNote = 'Đã cất vào Kho đồ ✨';
+          if (newItem.category === 'seed' || newItem.category === 'flower') {
+            destinationNote = 'Đã cất vào Kho đồ ✨ Hãy đem gieo vào ô Vườn hoa để nở thành Hoa nhé!';
           } else if (newItem.category === 'fish') {
-            const now = Date.now();
-            const newFishState: PondFishState = {
-              id: newItem.id,
-              item: newItem,
-              stage: 'egg',
-              xp: 0,
-              hatchedAt: now,
-              fullUntil: now + 90 * 1000,
-              lastPetalGeneratedAt: now,
-              pendingPetals: 0,
-              swimSpeed: 16 + Math.floor(Math.random() * 10),
-              swimOffset: Math.floor(Math.random() * 85),
-            };
-            const nextFish = [newFishState, ...pondFish];
-            setPondFish(nextFish);
-            savePondFishList(nextFish);
-            destinationNote =
-              '🥚 Đã nhận vào Kho đồ & thả trứng cá vào Hồ cá!';
+            destinationNote = 'Đã cất vào Kho đồ ✨ & thả vào Hồ cá!';
           } else if (newItem.category === 'pet') {
-            destinationNote = `🐾 Đã đón thú cưng (${newItem.petSpecies || 'Thú nhỏ'}) về chăm bẵm cùng người thương!`;
+            destinationNote = 'Đã cất vào Kho đồ ✨ & đón thú cưng về Khu thú cưng!';
           } else if (newItem.category === 'drink') {
-            destinationNote = '☕ Đã cất thức uống thơm lành vào Quầy thức uống!';
+            destinationNote = 'Đã cất vào Kho đồ ✨ & bày sẵn ở Quầy thức uống!';
           }
           setLastGachaResult({ item: newItem, destinationNote });
           emitGameQuestAction('gacha');
           showToast(
-            `🎉 Chúc mừng! Bạn đã nhận được [${RARITY_LABELS[newItem.rarity]}] "${newItem.name}"!`
+            `🎉 Bạn nhận được ${
+              newItem.category === 'seed' || newItem.category === 'flower'
+                ? formatSeedName(newItem.name)
+                : newItem.name
+            } (${RARITY_LABELS[newItem.rarity]})!`
           );
         } else {
           showToast(`🎉 ${res.message}`);
@@ -879,7 +1024,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
       return;
     }
 
-    // Mở thêm bằng Cánh hoa
+    // Mở thêm bằng Cánh hoa -> lưu trực tiếp vào bảng inventory trên Supabase
     if (!isOwner && petalsBalance < rollCost) {
       showToast(
         `Bạn cần ${rollCost} ${currencyName} để mở thêm hộp quà Gacha nhé 🌸`
@@ -892,219 +1037,318 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     markDailyTaskReady('gacha');
 
     setTimeout(async () => {
-      const categories: ItemCategory[] = ['flower', 'fish', 'pet', 'drink'];
-      const chosenCategory =
-        categories[Math.floor(Math.random() * categories.length)];
+      try {
+        const categories: ItemCategory[] = ['seed', 'fish', 'pet', 'drink'];
+        const chosenCategory =
+          categories[Math.floor(Math.random() * categories.length)];
 
-      const newItem = generateUniqueGameItem(chosenCategory, {
-        companionCharTags: companionChar?.tags || ['Dịu dàng'],
-      });
-
-      const inserted = await insertCraftedDrinkToInventory({
-        item_type: newItem.category,
-        item_name: newItem.name,
-        rarity: newItem.rarity,
-        color: newItem.visual.primaryColor,
-      });
-      if (inserted && newItem.category === 'pet') {
-        persistTraitForPet(newItem.id, newItem.name, {
-          petSpecies: newItem.petSpecies || 'Mèo Bông',
-          matchedTag: newItem.matchedTag || 'Dịu dàng',
-          personality: newItem.petPersonality || 'hiền lành, điềm đạm',
-          behaviorStyle: newItem.petBehaviorStyle || 'gentle_sway',
-          sound: newItem.petSound || 'Meo~ 🌸',
-          vibeReason: sanitizePetVibeNote(
-            newItem.vibeReason,
-            newItem.matchedTag,
-            newItem.petSpecies
-          ),
+        const generated = generateUniqueGameItem(chosenCategory, {
+          companionCharTags: companionChar?.tags || ['Dịu dàng'],
         });
-      }
-      await refreshSupabaseInventoryAndRoll();
-      emitGameQuestAction('gacha');
 
-      const destinationNote =
-        newItem.category === 'pet'
-          ? `🐾 Đã đón "${newItem.name}" về chăm bẵm cùng người thương!`
-          : `✨ Đã thêm "${newItem.name}" vào Kho đồ!`;
-      setIsRollingGacha(false);
-      setLastGachaResult({ item: newItem, destinationNote });
-    }, 850);
+        const inserted = await insertCraftedDrinkToInventory({
+          item_type: generated.category,
+          item_name: generated.name,
+          rarity: generated.rarity,
+          color: generated.visual.primaryColor,
+        });
+
+        const realId = inserted?.id || generated.id;
+        if (generated.category === 'pet') {
+          persistTraitForPet(realId, generated.name, {
+            petSpecies: generated.petSpecies || 'Mèo Bông',
+            matchedTag: generated.matchedTag || 'Dịu dàng',
+            personality: generated.petPersonality || 'hiền lành, điềm đạm',
+            behaviorStyle: generated.petBehaviorStyle || 'gentle_sway',
+            sound: generated.petSound || 'Meo~ 🌸',
+            vibeReason: sanitizePetVibeNote(
+              generated.vibeReason,
+              generated.matchedTag,
+              generated.petSpecies
+            ),
+          });
+        }
+
+        if (inserted) {
+          setNewlyReceivedIds((prev) => {
+            const next = new Set(prev);
+            next.add(inserted.id);
+            return next;
+          });
+        }
+
+        await refreshSupabaseInventoryAndRoll();
+        emitGameQuestAction('gacha');
+
+        const displayItem: ExtendedGameItem = inserted
+          ? mapDbInvRowToGameItem(
+              inserted,
+              companionChar?.tags || ['Dịu dàng'],
+              effectiveTagPets
+            )
+          : { ...generated, seed: `${generated.name}_${generated.id}` };
+
+        const destinationNote =
+          displayItem.category === 'seed' || displayItem.category === 'flower'
+            ? 'Đã cất vào Kho đồ ✨ Hãy đem gieo vào ô Vườn hoa để nở thành Hoa nhé!'
+            : displayItem.category === 'fish'
+            ? 'Đã cất vào Kho đồ ✨ & xuất hiện tại Hồ cá!'
+            : displayItem.category === 'pet'
+            ? `Đã cất vào Kho đồ ✨ & đón "${displayItem.name}" về Khu thú cưng!`
+            : `Đã cất vào Kho đồ ✨ & thêm "${displayItem.name}" vào Quầy thức uống!`;
+
+        setLastGachaResult({ item: displayItem, destinationNote });
+      } finally {
+        setIsRollingGacha(false);
+      }
+    }, 650);
   };
 
   // ============================================================================
-  // 2. XỬ LÝ VƯỜN HOA (5 GIAI ĐOẠN, ĐẾM NGƯỢC THẬT, KHÔNG GIỚI HẠN Ô VƯỜN)
+  // 2. XỬ LÝ VƯỜN HOA THEO Ô (HẠT GIỐNG → GIEO VÀO Ô → CHỜ NỞ 30 PHÚT → THU HOẠCH)
   // ============================================================================
-  const handleSowNewSeedInPlot = (plotId: string) => {
-    const newSeed = generateUniqueGameItem('flower');
-    const now = Date.now();
-    const nextPlots = gardenPlots.map((p) =>
-      p.id === plotId
-        ? {
-            ...p,
-            seedItem: newSeed,
-            stage: 0 as GardenStage,
-            stageStartedAt: now,
-            stageDurationMs: STAGE_DURATIONS_MS[0],
-            wateredInCurrentStage: false,
-          }
-        : p
-    );
-    setGardenPlots(nextPlots);
-    saveGardenPlots(nextPlots);
-    emitGameQuestAction('water');
-    showToast(`🌱 Đã gieo hạt giống "${newSeed.name}" vào ô vườn!`);
+  const handleGoToDailyQuests = () => {
+    setPlantingModal(null);
+    setPlotBuyShortfallDiff(null);
+    setActiveZone('market');
+    setTimeout(() => {
+      const questSection = document.getElementById('daily-quests-section');
+      if (questSection) {
+        questSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }, 150);
   };
 
-  const handleWaterPlot = (plotId: string) => {
-    const now = Date.now();
-    let stageAdvancedName: string | null = null;
-
-    const nextPlots = gardenPlots.map((plot) => {
-      if (plot.id !== plotId || !plot.seedItem || plot.stage === 4) {
-        return plot;
-      }
-
-      const elapsed = now - plot.stageStartedAt;
-      const timerDone = elapsed >= plot.stageDurationMs;
-
-      // Nếu đã hết thời gian chờ của giai đoạn hiện tại -> tưới nước chuyển ngay sang giai đoạn tiếp theo!
-      if (timerDone) {
-        const nextStage = Math.min(4, plot.stage + 1) as GardenStage;
-        stageAdvancedName = `${plot.seedItem.name} đã lớn lên giai đoạn: ${GARDEN_STAGE_NAMES[nextStage]}!`;
-        return {
-          ...plot,
-          stage: nextStage,
-          stageStartedAt: now,
-          stageDurationMs: STAGE_DURATIONS_MS[nextStage],
-          wateredInCurrentStage: false,
-        };
-      }
-
-      // Nếu đang trong thời gian chờ mà chưa tưới -> tưới nước giúp rút ngắn 50% thời gian chờ còn lại!
-      if (!plot.wateredInCurrentStage) {
-        const remaining = Math.max(0, plot.stageDurationMs - elapsed);
-        const reducedDuration = elapsed + Math.floor(remaining * 0.45);
-        stageAdvancedName = `💧 Đã tưới nước mát lành cho "${plot.seedItem.name}" (tăng tốc phát triển)!`;
-        return {
-          ...plot,
-          stageDurationMs: reducedDuration,
-          wateredInCurrentStage: true,
-        };
-      }
-
-      return plot;
+  const handleOpenPlantModalForSeed = (seedId?: string | null, preferredSlot?: number) => {
+    if (!currentUser || currentUser.role === 'guest') {
+      onRequireAuth?.('Mời bạn đăng nhập để gieo hạt trong Vườn hoa nhé 🌱');
+      return;
+    }
+    setActiveZone('garden');
+    const chosenSlot =
+      typeof preferredSlot === 'number'
+        ? preferredSlot
+        : emptySlots.length > 0
+        ? emptySlots[0]
+        : 0;
+    setPlantingModal({
+      slot: chosenSlot,
+      preselectedSeedId: seedId || null,
+      insufficientCoinsDiff: null,
+      errorMsg: null,
     });
+  };
 
-    setGardenPlots(nextPlots);
-    saveGardenPlots(nextPlots);
+  const handlePlantSeedInSlot = async (slot: number, itemId: string | null) => {
+    if (!currentUser || currentUser.role === 'guest') {
+      onRequireAuth?.('Mời bạn đăng nhập để gieo hạt trong Vườn hoa nhé 🌱');
+      return;
+    }
+    if (isPlantingSeed) return;
+
+    // Kiểm tra Xu nếu gieo hạt ngẫu nhiên (3 Xu, Chủ web miễn phí)
+    if (itemId === null && !isOwner && coins < 3) {
+      const diff = Math.max(1, 3 - coins);
+      setPlantingModal((prev) =>
+        prev
+          ? {
+              ...prev,
+              slot,
+              insufficientCoinsDiff: diff,
+              errorMsg: `Chưa đủ ${coinCurrencyName}, còn thiếu ${diff} ${coinCurrencyName}`,
+            }
+          : null
+      );
+      return;
+    }
+
+    setIsPlantingSeed(true);
+    setPlantingModal((prev) =>
+      prev ? { ...prev, insufficientCoinsDiff: null, errorMsg: null } : null
+    );
+    try {
+      const res = await plantSeedViaRpc(slot, itemId);
+      if (!res.ok) {
+        if (res.errorCode === 'not_enough_coins') {
+          const diff = Math.max(1, 3 - coins);
+          setPlantingModal((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  insufficientCoinsDiff: diff,
+                  errorMsg: `Chưa đủ ${coinCurrencyName}, còn thiếu ${diff} ${coinCurrencyName}`,
+                }
+              : null
+          );
+        } else {
+          setPlantingModal((prev) =>
+            prev ? { ...prev, errorMsg: res.message } : null
+          );
+          showToast(res.message);
+        }
+        return;
+      }
+
+      await refreshSupabaseInventoryAndRoll();
+      setPlantingModal(null);
+      showToast(res.message);
+    } finally {
+      setIsPlantingSeed(false);
+    }
+  };
+
+  const handleWaterGardenPlot = (slot: number, flowerName: string) => {
+    setWateredPlotSlots((prev) => {
+      const next = new Set(prev);
+      next.add(slot);
+      return next;
+    });
     markDailyTaskReady('water');
     emitGameQuestAction('water');
     if (currentUser && currentUser.role !== 'guest') {
       logGameActionViaRpc('water');
     }
-    if (stageAdvancedName) {
-      showToast(stageAdvancedName);
-    }
+    showToast(`💧 Đã tưới làn nước mát lành cho ô #${slot + 1} (${flowerName})!`);
   };
 
-  // Tự động kiểm tra nếu cây đã được tưới ở giai đoạn hiện tại VÀ hết giờ chờ thì lên giai đoạn mới
-  useEffect(() => {
-    let updated = false;
-    const nextPlots = gardenPlots.map((plot) => {
-      if (
-        plot.seedItem &&
-        plot.stage < 4 &&
-        plot.wateredInCurrentStage &&
-        nowMs - plot.stageStartedAt >= plot.stageDurationMs
-      ) {
-        updated = true;
-        const nextStage = (plot.stage + 1) as GardenStage;
-        return {
-          ...plot,
-          stage: nextStage,
-          stageStartedAt: nowMs,
-          stageDurationMs: STAGE_DURATIONS_MS[nextStage],
-          wateredInCurrentStage: false,
-        };
+  const handleHarvestGardenPlot = async (
+    slot: number,
+    seedItem?: ExtendedGameItem
+  ) => {
+    if (!currentUser || currentUser.role === 'guest') {
+      onRequireAuth?.('Mời bạn đăng nhập để thu hoạch hoa nhé 🌸');
+      return;
+    }
+    if (harvestingSlot !== null) return;
+    setHarvestingSlot(slot);
+    try {
+      const res = await harvestPlotViaRpc(slot);
+      if (!res.ok) {
+        showToast(res.message);
+        return;
       }
-      return plot;
-    });
 
-    if (updated) {
-      setGardenPlots(nextPlots);
-      saveGardenPlots(nextPlots);
-    }
-  }, [nowMs, gardenPlots]);
-
-  const handleHarvestFlower = async (plotId: string, sellForPetals: boolean) => {
-    const target = gardenPlots.find((p) => p.id === plotId);
-    if (!target || !target.seedItem || target.stage < 4) return;
-
-    const harvestedFlower = target.seedItem;
-    const nextPlots = gardenPlots.map((p) =>
-      p.id === plotId
-        ? {
-            ...p,
-            seedItem: null,
-            stage: 0 as GardenStage,
-            stageStartedAt: Date.now(),
-            stageDurationMs: STAGE_DURATIONS_MS[0],
-            wateredInCurrentStage: false,
-          }
-        : p
-    );
-    setGardenPlots(nextPlots);
-    saveGardenPlots(nextPlots);
-
-    // Đánh dấu ready_at = null (đã thu hoạch xong, sẵn sàng dùng để mở khóa Char)
-    await updateInventoryItemReadyAt(harvestedFlower.id, null);
-
-    if (currentUser && currentUser.role !== 'guest') {
-      logGameActionViaRpc('harvest');
-    }
-
-    if (sellForPetals) {
-      const price =
-        harvestedFlower.rarity === 'legendary'
-          ? 25
-          : harvestedFlower.rarity === 'rare'
-          ? 16
-          : 10;
-      onAddPetals(price);
+      // Gọi log_action('harvest') sau mỗi lần thu hoạch
+      await logGameActionViaRpc('harvest');
       emitGameQuestAction('water');
-      showToast(
-        `🌸 Đã bán đóa "${harvestedFlower.name}" và nhận +${price} ${currencyName}!`
-      );
-    } else {
-      const readyFlower = { ...harvestedFlower, readyAt: null };
-      const nextInv = addItemToInventory(readyFlower);
-      setInventory(nextInv);
+
+      if (res.harvestedItem) {
+        onOptimisticAddInventoryItem?.(res.harvestedItem);
+        setNewlyReceivedIds((prev) => {
+          const next = new Set(prev);
+          next.add(res.harvestedItem!.id);
+          return next;
+        });
+      }
+
       await refreshSupabaseInventoryAndRoll();
-      emitGameQuestAction('water');
-      showToast(
-        `✨ Đã thu hoạch "${harvestedFlower.name}" vào Kho đồ (có thể tặng Char hoặc dùng mở khóa Char)!`
-      );
+
+      const harvestedFlower: ExtendedGameItem = res.harvestedItem
+        ? mapDbInvRowToGameItem(
+            {
+              id: res.harvestedItem.id,
+              user_id: '',
+              kind: 'flower',
+              item_type: 'flower',
+              name: res.harvestedItem.name,
+              item_name: res.harvestedItem.name,
+              rarity: res.harvestedItem.rarity,
+              seed: res.harvestedItem.seed,
+              ready_at: null,
+              created_at: res.harvestedItem.createdAt,
+            },
+            companionChar?.tags || ['Dịu dàng'],
+            effectiveTagPets
+          )
+        : {
+            id: seedItem?.id || `harvested-${slot}-${Date.now()}`,
+            name: formatFlowerNameFromSeed(seedItem?.name || 'Hoa Ban Mai'),
+            seed: seedItem?.seed || `plot_${slot}`,
+            category: 'flower',
+            rarity: seedItem?.rarity || 'common',
+            visual: seedItem?.visual || {
+              primaryColor: '#F4A9B8',
+              secondaryColor: '#FDE2E8',
+              accentColor: '#FFE599',
+              shapeVariant: 0,
+              patternVariant: 0,
+              petalOrFinCount: 6,
+              hasSparkle: false,
+            },
+            createdAt: new Date().toISOString(),
+            description: 'Hoa vừa thu hoạch từ Vườn hoa.',
+            readyAt: null,
+          };
+
+      setHarvestResultModal({
+        flowerItem: {
+          ...harvestedFlower,
+          category: 'flower',
+          name: formatFlowerNameFromSeed(harvestedFlower.name),
+        },
+        slot,
+      });
+    } finally {
+      setHarvestingSlot(null);
     }
   };
 
-  const handleAddGardenPlot = () => {
-    const newPlot: GardenPlotState = {
-      id: `plot_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
-      seedItem: null,
-      stage: 0,
-      stageStartedAt: Date.now(),
-      stageDurationMs: STAGE_DURATIONS_MS[0],
-      wateredInCurrentStage: false,
-    };
-    const next = [...gardenPlots, newPlot];
-    setGardenPlots(next);
-    saveGardenPlots(next);
-    showToast('🌱 Đã mở thêm một ô đất mới trong Vườn hoa!');
+  const handleBuyExtraPlot = async () => {
+    if (!currentUser || currentUser.role === 'guest') {
+      onRequireAuth?.('Mời bạn đăng nhập để mở rộng Vườn hoa nhé 🌱');
+      return;
+    }
+    if (isBuyingPlot) return;
+    if (effectivePlotsCount >= 40) {
+      showToast('🌸 Vườn hoa đã đạt tối đa 40 ô rồi nhé!');
+      return;
+    }
+
+    const cost = 20 + (effectivePlotsCount - 10) * 10;
+    if (!isOwner && coins < cost) {
+      const diff = Math.max(1, cost - coins);
+      setPlotBuyShortfallDiff(diff);
+      showToast(`Chưa đủ ${coinCurrencyName}, còn thiếu ${diff} ${coinCurrencyName}`);
+      return;
+    }
+
+    setPlotBuyShortfallDiff(null);
+    setIsBuyingPlot(true);
+    try {
+      const res = await buyPlotViaRpc();
+      if (!res.ok) {
+        if (res.errorCode === 'not_enough_coins') {
+          const diff = Math.max(1, cost - coins);
+          setPlotBuyShortfallDiff(diff);
+          showToast(`Chưa đủ ${coinCurrencyName}, còn thiếu ${diff} ${coinCurrencyName}`);
+        } else {
+          showToast(res.message);
+        }
+        return;
+      }
+
+      const nextPlots =
+        typeof res.plots === 'number' && res.plots > effectivePlotsCount
+          ? res.plots
+          : Math.min(40, effectivePlotsCount + 1);
+      setLocalPlotsCount(nextPlots);
+      if (typeof res.coins === 'number') {
+        setCoins(res.coins);
+      }
+      setNewlyBoughtPlotSlot(nextPlots - 1);
+      setTimeout(() => {
+        setNewlyBoughtPlotSlot((prev) => (prev === nextPlots - 1 ? null : prev));
+      }, 4500);
+
+      await refreshSupabaseInventoryAndRoll();
+      showToast(res.message);
+    } finally {
+      setIsBuyingPlot(false);
+    }
   };
 
   // ============================================================================
-  // 3. XỬ LÝ HỒ CÁ (CHO CÁ ĂN BẰNG HẠT CÁ, CÁ LỚN DẦN & TIẾT RA CÁNH HOA)
+  // 3. XỬ LÝ HỒ CÁ (HIỂN THỊ MỌI MÓN kind = 'fish' TRONG INVENTORY)
   // ============================================================================
   const handleBuyFishFood = () => {
     const cost = 8;
@@ -1122,7 +1366,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     showToast('🐟 Đã mua +3 Hạt cá dinh dưỡng!');
   };
 
-  const handleFeedFish = (fishId: string) => {
+  const handleFeedFish = (fish: ExtendedGameItem) => {
     if (roomState.fishFoodCount <= 0) {
       showToast(
         'Bạn đã hết Hạt cá rồi! Hãy bấm nút "Mua Hạt cá" ngay phía trên hồ nhé 🐟'
@@ -1138,32 +1382,24 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     setRoomState(nextRoom);
     saveCompanionRoomState(nextRoom);
 
-    const nextFish = pondFish.map((f) => {
-      if (f.id !== fishId) return f;
-      const nextXp = f.xp + 25;
-      let nextStage: PondFishState['stage'] = f.stage;
-      if (f.stage === 'egg') nextStage = 'baby';
-      else if (f.stage === 'baby' && nextXp >= 45) nextStage = 'juvenile';
-      else if (nextXp >= 85) nextStage = 'adult';
-
+    setFishCareMap((prev) => {
+      const cur = prev[fish.id] || { fullUntil: 0, xp: 10, pendingPetals: 0 };
       return {
-        ...f,
-        stage: nextStage,
-        xp: nextXp,
-        fullUntil: now + 3 * 60 * 1000, // Cá no trong 3 phút và liên tục tiết ra Cánh hoa
-        lastPetalGeneratedAt: now,
-        pendingPetals: f.pendingPetals + 2,
+        ...prev,
+        [fish.id]: {
+          fullUntil: now + 3 * 60 * 1000,
+          xp: cur.xp + 20,
+          pendingPetals: cur.pendingPetals + 2,
+        },
       };
     });
 
-    setPondFish(nextFish);
-    savePondFishList(nextFish);
     markDailyTaskReady('feed_fish');
     emitGameQuestAction('fish');
     if (currentUser && currentUser.role !== 'guest') {
       logGameActionViaRpc('feed_fish');
     }
-    showToast('🐟 Đã thả Hạt cá! Cá no bụng đang vui vẻ tiết ra thêm Cánh hoa!');
+    showToast(`🐟 Đã cho "${fish.name}" ăn Hạt cá! Chú cá quẫy đuôi vui vẻ ✨`);
   };
 
   const [isCastingRod, setIsCastingRod] = useState(false);
@@ -1181,67 +1417,27 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     }, 1800);
   };
 
-  const handleCollectFishPetals = (fishId: string) => {
-    const target = pondFish.find((f) => f.id === fishId);
-    if (!target || target.pendingPetals <= 0) return;
-
-    const amount = target.pendingPetals;
+  const handleCollectFishPetals = (fish: ExtendedGameItem) => {
+    const care = fishCareMap[fish.id];
+    if (!care || care.pendingPetals <= 0) return;
+    const amount = care.pendingPetals;
     onAddPetals(amount);
-    const nextFish = pondFish.map((f) =>
-      f.id === fishId ? { ...f, pendingPetals: 0 } : f
-    );
-    setPondFish(nextFish);
-    savePondFishList(nextFish);
+    setFishCareMap((prev) => ({
+      ...prev,
+      [fish.id]: {
+        ...care,
+        pendingPetals: 0,
+      },
+    }));
     emitGameQuestAction('fish');
     showToast(
-      `✨ Đã thu hoạch +${amount} ${currencyName} từ chú cá "${target.item.name}"!`
+      `✨ Đã nhận +${amount} ${currencyName} từ chú cá "${fish.name}"!`
     );
   };
 
-  const handleHatchNewFishEgg = () => {
-    const cost = 12;
-    if (!isOwner && petalsBalance < cost) {
-      showToast(`Cần ${cost} ${currencyName} để thả thêm trứng cá mới vào hồ 🌸`);
-      return;
-    }
-    onAddPetals(-cost);
-    const newFishItem = generateUniqueGameItem('fish');
-    const now = Date.now();
-    const newFishState: PondFishState = {
-      id: newFishItem.id,
-      item: newFishItem,
-      stage: 'egg',
-      xp: 0,
-      hatchedAt: now,
-      fullUntil: now + 90 * 1000,
-      lastPetalGeneratedAt: now,
-      pendingPetals: 0,
-      swimSpeed: 15 + Math.floor(Math.random() * 12),
-      swimOffset: Math.floor(Math.random() * 85),
-    };
-    const next = [newFishState, ...pondFish];
-    setPondFish(next);
-    savePondFishList(next);
-    emitGameQuestAction('fish');
-    showToast(`🥚 Đã thả trứng "${newFishItem.name}" xuống Hồ cá!`);
-  };
-
   // ============================================================================
-  // 4. XỬ LÝ PHÒNG TRI KỶ & THÚ CƯNG + QUẦY THỨC UỐNG
+  // 4. XỬ LÝ PHÒNG TRI KỶ, KHU THÚ CƯNG & QUẦY THỨC UỐNG
   // ============================================================================
-  const ownedFlowers = useMemo(
-    () => inventory.filter((i) => i.category === 'flower'),
-    [inventory]
-  );
-  const ownedDrinks = useMemo(
-    () => inventory.filter((i) => i.category === 'drink'),
-    [inventory]
-  );
-  const ownedPets = useMemo(
-    () => inventory.filter((i) => i.category === 'pet'),
-    [inventory]
-  );
-
   const triggerCompanionDialogue = useCallback(
     (
       situation: DialogueSituation,
@@ -1312,11 +1508,18 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     });
   };
 
-  const handleGiftItemToCompanion = (item: GeneratedGameItem) => {
+  // Tặng thức uống / hoa cho người thương: ghi nhận hiệu ứng và ẩn ly đã tặng khỏi Quầy thức uống (không tự xóa khỏi kho server)
+  const handleGiftItemToCompanion = async (item: ExtendedGameItem) => {
     const bondGain =
       item.rarity === 'legendary' ? 18 : item.rarity === 'rare' ? 12 : 8;
-    const nextInv = removeItemFromInventory(item.id);
-    setInventory(nextInv);
+
+    if (item.category === 'drink') {
+      setGiftedDrinkIds((prev) => {
+        const next = new Set(prev);
+        next.add(item.id);
+        return next;
+      });
+    }
 
     const nextBond = roomState.bondPoints + bondGain;
     const nextRoom = {
@@ -1333,6 +1536,9 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
         itemName: item.name,
       });
       emitGameQuestAction('gift_flower');
+      if (currentUser && currentUser.role !== 'guest') {
+        logGameActionViaRpc('gift_flower');
+      }
     } else {
       triggerCompanionDialogue('gift_drink', {
         bondOverride: nextBond,
@@ -1344,7 +1550,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
       }
     }
     showToast(
-      `💝 Đã tặng "${item.name}" cho người thương! (+${bondGain} Gắn bó)`
+      `💝 Đã tặng "${item.name}" cho ${companionChar?.name || 'người thương'}! (+${bondGain} Gắn bó)`
     );
   };
 
@@ -1366,6 +1572,15 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     showToast('🐾 Đã mua +3 phần Thức ăn thú cưng!');
   };
 
+  const getPetStats = useCallback(
+    (petId: string): PetCareStat => {
+      const saved = petCareMap[petId];
+      if (saved) return saved;
+      return { fullness: 75, happiness: 85, updatedAt: Date.now() };
+    },
+    [petCareMap]
+  );
+
   const handleStrokePet = (petId: string) => {
     const targetPet = inventory.find((it) => it.id === petId);
     const sound = targetPet?.petSound || 'Meo~ 🌸';
@@ -1376,6 +1591,20 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     setTimeout(() => {
       setActivePetSpeech((prev) => (prev?.petId === petId ? null : prev));
     }, 3200);
+
+    setPetCareMap((prev) => {
+      const cur = prev[petId] || { fullness: 75, happiness: 85, updatedAt: Date.now() };
+      const nextMap = {
+        ...prev,
+        [petId]: {
+          ...cur,
+          happiness: Math.min(100, cur.happiness + 12),
+          updatedAt: Date.now(),
+        },
+      };
+      savePetCareStatsMap(nextMap);
+      return nextMap;
+    });
 
     const nextRoom = {
       ...roomState,
@@ -1389,11 +1618,11 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
       logGameActionViaRpc('pet_stroke');
     }
     showToast(
-      `🐾 Bạn nhẹ nhàng vuốt ve ${targetPet?.name || 'bé thú cưng'}, bé rúc vào tay kêu "${sound}"!`
+      `🐾 Bạn nhẹ nhàng vuốt ve "${targetPet?.name || 'bé thú cưng'}", bé rúc vào tay kêu "${sound}"!`
     );
   };
 
-  const handleFeedPet = (petId: string) => {
+  const handleFeedPet = async (petId: string) => {
     const targetPet = inventory.find((it) => it.id === petId);
     if (targetPet?.petSound) {
       setActivePetSpeech({
@@ -1410,7 +1639,6 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
       return;
     }
 
-    const now = Date.now();
     const nextRoom = {
       ...roomState,
       petFoodCount: roomState.petFoodCount - 1,
@@ -1420,17 +1648,26 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     setRoomState(nextRoom);
     saveCompanionRoomState(nextRoom);
 
-    const nextInv = inventory.map((it) =>
-      it.id === petId ? { ...it, hungerFullUntil: now + 15 * 60 * 1000 } : it
-    );
-    setInventory(nextInv);
-    saveInventoryItems(nextInv);
+    setPetCareMap((prev) => {
+      const cur = prev[petId] || { fullness: 70, happiness: 80, updatedAt: Date.now() };
+      const nextMap = {
+        ...prev,
+        [petId]: {
+          fullness: Math.min(100, cur.fullness + 25),
+          happiness: Math.min(100, cur.happiness + 10),
+          updatedAt: Date.now(),
+        },
+      };
+      savePetCareStatsMap(nextMap);
+      return nextMap;
+    });
+
     emitGameQuestAction('feed_pet');
     if (currentUser && currentUser.role !== 'guest') {
       logGameActionViaRpc('feed_pet');
     }
     showToast(
-      `🐾 ${targetPet?.name || 'Thú cưng'} kêu "${
+      `🐾 "${targetPet?.name || 'Thú cưng'}" kêu "${
         targetPet?.petSound || 'Meo~'
       }" và ăn no nê vui vẻ!`
     );
@@ -1446,15 +1683,20 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     }
     onAddPetals(-cost);
     const newDrink = generateUniqueGameItem('drink');
-    const nextInv = addItemToInventory(newDrink);
-    setInventory(nextInv);
-    await insertCraftedDrinkToInventory({
+    const inserted = await insertCraftedDrinkToInventory({
       item_type: 'drink',
       item_name: newDrink.name,
       rarity: newDrink.rarity,
       color: newDrink.visual.primaryColor,
     });
-    await refreshSupabaseInventoryAndRoll();
+    if (inserted) {
+      setNewlyReceivedIds((prev) => {
+        const next = new Set(prev);
+        next.add(inserted.id);
+        return next;
+      });
+    }
+    await onRefreshInventory?.();
     emitGameQuestAction('gift_drink');
     showToast(`☕ Đã pha chế thành công ly "${newDrink.name}" độc nhất!`);
   };
@@ -1559,22 +1801,22 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
             {
               id: 'garden',
               label: '🌱 Vườn Hoa (5 giai đoạn)',
-              badge: `${gardenPlots.length} ô vườn`,
+              badge: `${plantedBySlot.size}/${effectivePlotsCount} ô`,
             },
             {
               id: 'pond',
               label: '🐟 Hồ Cá Đêm',
-              badge: `${pondFish.length} chú cá`,
+              badge: `${ownedFish.length} chú cá`,
             },
             {
               id: 'companion',
-              label: '🏡 Phòng Tri Kỷ & Thú Cưng',
+              label: '🏡 Khu Thú Cưng & Tri Kỷ',
               badge: `${ownedPets.length} thú cưng`,
             },
             {
               id: 'drinks',
               label: '☕ Quầy Thức Uống',
-              badge: `${ownedDrinks.length} ly`,
+              badge: `${barDrinks.length} ly`,
             },
           ] as const
         ).map((tab) => {
@@ -1585,6 +1827,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
               type="button"
               onClick={() => {
                 setActiveZone(tab.id);
+                onRefreshInventory?.();
                 if (currentUser && currentUser.role !== 'guest') {
                   if (tab.id === 'companion') {
                     logGameActionViaRpc('visit_room');
@@ -1613,6 +1856,29 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
           );
         })}
       </div>
+
+      {/* Banner lỗi đỏ rõ ràng nếu đọc inventory thất bại */}
+      {inventoryError && (
+        <div className="p-4 rounded-2xl border-2 border-red-500 bg-red-500/15 text-red-700 dark:text-red-300 text-xs font-bold flex items-center justify-between shadow-md">
+          <span>⚠️ Không thể đọc Kho đồ từ Supabase: {inventoryError}</span>
+          {onRefreshInventory && (
+            <button
+              type="button"
+              onClick={onRefreshInventory}
+              className="px-3 py-1 rounded-full bg-red-600 text-white text-[11px] font-bold cursor-pointer"
+            >
+              Thử lại
+            </button>
+          )}
+        </div>
+      )}
+
+      {inventoryLoading && (
+        <div className="p-3 rounded-2xl border border-[var(--border)] bg-[var(--surface)] text-xs text-[var(--muted)] flex items-center gap-2">
+          <RefreshCw className="w-3.5 h-3.5 animate-spin text-[var(--accent)]" />
+          <span>Đang đồng bộ Kho đồ từ Supabase...</span>
+        </div>
+      )}
 
       {/* Toast thông báo dịu dàng */}
       {gameToast && (
@@ -1646,7 +1912,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                 </span>
               </div>
               <p className="text-xs text-[var(--muted)] max-w-xl leading-relaxed">
-                Nơi trao đổi những thức quà dịu dàng, hạt giống mầm hoa, cá bơi đêm và thức uống thơm lành. Hoàn thành nhiệm vụ mỗi ngày để tích lũy thêm {coinCurrencyName}!
+                Nơi trao đổi những thức quà dịu dàng, hạt giống mầm hoa, cá bơi đêm, thú cưng và thức uống thơm lành. Hoàn thành nhiệm vụ mỗi ngày để tích lũy thêm {coinCurrencyName}!
               </p>
             </div>
 
@@ -1740,7 +2006,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
             </div>
 
             {/* 3. NHIỆM VỤ HÔM NAY (ĐỒNG HỒ ĐẾM NGƯỢC & 3 THẺ NHIỆM VỤ) */}
-            <div className="lg:col-span-2 soft-card p-5 border border-[var(--border)] space-y-4">
+            <div id="daily-quests-section" className="lg:col-span-2 soft-card p-5 border border-[var(--border)] space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border)] pb-3">
                 <div className="flex items-center gap-2">
                   <span className="text-lg">📋</span>
@@ -1833,7 +2099,6 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                           </div>
                         </div>
 
-                        {/* Gợi ý nhẹ nhàng nơi để làm khi chưa xong */}
                         {!quest.completed && !isReadyToClaim && (
                           <p className="text-[10.5px] text-[var(--muted)] leading-relaxed italic bg-[var(--bg)]/70 p-2 rounded-xl border border-[var(--border)]/50">
                             💡 {hint}
@@ -1890,7 +2155,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
             </div>
           </div>
 
-          {/* 4. CỬA HÀNG CHỢ NHỎ */}
+          {/* 4. CỬA HÀNG CHỢ NHỎ: HÌNH MINH HỌA SVG MẪU CHO MỖI LOẠI */}
           <div className="soft-card p-6 space-y-4 border border-[var(--border)]">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-[var(--border)] pb-3">
               <div>
@@ -1899,11 +2164,11 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                   <span>Cửa Hàng Vật Phẩm</span>
                 </h4>
                 <p className="text-xs text-[var(--muted)] mt-0.5">
-                  Hoa và cá mới mua cần 30 phút để nở hoa/lớn khôn trong Kho đồ trước khi sẵn sàng mở khóa nhân vật ⏳
+                  Hạt giống hoa mua về đem gieo ở Vườn hoa (nở thành Hoa sau 30 phút), cá mới mua cần 30 phút để lớn khôn trước khi mở khóa nhân vật ⏳
                 </p>
               </div>
               <span className="text-xs text-[var(--muted)] italic">
-                🌸 Tên mỗi vật phẩm do server cấp ngẫu nhiên độc nhất
+                ✨ Mỗi bé có hình dáng và tên riêng do server cấp
               </span>
             </div>
 
@@ -1918,31 +2183,36 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                       emoji: string;
                       desc: string;
                       needGrow: boolean;
+                      sampleSeed: string;
                     }
                   > = {
                     flower: {
-                      name: 'Hoa Tươi',
-                      emoji: '🌸',
-                      desc: 'Mầm hoa thơm ngát, nở hoa rực rỡ sau 30 phút.',
+                      name: 'Hạt giống hoa',
+                      emoji: '🌱',
+                      desc: 'Hạt giống hoa mang sắc màu riêng, đem gieo vào ô Vườn hoa để nở thành Hoa sau 30 phút.',
                       needGrow: true,
+                      sampleSeed: 'market_sample_flower_sakura_bloom',
                     },
                     fish: {
                       name: 'Cá Bơi',
                       emoji: '🐟',
-                      desc: 'Chú cá lấp lánh, cần 30 phút để lớn khôn trong hồ.',
+                      desc: 'Chú cá lấp lánh, ấp nở và bơi chậm trong Hồ cá đêm.',
                       needGrow: true,
+                      sampleSeed: 'market_sample_fish_koi_moon',
                     },
                     drink: {
                       name: 'Thức Uống',
                       emoji: '☕',
-                      desc: 'Ly nước pha sẵn ngọt lành, dùng được ngay lập tức.',
+                      desc: 'Ly nước pha sẵn ngọt lành, bày ở Quầy thức uống và dùng ngay.',
                       needGrow: false,
+                      sampleSeed: 'market_sample_drink_matcha_latte',
                     },
                     pet: {
                       name: 'Thú Cưng',
                       emoji: '🐾',
-                      desc: 'Người bạn thú đáng yêu mang tính cách và vibe độc nhất.',
+                      desc: 'Người bạn thú đáng yêu có loài, màu lông và biểu cảm riêng.',
                       needGrow: false,
+                      sampleSeed: 'market_sample_pet_fluffy_kitty',
                     },
                   };
                   const meta = labelMap[row.kind] || {
@@ -1950,6 +2220,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                     emoji: '📦',
                     desc: 'Vật phẩm kỳ diệu tại Chợ nhỏ.',
                     needGrow: false,
+                    sampleSeed: `market_sample_${row.kind}`,
                   };
 
                   return (
@@ -1958,7 +2229,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                       id={`market-card-${row.kind}`}
                       className="p-4 rounded-2xl border border-[var(--border)] bg-[var(--surface)] flex flex-col justify-between gap-3 shadow-xs hover:shadow-md transition-all relative overflow-hidden"
                     >
-                      <div className="space-y-2">
+                      <div className="space-y-2.5">
                         <div className="flex items-center justify-between">
                           <span className="text-2xl">{meta.emoji}</span>
                           <span className="px-2.5 py-1 rounded-full text-xs font-black bg-amber-500/20 text-amber-700 dark:text-amber-300 flex items-center gap-1">
@@ -1966,16 +2237,39 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                             <span>{coinCurrencyEmoji}</span>
                           </span>
                         </div>
-                        <h5 className="font-serif-title text-base font-bold text-[var(--text)]">
-                          {row.buy_price} {coinCurrencyName} → 1 {meta.emoji} {meta.name}
-                        </h5>
-                        <p className="text-[11px] text-[var(--muted)] leading-relaxed">
+
+                        {/* Hình minh họa SVG mẫu của loại đó */}
+                        <div className="w-20 h-20 mx-auto rounded-2xl bg-[var(--bg)] border border-[var(--border)] flex items-center justify-center shadow-2xs">
+                          {renderItem(
+                            row.kind === 'flower' ? 'seed' : (row.kind as ItemCategory),
+                            meta.sampleSeed,
+                            'rare',
+                            row.kind === 'flower' ? 0 : 'adult',
+                            { size: 64 }
+                          )}
+                        </div>
+
+                        <div className="text-center space-y-0.5">
+                          <h5 className="font-serif-title text-base font-bold text-[var(--text)]">
+                            {row.buy_price} {coinCurrencyName} → 1 {meta.emoji} {meta.name}
+                          </h5>
+                          <p className="text-[10.5px] font-semibold text-[var(--accent)]">
+                            ✨ Mỗi bé có hình dáng và tên riêng
+                          </p>
+                        </div>
+
+                        <p className="text-[11px] text-[var(--muted)] leading-relaxed text-center">
                           {meta.desc}
                         </p>
+
                         {meta.needGrow && (
-                          <div className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-[var(--bg)] text-[10px] font-semibold text-[var(--muted)]">
+                          <div className="flex items-center justify-center gap-1 px-2 py-1 rounded-lg bg-[var(--bg)] text-[10px] font-semibold text-[var(--muted)]">
                             <Clock className="w-3 h-3 text-[var(--accent)]" />
-                            <span>Cần 30 phút lớn khôn</span>
+                            <span>
+                              {row.kind === 'flower'
+                                ? 'Gieo ở Vườn hoa (30 phút nở)'
+                                : 'Cần 30 phút lớn khôn'}
+                            </span>
                           </div>
                         )}
                       </div>
@@ -1991,7 +2285,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                         ) : (
                           <ShoppingBag className="w-3.5 h-3.5" />
                         )}
-                        <span>Mua ({row.buy_price} {coinCurrencyName})</span>
+                        <span>Mua {meta.name} ({row.buy_price} {coinCurrencyName})</span>
                       </button>
                     </div>
                   );
@@ -2008,7 +2302,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                   <span>Bán Lại Vật Phẩm Lấy {coinCurrencyName}</span>
                 </h4>
                 <p className="text-xs text-[var(--muted)] mt-0.5">
-                  Trao đổi các vật phẩm bạn đã thu hoạch hoặc dư thừa trong Kho đồ để thu về {coinCurrencyName}.
+                  Trao đổi các vật phẩm bạn đang có trong Kho đồ để thu về {coinCurrencyName} (Hạt giống đang gieo trong Vườn hoa không bán được).
                 </p>
               </div>
               <span className="text-xs font-bold text-[var(--muted)]">
@@ -2018,13 +2312,17 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
 
             {inventory.length === 0 ? (
               <div className="py-8 text-center text-xs text-[var(--muted)]">
-                Kho đồ của bạn đang trống. Hãy mở Gacha, trồng hoa hoặc câu cá để có vật phẩm bán nhé!
+                Kho đồ của bạn đang trống. Hãy mua ở Chợ hoặc mở Gacha mỗi ngày nhé!
               </div>
             ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 max-h-96 overflow-y-auto pr-1">
                 {inventory.map((item) => {
-                  const priceRow = marketPrices.find((p) => p.kind === item.category);
+                  const lookupKind = item.category === 'seed' ? 'flower' : item.category;
+                  const priceRow = marketPrices.find((p) => p.kind === lookupKind);
                   const sellPrice = priceRow?.sell_price || 0;
+                  const plantedSlot =
+                    item.category === 'seed' ? plantedSlotBySeedId.get(item.id) : undefined;
+                  const isPlantedInGarden = typeof plantedSlot === 'number';
 
                   return (
                     <div
@@ -2032,16 +2330,33 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                       className="p-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] flex flex-col justify-between gap-2.5"
                     >
                       <div className="flex items-center gap-2.5">
-                        <div className="w-10 h-10 rounded-xl bg-[var(--bg)] border border-[var(--border)] flex items-center justify-center shrink-0">
-                          <ProceduralItemSvg item={item} size={32} />
+                        <div className="w-11 h-11 rounded-xl bg-[var(--bg)] border border-[var(--border)] flex items-center justify-center shrink-0">
+                          {renderItem(
+                            item.category,
+                            item.seed,
+                            item.rarity,
+                            item.category === 'seed'
+                              ? 0
+                              : item.category === 'flower'
+                              ? 4
+                              : 'adult',
+                            { size: 36 }
+                          )}
                         </div>
                         <div className="min-w-0">
                           <h6 className="font-bold text-xs text-[var(--text)] truncate">
-                            {item.name}
+                            {item.category === 'seed'
+                              ? formatSeedName(item.name)
+                              : item.name}
                           </h6>
-                          <div className="flex items-center gap-1.5 text-[10px] text-[var(--muted)]">
+                          <div className="flex items-center gap-1.5 text-[10px] text-[var(--muted)] flex-wrap">
                             <span>{CATEGORY_LABELS[item.category].emoji}</span>
                             <span>{RARITY_LABELS[item.rarity]}</span>
+                            {isPlantedInGarden && (
+                              <span className="px-1.5 py-0.2 rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 font-bold">
+                                Đang gieo ở ô #{plantedSlot + 1}
+                              </span>
+                            )}
                           </div>
                         </div>
                       </div>
@@ -2050,16 +2365,25 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                         <span className="text-xs font-extrabold text-amber-600 dark:text-amber-400">
                           +{sellPrice} {coinCurrencyName}
                         </span>
-                        <button
-                          type="button"
-                          disabled={sellPrice <= 0 || isSellingItemId === item.id}
-                          onClick={() =>
-                            setItemToSellConfirm({ item, price: sellPrice })
-                          }
-                          className="px-3 py-1 rounded-lg bg-[var(--bg)] border border-[var(--border)] hover:border-[var(--accent)] text-[11px] font-bold text-[var(--text)] cursor-pointer disabled:opacity-40"
-                        >
-                          {isSellingItemId === item.id ? 'Đang bán...' : 'Bán lại'}
-                        </button>
+                        {isPlantedInGarden ? (
+                          <span
+                            className="px-2.5 py-1 rounded-lg bg-emerald-500/10 border border-emerald-400/30 text-[10px] font-bold text-emerald-700 dark:text-emerald-300 cursor-not-allowed"
+                            title="Hạt giống đang gieo trong Vườn hoa không bán được"
+                          >
+                            🌱 Đang gieo ở ô #{plantedSlot + 1}
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={sellPrice <= 0 || isSellingItemId === item.id}
+                            onClick={() =>
+                              setItemToSellConfirm({ item, price: sellPrice })
+                            }
+                            className="px-3 py-1 rounded-lg bg-[var(--bg)] border border-[var(--border)] hover:border-[var(--accent)] text-[11px] font-bold text-[var(--text)] cursor-pointer disabled:opacity-40"
+                          >
+                            {isSellingItemId === item.id ? 'Đang bán...' : 'Bán lại'}
+                          </button>
+                        )}
                       </div>
                     </div>
                   );
@@ -2085,7 +2409,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                     <span>Gacha Quà Tặng Mỗi Ngày</span>
                   </h3>
                   <span className="sticker-chip text-[11px] font-bold">
-                    ✨ Tên riêng độc nhất 100% không trùng
+                    ✨ Hình vẽ &amp; tên riêng theo seed
                   </span>
                 </div>
                 <div className="text-xs text-[var(--muted)] leading-relaxed">
@@ -2108,17 +2432,17 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                   ) : (
                     <>
                       Mỗi ngày bạn có 1 lượt mở quà miễn phí (không phạt nếu bỏ lỡ ngày). Quà mở ra ngẫu nhiên 1 trong 4 loại:
-                      <strong> 🌱 Hạt giống Hoa</strong> (đưa về Vườn hoa),
-                      <strong> 🥚 Trứng Cá</strong> (thả vào Hồ cá),
-                      <strong> 🐾 Thú cưng</strong> (chăm bẵm cùng người thương), hoặc
-                      <strong> ☕ Thức uống</strong> (cất vào Quầy thức uống).
+                      <strong> 🌱 Hạt giống hoa</strong> (đem gieo ở Vườn hoa để nở thành Hoa),
+                      <strong> 🐟 Cá</strong> (bơi ở Hồ cá),
+                      <strong> 🐾 Thú cưng</strong> (ở Khu thú cưng), hoặc
+                      <strong> ☕ Thức uống</strong> (ở Quầy thức uống).
                     </>
                   )}
                 </div>
               </div>
 
               {/* Khu hiển thị hiệu ứng mở quà hoặc kết quả vừa mở */}
-              <div className="min-h-[175px] rounded-2xl border-2 border-dashed border-[var(--border)] bg-[var(--bg)]/80 p-5 flex flex-col items-center justify-center text-center">
+              <div className="min-h-[185px] rounded-2xl border-2 border-dashed border-[var(--border)] bg-[var(--bg)]/80 p-5 flex flex-col items-center justify-center text-center">
                 {isRollingGacha ? (
                   <div className="space-y-3 py-4 animate-pulse">
                     <div className="w-16 h-16 rounded-full bg-[var(--accent)]/30 flex items-center justify-center mx-auto">
@@ -2131,15 +2455,19 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                 ) : lastGachaResult ? (
                   <div className="space-y-3 max-w-md">
                     <div className="flex items-center justify-center">
-                      <ProceduralItemSvg
-                        item={lastGachaResult.item}
-                        size={76}
-                        gardenStage={
-                          lastGachaResult.item.category === 'flower' ? 4 : undefined
-                        }
-                      />
+                      {renderItem(
+                        lastGachaResult.item.category,
+                        lastGachaResult.item.seed,
+                        lastGachaResult.item.rarity,
+                        lastGachaResult.item.category === 'seed'
+                          ? 0
+                          : lastGachaResult.item.category === 'flower'
+                          ? 4
+                          : 'adult',
+                        { size: 80 }
+                      )}
                     </div>
-                    <div className="space-y-1">
+                    <div className="space-y-1.5">
                       <div className="flex items-center justify-center gap-2">
                         <span className="sticker-chip text-[10px] font-bold">
                           {
@@ -2153,18 +2481,38 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                         </span>
                       </div>
                       <h4 className="font-serif-title text-xl font-bold text-[var(--text)]">
-                        {lastGachaResult.item.name}
+                        {lastGachaResult.item.category === 'seed' ||
+                        lastGachaResult.item.category === 'flower'
+                          ? `Bạn nhận được ${formatSeedName(lastGachaResult.item.name)}`
+                          : `Bạn nhận được ${lastGachaResult.item.name}`}
                       </h4>
+                      <p className="text-xs font-bold text-emerald-600 dark:text-emerald-400">
+                        Đã cất vào Kho đồ ✨
+                      </p>
                       <p className="text-xs text-[var(--muted)] leading-relaxed">
                         {lastGachaResult.destinationNote}
                       </p>
+                      {(lastGachaResult.item.category === 'seed' ||
+                        lastGachaResult.item.category === 'flower') && (
+                        <div className="pt-1 flex justify-center">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleOpenPlantModalForSeed(lastGachaResult.item.id)
+                            }
+                            className="px-4 py-1.5 rounded-full text-xs font-bold bg-[var(--accent)] text-[#3a2b30] bouncy-btn cursor-pointer shadow-xs inline-flex items-center gap-1.5"
+                          >
+                            <span>🌱 Gieo ngay</span>
+                          </button>
+                        </div>
+                      )}
                     </div>
                   </div>
                 ) : (
                   <div className="space-y-2 py-4 text-[var(--muted)]">
                     <Sparkles className="w-7 h-7 text-[var(--accent)] mx-auto" />
                     <p className="text-xs">
-                      Bấm nút mở quà bên dưới để đón một vật phẩm có tên riêng duy nhất nhé!
+                      Bấm nút mở quà bên dưới để đón một vật phẩm có hình vẽ và tên riêng duy nhất nhé!
                     </p>
                   </div>
                 )}
@@ -2260,7 +2608,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
             </div>
           </div>
 
-          {/* KHO ĐỒ VẬT PHẨM (INVENTORY) */}
+          {/* KHO ĐỒ VẬT PHẨM (INVENTORY - NGUỒN DUY NHẤT) */}
           <div className="soft-card p-6 space-y-5">
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-[var(--border)] pb-4">
               <div className="space-y-1">
@@ -2269,7 +2617,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                   <span>Kho Đồ Của Bạn ({inventory.length} vật phẩm)</span>
                 </h3>
                 <p className="text-xs text-[var(--muted)]">
-                  Tất cả Hoa đã thu hoạch, Thú cưng và Thức uống đang cất giữ (Cá đang bơi ở Hồ cá cũng được tính khi mở khóa Char).
+                  Tất cả vật phẩm từ Chợ và Gacha được lưu trực tiếp tại Kho đồ (🌱 {ownedSeeds.length} Hạt giống · 🌸 {ownedFlowers.length} Hoa đã nở · 🐟 {ownedFish.length} Cá · 🐾 {ownedPets.length} Thú · ☕ {ownedDrinks.length} Nước).
                 </p>
               </div>
 
@@ -2297,21 +2645,30 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
               </div>
             </div>
 
+            {/* Lưới thẻ theo loại (Tất cả / Hạt giống / Hoa / Cá / Thú / Nước) */}
             <div className="flex flex-wrap gap-2">
               {(
                 [
                   { id: 'all', label: `Tất cả (${inventory.length})` },
                   {
+                    id: 'seed',
+                    label: `🌱 Hạt giống (${ownedSeeds.length})`,
+                  },
+                  {
                     id: 'flower',
                     label: `🌸 Hoa (${ownedFlowers.length})`,
                   },
                   {
-                    id: 'drink',
-                    label: `☕ Thức uống (${ownedDrinks.length})`,
+                    id: 'fish',
+                    label: `🐟 Cá (${ownedFish.length})`,
                   },
                   {
                     id: 'pet',
-                    label: `🐾 Thú cưng (${ownedPets.length})`,
+                    label: `🐾 Thú (${ownedPets.length})`,
+                  },
+                  {
+                    id: 'drink',
+                    label: `☕ Nước (${ownedDrinks.length})`,
                   },
                 ] as const
               ).map((c) => (
@@ -2319,10 +2676,10 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                   key={c.id}
                   type="button"
                   onClick={() => setInvCategoryFilter(c.id)}
-                  className={`px-3.5 py-1.5 rounded-full text-xs font-bold border cursor-pointer ${
+                  className={`px-3.5 py-1.5 rounded-full text-xs font-bold border cursor-pointer transition-all ${
                     invCategoryFilter === c.id
-                      ? 'border-[var(--accent)] bg-[var(--accent)] text-[#3a2b30]'
-                      : 'border-[var(--border)] bg-[var(--bg)] text-[var(--muted)]'
+                      ? 'border-[var(--accent)] bg-[var(--accent)] text-[#3a2b30] shadow-2xs'
+                      : 'border-[var(--border)] bg-[var(--bg)] text-[var(--muted)] hover:text-[var(--text)]'
                   }`}
                 >
                   {c.label}
@@ -2330,67 +2687,193 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
               ))}
             </div>
 
-            {filteredInventory.length === 0 ? (
+            {inventory.length === 0 ? (
+              <div className="py-12 px-4 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--bg)]/60 text-center space-y-3">
+                <p className="text-sm font-bold text-[var(--text)]">
+                  Kho đồ của bạn đang trống 🌸
+                </p>
+                <p className="text-xs text-[var(--muted)] max-w-md mx-auto leading-relaxed">
+                  Hãy ghé Chợ nhỏ hoặc mở hộp quà Gacha phía trên để đón những hạt giống hoa, chú cá, thú cưng và thức uống mang tên riêng độc nhất về Kho đồ nhé!
+                </p>
+                <div className="flex items-center justify-center gap-2.5 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setActiveZone('market')}
+                    className="px-4 py-2 rounded-full text-xs font-bold bg-[var(--accent)] text-[#3a2b30] bouncy-btn cursor-pointer"
+                  >
+                    🛒 Ghé Chợ Nhỏ
+                  </button>
+                  {hasFreeGachaToday && (
+                    <button
+                      type="button"
+                      onClick={() => handleRollGacha(true)}
+                      className="px-4 py-2 rounded-full text-xs font-bold border border-[var(--accent)] bg-[var(--surface)] text-[var(--text)] cursor-pointer"
+                    >
+                      🎁 Mở Gacha Miễn Phí
+                    </button>
+                  )}
+                </div>
+              </div>
+            ) : filteredInventory.length === 0 ? (
               <div className="py-12 text-center text-xs text-[var(--muted)]">
-                Chưa có vật phẩm nào khớp với bộ lọc trong Kho đồ 🌸
+                Chưa có vật phẩm nào khớp với bộ lọc hiện tại 🌸
               </div>
             ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                {filteredInventory.map((item) => (
-                  <div
-                    key={item.id}
-                    className="p-4 rounded-2xl border border-[var(--border)] bg-[var(--bg)] flex flex-col justify-between gap-3 hover:border-[var(--accent)] transition-colors"
-                  >
-                    <div className="flex items-start gap-3">
-                      <div className="w-14 h-14 rounded-2xl bg-[var(--surface)] border border-[var(--border)] flex items-center justify-center shrink-0">
-                        <ProceduralItemSvg item={item} size={48} />
+                {filteredInventory.map((item) => {
+                  const isNew = newlyReceivedIds.has(item.id);
+                  const readyMs = item.readyAt ? new Date(item.readyAt).getTime() : 0;
+                  const isGrowing =
+                    item.category === 'fish' &&
+                    Boolean(item.readyAt && !Number.isNaN(readyMs) && readyMs > nowMs);
+                  const remainingGrowMs = isGrowing ? Math.max(0, readyMs - nowMs) : 0;
+                  const plantedSlot =
+                    item.category === 'seed'
+                      ? plantedSlotBySeedId.get(item.id)
+                      : undefined;
+                  const isPlantedInGarden = typeof plantedSlot === 'number';
+                  const fishStage =
+                    item.category === 'fish'
+                      ? isGrowing
+                        ? 'egg'
+                        : 'adult'
+                      : 'adult';
+                  const createdDateStr = item.createdAt
+                    ? new Date(item.createdAt).toLocaleDateString('vi-VN')
+                    : 'Hôm nay';
+
+                  return (
+                    <div
+                      key={item.id}
+                      className="p-4 rounded-2xl border border-[var(--border)] bg-[var(--bg)] flex flex-col justify-between gap-3 hover:border-[var(--accent)] transition-colors relative"
+                    >
+                      {isNew && (
+                        <span className="absolute top-3 right-3 px-2 py-0.5 rounded-full bg-rose-500 text-white text-[10px] font-extrabold shadow-xs flex items-center gap-1">
+                          <span className="w-1.5 h-1.5 rounded-full bg-white animate-ping" />
+                          <span>Mới</span>
+                        </span>
+                      )}
+
+                      <div className="flex items-start gap-3">
+                        <div className="w-16 h-16 rounded-2xl bg-[var(--surface)] border border-[var(--border)] flex items-center justify-center shrink-0">
+                          {renderItem(
+                            item.category,
+                            item.seed,
+                            item.rarity,
+                            item.category === 'seed'
+                              ? 0
+                              : item.category === 'flower'
+                              ? 4
+                              : fishStage,
+                            { size: 54 }
+                          )}
+                        </div>
+                        <div className="min-w-0 space-y-1 pr-6">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-[var(--surface)] border border-[var(--border)] font-bold">
+                              {CATEGORY_LABELS[item.category].emoji}{' '}
+                              {CATEGORY_LABELS[item.category].name}
+                            </span>
+                            <span
+                              className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
+                                item.rarity === 'legendary'
+                                  ? 'bg-amber-400/25 text-amber-700 dark:text-amber-300'
+                                  : item.rarity === 'rare'
+                                  ? 'bg-purple-400/20 text-purple-700 dark:text-purple-300'
+                                  : 'bg-[var(--surface)] text-[var(--muted)]'
+                              }`}
+                            >
+                              {RARITY_LABELS[item.rarity]}
+                            </span>
+                          </div>
+                          <h4 className="font-serif-title text-base font-bold text-[var(--text)] leading-snug">
+                            {item.category === 'seed'
+                              ? formatSeedName(item.name)
+                              : item.name}
+                          </h4>
+                          <p className="text-[10px] text-[var(--muted)]">
+                            Ngày nhận: {createdDateStr}
+                          </p>
+                        </div>
                       </div>
-                      <div className="min-w-0 space-y-1">
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-[var(--surface)] border border-[var(--border)] font-bold">
-                            {CATEGORY_LABELS[item.category].emoji}{' '}
-                            {CATEGORY_LABELS[item.category].name}
-                          </span>
-                          <span
-                            className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
-                              item.rarity === 'legendary'
-                                ? 'bg-amber-400/25 text-amber-700 dark:text-amber-300'
-                                : item.rarity === 'rare'
-                                ? 'bg-purple-400/20 text-purple-700 dark:text-purple-300'
-                                : 'bg-[var(--surface)] text-[var(--muted)]'
-                            }`}
-                          >
-                            {RARITY_LABELS[item.rarity]}
+
+                      {item.category === 'seed' ? (
+                        isPlantedInGarden ? (
+                          <div className="px-3 py-1.5 rounded-xl bg-emerald-500/15 border border-emerald-400/40 text-[11px] font-bold text-emerald-700 dark:text-emerald-300 flex items-center justify-between">
+                            <span>🌱 Đang gieo ở ô #{plantedSlot + 1}</span>
+                            <span className="text-[10px] opacity-80">Không bán được</span>
+                          </div>
+                        ) : (
+                          <p className="text-[11px] text-[var(--muted)] leading-relaxed">
+                            🌱 Hạt giống Hoa chưa gieo — bấm <strong>Gieo ngay</strong> để trồng vào ô Vườn hoa và thu hoạch Hoa sau 30 phút.
+                          </p>
+                        )
+                      ) : isGrowing ? (
+                        <div className="px-3 py-1.5 rounded-xl bg-amber-500/15 border border-amber-400/40 text-[11px] font-bold text-amber-700 dark:text-amber-300 flex items-center justify-between">
+                          <span className="inline-flex items-center gap-1">
+                            <Clock className="w-3.5 h-3.5" />
+                            <span>Đang lớn, còn {formatCountdown(remainingGrowMs)}</span>
                           </span>
                         </div>
-                        <h4 className="font-serif-title text-base font-bold text-[var(--text)] leading-snug">
-                          {item.name}
-                        </h4>
+                      ) : (
+                        <p className="text-[11px] text-[var(--muted)] leading-relaxed">
+                          {item.category === 'pet'
+                            ? sanitizePetVibeNote(
+                                item.vibeReason || item.description,
+                                item.matchedTag,
+                                item.petSpecies
+                              )
+                            : item.category === 'flower'
+                            ? '🌸 Hoa đã nở rực rỡ — sẵn sàng dùng để mở khóa nhân vật hoặc tặng người thương.'
+                            : item.category === 'fish'
+                            ? '🐟 Đã lớn khôn — đang bơi trong Hồ cá & sẵn sàng mở khóa.'
+                            : '☕ Sẵn sàng thưởng thức ở Quầy thức uống hoặc mở khóa nhân vật.'}
+                        </p>
+                      )}
+
+                      <div className="flex items-center gap-2 pt-1">
+                        {item.category === 'seed' ? (
+                          isPlantedInGarden ? (
+                            <button
+                              type="button"
+                              onClick={() => setActiveZone('garden')}
+                              className="flex-1 py-1.5 rounded-full text-[11px] font-bold bg-emerald-500/15 border border-emerald-400/50 text-emerald-800 dark:text-emerald-200 transition-colors cursor-pointer"
+                            >
+                              🌱 Xem ô #{plantedSlot + 1} ở Vườn hoa
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => handleOpenPlantModalForSeed(item.id)}
+                              className="flex-1 py-1.5 rounded-full text-[11px] font-bold bg-[var(--accent)] text-[#3a2b30] bouncy-btn cursor-pointer shadow-2xs"
+                            >
+                              🌱 Gieo ngay
+                            </button>
+                          )
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (item.category === 'flower') setActiveZone('companion');
+                              else if (item.category === 'fish') setActiveZone('pond');
+                              else if (item.category === 'pet') setActiveZone('companion');
+                              else setActiveZone('drinks');
+                            }}
+                            className="flex-1 py-1.5 rounded-full text-[11px] font-bold bg-[var(--surface)] border border-[var(--border)] hover:border-[var(--accent)] text-[var(--text)] transition-colors cursor-pointer"
+                          >
+                            {item.category === 'flower'
+                              ? '🌸 Tặng ở Phòng tri kỷ'
+                              : item.category === 'fish'
+                              ? '🐟 Xem ở Hồ cá'
+                              : item.category === 'pet'
+                              ? '🐾 Đến Khu thú cưng'
+                              : '☕ Đến Quầy thức uống'}
+                          </button>
+                        )}
                       </div>
                     </div>
-
-                    <p className="text-[11px] text-[var(--muted)] leading-relaxed">
-                      {item.category === 'pet'
-                        ? sanitizePetVibeNote(
-                            item.vibeReason || item.description,
-                            item.matchedTag,
-                            item.petSpecies
-                          )
-                        : item.description}
-                    </p>
-
-                    {(item.category === 'flower' ||
-                      item.category === 'drink') && (
-                      <button
-                        type="button"
-                        onClick={() => handleGiftItemToCompanion(item)}
-                        className="w-full py-1.5 rounded-full text-[11px] font-bold bg-[var(--accent)]/25 text-[var(--text)] hover:bg-[var(--accent)] hover:text-[#3a2b30] transition-colors cursor-pointer"
-                      >
-                        💝 Tặng cho người thương
-                      </button>
-                    )}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -2398,171 +2881,337 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
       )}
 
       {/* =====================================================================
-          KHU 2: VƯỜN HOA (5 GIAI ĐOẠN PHÁT TRIỂN, ĐẾM NGƯỢC THẬT, KHÔNG GIỚI HẠN Ô)
+          KHU 2: VƯỜN HOA THEO Ô (HẠT GIỐNG → GIEO VÀO Ô → CHỜ NỞ 30 PHÚT → THU HOẠCH)
          ===================================================================== */}
       {activeZone === 'garden' && (
         <div className="soft-card p-6 space-y-6">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[var(--border)] pb-4">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-[var(--border)] pb-4">
             <div className="space-y-1">
-              <h3 className="font-serif-title text-2xl font-bold text-[var(--text)] flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <Flower2 className="w-5 h-5 text-[var(--accent)]" />
-                <span>Vườn Hoa Đêm ({gardenPlots.length} ô vườn)</span>
-              </h3>
-              <p className="text-xs text-[var(--muted)]">
-                Mỗi hạt giống phát triển qua 5 giai đoạn: <strong>Hạt → Nảy mầm → Cây con → Nụ → Nở</strong>. Mỗi giai đoạn có đếm ngược thời gian thật, hãy tưới nước đúng lúc để cây lớn nhé (cây không bao giờ héo hay chết).
+                <h3 className="font-serif-title text-2xl font-bold text-[var(--text)]">
+                  Vườn Hoa ({plantedBySlot.size}/{effectivePlotsCount} ô đang trồng)
+                </h3>
+                <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-[var(--accent)]/25 text-[var(--text)]">
+                  🌱 Hạt trong túi: {unplantedSeeds.length}
+                </span>
+                <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-500/15 text-emerald-700 dark:text-emerald-300">
+                  🌸 Hoa đã thu hoạch: {ownedFlowers.length}
+                </span>
+              </div>
+              <p className="text-xs text-[var(--muted)] leading-relaxed">
+                Chọn một ô trống để gieo hạt giống từ túi hoặc gieo hạt ngẫu nhiên (3 {coinCurrencyName}). Cây lớn qua 5 giai đoạn: <strong>Hạt → Nảy mầm → Cây con → Nụ → Nở</strong> trong 30 phút (6 phút/giai đoạn). Khi hoa nở rộ, bấm <strong>Thu hoạch</strong> để cất Hoa vào Kho đồ mở khóa nhân vật!
               </p>
             </div>
 
-            <button
-              type="button"
-              onClick={handleAddGardenPlot}
-              className="px-4 py-2 rounded-full text-xs font-bold bg-[var(--accent)] text-[#3a2b30] bouncy-btn cursor-pointer inline-flex items-center gap-1.5 shrink-0 shadow-xs"
-            >
-              <Plus className="w-4 h-4" />
-              <span>➕ Mở thêm ô vườn</span>
-            </button>
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  setInvCategoryFilter('flower');
+                  setActiveZone('gacha_inv');
+                }}
+                className="px-3.5 py-2 rounded-full text-xs font-bold border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] hover:border-[var(--accent)] cursor-pointer inline-flex items-center gap-1.5"
+              >
+                <Package className="w-3.5 h-3.5" />
+                <span>Xem Kho Hoa ({ownedFlowers.length})</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveZone('market')}
+                className="px-4 py-2 rounded-full text-xs font-bold bg-[var(--accent)] text-[#3a2b30] bouncy-btn cursor-pointer inline-flex items-center gap-1.5 shadow-xs"
+              >
+                <Store className="w-3.5 h-3.5" />
+                <span>🌱 Mua Hạt giống ở Chợ</span>
+              </button>
+            </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
-            {gardenPlots.map((plot, idx) => {
-              if (!plot.seedItem) {
+          {/* Cảnh báo thiếu Xu khi mua thêm ô vườn */}
+          {plotBuyShortfallDiff !== null && plotBuyShortfallDiff > 0 && (
+            <div className="p-4 rounded-2xl border-2 border-rose-400 bg-rose-500/10 text-xs flex flex-wrap items-center justify-between gap-3 animate-fade-in">
+              <div className="space-y-0.5">
+                <p className="font-extrabold text-rose-600 dark:text-rose-300">
+                  ⚠️ Chưa đủ {coinCurrencyName}, còn thiếu {plotBuyShortfallDiff} {coinCurrencyName} để mở thêm ô vườn mới!
+                </p>
+                <p className="text-[11px] text-[var(--muted)]">
+                  Hãy hoàn thành nhiệm vụ hằng ngày hoặc điểm danh ở Chợ nhỏ để nhận thêm {coinCurrencyName} nhé.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleGoToDailyQuests}
+                  className="px-3.5 py-1.5 rounded-full bg-[var(--accent)] text-[#3a2b30] font-bold text-xs cursor-pointer bouncy-btn"
+                >
+                  📋 Đi làm nhiệm vụ
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPlotBuyShortfallDiff(null)}
+                  className="px-2.5 py-1.5 rounded-full border border-[var(--border)] text-[var(--muted)] hover:text-[var(--text)] text-xs cursor-pointer"
+                >
+                  Đóng
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Lưới các ô vườn (mặc định 10 ô, tối đa 40 ô) + Thẻ cuối "➕ Mua thêm ô vườn" */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+            {Array.from({ length: effectivePlotsCount }, (_, slot) => {
+              const plotRow = plantedBySlot.get(slot);
+              const isJustBought = newlyBoughtPlotSlot === slot;
+
+              // Ô TRỐNG
+              if (!plotRow) {
                 return (
                   <div
-                    key={plot.id}
-                    className="p-5 rounded-2xl border-2 border-dashed border-[var(--border)] bg-[var(--bg)]/60 flex flex-col items-center justify-center text-center gap-3 min-h-[260px]"
+                    key={`plot-${slot}`}
+                    className={`p-5 rounded-2xl border-2 border-dashed flex flex-col justify-between gap-4 min-h-[260px] transition-all ${
+                      isJustBought
+                        ? 'border-amber-400 bg-amber-500/10 ring-4 ring-amber-400/30 animate-pulse'
+                        : 'border-[var(--border)] bg-[var(--bg)]/70 hover:border-[var(--accent)]'
+                    }`}
                   >
-                    <span className="text-xs font-bold text-[var(--muted)]">
-                      Ô vườn #{idx + 1} (Đang trống)
-                    </span>
-                    <p className="text-[11px] text-[var(--muted)]">
-                      Gieo một hạt giống mới hoặc mở Gacha để nhận hạt giống hiếm.
-                    </p>
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="font-bold text-[var(--muted)]">
+                        Ô vườn #{slot + 1}
+                      </span>
+                      {isJustBought ? (
+                        <span className="px-2 py-0.5 rounded-full bg-amber-400/30 text-amber-800 dark:text-amber-200 text-[10px] font-extrabold">
+                          ✨ Ô mới mở!
+                        </span>
+                      ) : (
+                        <span className="px-2 py-0.5 rounded-full bg-[var(--surface)] border border-[var(--border)] text-[10px] text-[var(--muted)]">
+                          Ô trống
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="py-4 flex flex-col items-center justify-center text-center gap-2">
+                      <div className="w-16 h-16 rounded-full bg-[var(--surface)] border border-[var(--border)] flex items-center justify-center text-2xl shadow-2xs">
+                        🌱
+                      </div>
+                      <p className="text-xs font-bold text-[var(--text)]">
+                        Đất mềm sẵn sàng gieo hạt
+                      </p>
+                      <p className="text-[11px] text-[var(--muted)]">
+                        {unplantedSeeds.length > 0
+                          ? `Bạn có ${unplantedSeeds.length} hạt giống trong túi`
+                          : 'Gieo hạt từ túi hoặc gieo ngẫu nhiên'}
+                      </p>
+                    </div>
+
                     <button
                       type="button"
-                      onClick={() => handleSowNewSeedInPlot(plot.id)}
-                      className="px-4 py-2 rounded-full text-xs font-bold bg-[var(--accent)] text-[#3a2b30] bouncy-btn cursor-pointer inline-flex items-center gap-1.5"
+                      onClick={() => handleOpenPlantModalForSeed(null, slot)}
+                      className="w-full py-2.5 rounded-full text-xs font-extrabold bg-[var(--accent)] text-[#3a2b30] bouncy-btn cursor-pointer shadow-xs inline-flex items-center justify-center gap-1.5"
                     >
-                      <Flower2 className="w-3.5 h-3.5" />
-                      <span>🌱 Gieo hạt giống mới</span>
+                      <span>🌱 Gieo hạt</span>
                     </button>
                   </div>
                 );
               }
 
-              const elapsed = nowMs - plot.stageStartedAt;
-              const remainingMs = Math.max(0, plot.stageDurationMs - elapsed);
-              const isStageReady = plot.stage < 4 && remainingMs === 0;
-              const isBloomed = plot.stage === 4;
+              // Ô ĐANG TRỒNG
+              const seedItem = inventory.find((it) => it.id === plotRow.seed_id);
+              const { stage, isBloomed, remainingMs, progressPercent } =
+                computePlotGardenStage(plotRow.planted_at, nowMs);
+              const flowerName = formatFlowerNameFromSeed(
+                seedItem?.name || `Hoa Ô #${slot + 1}`
+              );
+              const rarity: ItemRarity = seedItem?.rarity || 'common';
+              const visualSeed = seedItem?.seed || `${flowerName}_${plotRow.seed_id}`;
+              const isWatered = wateredPlotSlots.has(slot);
+              const isHarvestingThis = harvestingSlot === slot;
 
               return (
                 <div
-                  key={plot.id}
-                  className={`p-5 rounded-2xl border bg-[var(--bg)] flex flex-col justify-between gap-4 transition-all ${
+                  key={`plot-${slot}`}
+                  className={`p-5 rounded-2xl border bg-[var(--bg)] flex flex-col justify-between gap-3.5 min-h-[260px] transition-all relative overflow-hidden ${
                     isBloomed
-                      ? 'border-2 border-[var(--accent)] shadow-sm'
+                      ? 'border-2 border-[var(--accent)] shadow-md ring-2 ring-[var(--accent)]/25'
                       : 'border-[var(--border)]'
                   }`}
                 >
-                  <div className="space-y-2">
+                  <div className="space-y-1.5">
                     <div className="flex items-center justify-between text-[11px]">
-                      <span className="text-[var(--muted)] font-semibold">
-                        Ô vườn #{idx + 1}
+                      <span className="text-[var(--muted)] font-bold">
+                        Ô vườn #{slot + 1}
                       </span>
-                      <span className="sticker-chip text-[10px] font-bold">
-                        {RARITY_LABELS[plot.seedItem.rarity]}
+                      <span
+                        className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                          rarity === 'legendary'
+                            ? 'bg-amber-400/25 text-amber-700 dark:text-amber-300'
+                            : rarity === 'rare'
+                            ? 'bg-purple-400/20 text-purple-700 dark:text-purple-300'
+                            : 'bg-[var(--surface)] border border-[var(--border)] text-[var(--muted)]'
+                        }`}
+                      >
+                        {RARITY_LABELS[rarity]}
                       </span>
                     </div>
 
-                    <h4 className="font-serif-title text-base font-bold text-[var(--text)] leading-snug">
-                      {plot.seedItem.name}
-                    </h4>
-
-                    <div className="flex items-center justify-between text-xs text-[var(--muted)]">
+                    <div className="flex items-center justify-between text-[11px] text-[var(--muted)]">
                       <span>
-                        Giai đoạn ({plot.stage + 1}/5):{' '}
+                        Giai đoạn ({stage + 1}/5):{' '}
                         <strong className="text-[var(--text)]">
-                          {GARDEN_STAGE_NAMES[plot.stage]}
+                          {GARDEN_STAGE_NAMES[stage]}
                         </strong>
                       </span>
+                      <span className="font-mono text-[10px] font-bold text-[var(--accent)]">
+                        {progressPercent}%
+                      </span>
+                    </div>
+
+                    <div className="w-full h-1.5 rounded-full bg-[var(--surface)] border border-[var(--border)] overflow-hidden">
+                      <div
+                        className={`h-full rounded-full transition-all duration-500 ${
+                          isBloomed ? 'bg-emerald-500' : 'bg-[var(--accent)]'
+                        }`}
+                        style={{ width: `${progressPercent}%` }}
+                      />
                     </div>
                   </div>
 
-                  {/* Hình SVG phát triển theo từng giai đoạn */}
-                  <div className="py-2 flex flex-col items-center justify-center">
-                    <ProceduralItemSvg
-                      item={plot.seedItem}
-                      size={92}
-                      gardenStage={plot.stage}
-                    />
+                  {/* Hình SVG phát triển theo seed và 5 giai đoạn + Tên riêng của hoa */}
+                  <div className="py-1 flex flex-col items-center justify-center gap-1.5 relative">
+                    {isWatered && (
+                      <span className="absolute -top-1 right-2 text-xs animate-bounce pointer-events-none">
+                        💧✨
+                      </span>
+                    )}
+                    {renderItem('flower', visualSeed, rarity, stage, {
+                      size: 88,
+                    })}
+                    <h4 className="font-serif-title text-sm font-bold text-[var(--text)] text-center leading-snug line-clamp-2">
+                      {flowerName}
+                    </h4>
                   </div>
 
-                  {/* Đồng hồ đếm ngược thật & Nút Tưới nước / Thu hoạch */}
-                  {!isBloomed ? (
-                    <div className="space-y-2.5">
-                      <div className="px-3 py-1.5 rounded-xl bg-[var(--surface)] border border-[var(--border)] flex items-center justify-between text-xs">
+                  {/* Đồng hồ đếm ngược, nút Tưới nước & nút Thu hoạch */}
+                  <div className="space-y-2">
+                    {!isBloomed ? (
+                      <div className="px-3 py-1.5 rounded-xl bg-[var(--surface)] border border-[var(--border)] flex items-center justify-between text-[11px]">
                         <span className="text-[var(--muted)] inline-flex items-center gap-1">
-                          <Clock className="w-3.5 h-3.5 text-[var(--accent)]" />
-                          <span>Đếm ngược:</span>
+                          <Clock className="w-3 h-3 text-[var(--accent)]" />
+                          <span>Nở sau:</span>
                         </span>
-                        <span className="font-bold text-[var(--text)] tabular-nums">
+                        <span className="font-bold text-[var(--text)] font-mono tabular-nums">
                           {formatCountdown(remainingMs)}
                         </span>
                       </div>
+                    ) : (
+                      <div className="px-3 py-1 rounded-xl bg-emerald-500/15 border border-emerald-400/40 text-center text-[11px] font-extrabold text-emerald-700 dark:text-emerald-300">
+                        🌸 Đã nở rộ! Sẵn sàng thu hoạch
+                      </div>
+                    )}
 
+                    <div className="flex flex-col gap-1.5">
                       <button
                         type="button"
-                        onClick={() => handleWaterPlot(plot.id)}
-                        className={`w-full py-2 rounded-full text-xs font-bold transition-all inline-flex items-center justify-center gap-1.5 cursor-pointer ${
-                          isStageReady
-                            ? 'bg-[var(--accent)] text-[#3a2b30] bouncy-btn shadow-xs'
-                            : plot.wateredInCurrentStage
-                            ? 'bg-[var(--surface)] border border-[var(--border)] text-[var(--muted)]'
-                            : 'bg-[var(--accent)]/25 text-[var(--text)] hover:bg-[var(--accent)] hover:text-[#3a2b30]'
+                        onClick={() => handleWaterGardenPlot(slot, flowerName)}
+                        className={`w-full py-1.5 rounded-full text-[11px] font-bold transition-all inline-flex items-center justify-center gap-1.5 cursor-pointer ${
+                          isWatered
+                            ? 'bg-[var(--surface)] border border-[var(--accent)] text-[var(--text)]'
+                            : 'bg-[var(--accent)]/20 text-[var(--text)] hover:bg-[var(--accent)] hover:text-[#3a2b30]'
                         }`}
                       >
                         <Droplets className="w-3.5 h-3.5" />
                         <span>
-                          {isStageReady
-                            ? '💧 Tưới nước lên giai đoạn kế!'
-                            : plot.wateredInCurrentStage
-                            ? 'Đã tưới (Đang chờ lớn...)'
-                            : '💧 Tưới nước chăm cây'}
+                          {isWatered ? '💧 Đã tưới mát lành' : '💧 Tưới nước'}
                         </span>
                       </button>
+
+                      {isBloomed && (
+                        <button
+                          type="button"
+                          disabled={isHarvestingThis}
+                          onClick={() => handleHarvestGardenPlot(slot, seedItem)}
+                          className="w-full py-2 rounded-full text-xs font-extrabold bg-[var(--accent)] text-[#3a2b30] bouncy-btn cursor-pointer shadow-xs inline-flex items-center justify-center gap-1.5 disabled:opacity-60"
+                        >
+                          {isHarvestingThis ? (
+                            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <Sparkles className="w-3.5 h-3.5" />
+                          )}
+                          <span>
+                            {isHarvestingThis ? 'Đang thu hoạch...' : '✨ Thu hoạch'}
+                          </span>
+                        </button>
+                      )}
                     </div>
-                  ) : (
-                    <div className="space-y-2">
-                      <button
-                        type="button"
-                        onClick={() => handleHarvestFlower(plot.id, false)}
-                        className="w-full py-2 rounded-full text-xs font-bold bg-[var(--accent)] text-[#3a2b30] bouncy-btn cursor-pointer shadow-xs"
-                      >
-                        ✨ Thu hoạch vào Kho đồ
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleHarvestFlower(plot.id, true)}
-                        className="w-full py-1.5 rounded-full text-[11px] font-semibold border border-[var(--border)] bg-[var(--surface)] text-[var(--muted)] hover:text-[var(--text)] cursor-pointer"
-                      >
-                        Bán bớt hoa (+
-                        {plot.seedItem.rarity === 'legendary'
-                          ? 25
-                          : plot.seedItem.rarity === 'rare'
-                          ? 16
-                          : 10}{' '}
-                        {currencyEmoji})
-                      </button>
-                    </div>
-                  )}
+                  </div>
                 </div>
               );
             })}
+
+            {/* THẺ CUỐI VƯỜN: ➕ Mua thêm ô vườn */}
+            {effectivePlotsCount < 40 ? (
+              <div className="p-5 rounded-2xl border-2 border-dashed border-amber-400/70 bg-amber-500/5 hover:bg-amber-500/10 flex flex-col justify-between gap-4 min-h-[260px] transition-all">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-bold text-amber-700 dark:text-amber-300">
+                    Mở rộng vườn
+                  </span>
+                  <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-800 dark:text-amber-200 text-[10px] font-extrabold">
+                    {effectivePlotsCount}/40 ô
+                  </span>
+                </div>
+
+                <div className="py-3 flex flex-col items-center justify-center text-center gap-2">
+                  <div className="w-14 h-14 rounded-full bg-amber-500/20 text-amber-600 dark:text-amber-300 flex items-center justify-center shadow-2xs">
+                    <Plus className="w-7 h-7" />
+                  </div>
+                  <h4 className="font-serif-title text-base font-bold text-[var(--text)]">
+                    ➕ Mua thêm ô vườn
+                  </h4>
+                  <p className="text-xs font-extrabold text-amber-600 dark:text-amber-400">
+                    Giá:{' '}
+                    {isOwner
+                      ? 'Miễn phí (Chủ web)'
+                      : `${20 + (effectivePlotsCount - 10) * 10} ${coinCurrencyName}`}
+                  </p>
+                  <p className="text-[11px] text-[var(--muted)]">
+                    Mở thêm ô đất mới để gieo được nhiều hoa cùng lúc hơn (tối đa 40 ô).
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  disabled={isBuyingPlot}
+                  onClick={handleBuyExtraPlot}
+                  className="w-full py-2.5 rounded-full text-xs font-extrabold bg-amber-400 text-stone-900 hover:brightness-105 bouncy-btn cursor-pointer shadow-xs inline-flex items-center justify-center gap-1.5 disabled:opacity-60"
+                >
+                  {isBuyingPlot ? (
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Plus className="w-3.5 h-3.5" />
+                  )}
+                  <span>
+                    {isOwner
+                      ? '➕ Mở thêm ô (Miễn phí)'
+                      : `➕ Mua thêm ô (${20 + (effectivePlotsCount - 10) * 10} ${coinCurrencyName})`}
+                  </span>
+                </button>
+              </div>
+            ) : (
+              <div className="p-5 rounded-2xl border border-[var(--border)] bg-[var(--surface)] flex flex-col items-center justify-center text-center gap-2 min-h-[260px]">
+                <span className="text-2xl">🌸✨</span>
+                <p className="text-xs font-bold text-[var(--text)]">
+                  Đã mở tối đa 40/40 ô vườn!
+                </p>
+                <p className="text-[11px] text-[var(--muted)]">
+                  Khu vườn của bạn đã rộng rãi hết cỡ rồi nhé.
+                </p>
+              </div>
+            )}
           </div>
         </div>
       )}
 
       {/* =====================================================================
-          KHU 3: HỒ CÁ (CÁ NỞ TỪ TRỨNG, BƠI CHẬM, CHO ĂN BẰNG HẠT CÁ & TIẾT CÁNH HOA)
+          KHU 3: HỒ CÁ (HIỂN THỊ MỌI MÓN kind = 'fish' TRONG INVENTORY)
          ===================================================================== */}
       {activeZone === 'pond' && (
         <div className="space-y-6">
@@ -2571,10 +3220,10 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
               <div className="space-y-1">
                 <h3 className="font-serif-title text-2xl font-bold text-[var(--text)] flex items-center gap-2">
                   <Fish className="w-5 h-5 text-[var(--accent)]" />
-                  <span>Hồ Cá Đêm ({pondFish.length} chú cá)</span>
+                  <span>Hồ Cá Đêm ({ownedFish.length} chú cá)</span>
                 </h3>
                 <p className="text-xs text-[var(--muted)]">
-                  Cá nở từ trứng, bơi chậm và lớn dần khi được cho ăn bằng <strong>Hạt cá</strong>. Khi cá no bụng, chúng sẽ tiết ra thêm {currencyName} theo thời gian!
+                  Mọi chú cá trong Kho đồ đều bơi tại đây. Khi chưa tới giờ nở (<code>ready_at</code>) sẽ hiện là <strong>🥚 Trứng cá</strong>, khi tới giờ sẽ nở thành cá bơi chậm có tên riêng!
                 </p>
               </div>
 
@@ -2595,17 +3244,16 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                   onClick={handleFishCast}
                   disabled={isCastingRod}
                   className="px-4 py-2 rounded-full text-xs font-bold border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] hover:border-[var(--accent)] cursor-pointer inline-flex items-center gap-1.5"
-                  title="Thả cần câu tìm niềm vui ở mặt hồ"
                 >
                   <span>{isCastingRod ? '🎣 Đang thả câu...' : '🎣 Thả cần câu'}</span>
                 </button>
                 <button
                   type="button"
-                  onClick={handleHatchNewFishEgg}
+                  onClick={() => setActiveZone('market')}
                   className="px-4 py-2 rounded-full text-xs font-bold border border-[var(--accent)] bg-[var(--surface)] text-[var(--text)] hover:bg-[var(--accent)]/20 cursor-pointer inline-flex items-center gap-1.5"
                 >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>Thả thêm trứng cá (-12 {currencyEmoji})</span>
+                  <Store className="w-3.5 h-3.5" />
+                  <span>Mua thêm cá ở Chợ</span>
                 </button>
               </div>
             </div>
@@ -2617,124 +3265,145 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                 <div className="w-40 h-40 rounded-full border border-[var(--accent)] absolute bottom-4 right-16 animate-ping" style={{ animationDuration: '8s' }} />
               </div>
 
-              {pondFish.map((f, idx) => {
-                const topPercent = 12 + ((idx * 23) % 68);
-                const leftPercent = (f.swimOffset + Math.floor(nowMs / 1000) * 2) % 84;
-                const isFull = f.fullUntil > nowMs;
-                return (
-                  <div
-                    key={f.id}
-                    style={{
-                      top: `${topPercent}%`,
-                      left: `${leftPercent}%`,
-                      transition: 'left 1.2s linear, top 1s ease',
-                    }}
-                    className="absolute flex flex-col items-center group"
-                  >
-                    {f.pendingPetals > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => handleCollectFishPetals(f.id)}
-                        className="mb-1 px-2 py-0.5 rounded-full bg-[var(--accent)] text-[#3a2b30] text-[10px] font-bold shadow-sm animate-bounce cursor-pointer"
-                      >
-                        +{f.pendingPetals} {currencyEmoji}
-                      </button>
-                    )}
+              {ownedFish.length === 0 ? (
+                <div className="h-full flex flex-col items-center justify-center text-center gap-2 text-xs text-[var(--muted)]">
+                  <p className="font-bold text-[var(--text)]">
+                    Mặt hồ đêm đang tĩnh lặng 🐟
+                  </p>
+                  <p>
+                    Hãy ghé Chợ nhỏ hoặc mở Gacha để thả những chú cá đầu tiên xuống hồ nhé!
+                  </p>
+                </div>
+              ) : (
+                ownedFish.map((fish, idx) => {
+                  const readyMs = fish.readyAt ? new Date(fish.readyAt).getTime() : 0;
+                  const isEgg = Boolean(fish.readyAt && !Number.isNaN(readyMs) && readyMs > nowMs);
+                  const topPercent = 12 + ((idx * 23) % 68);
+                  const swimOffset = (idx * 19) % 80;
+                  const leftPercent = isEgg
+                    ? 12 + ((idx * 17) % 74)
+                    : (swimOffset + Math.floor(nowMs / 1000) * 2) % 84;
+                  const care = fishCareMap[fish.id];
+                  const isFull = (care?.fullUntil || 0) > nowMs;
+
+                  return (
                     <div
-                      onClick={() => handleFeedFish(f.id)}
-                      title={`Bấm để cho "${f.item.name}" ăn Hạt cá`}
-                      className="cursor-pointer hover:scale-110 transition-transform"
+                      key={fish.id}
+                      style={{
+                        top: `${topPercent}%`,
+                        left: `${leftPercent}%`,
+                        transition: 'left 1.2s linear, top 1s ease',
+                      }}
+                      className="absolute flex flex-col items-center group"
                     >
-                      <ProceduralItemSvg
-                        item={f.item}
-                        size={f.stage === 'egg' ? 40 : f.stage === 'baby' ? 48 : 62}
-                        fishStage={f.stage}
-                      />
+                      {(care?.pendingPetals || 0) > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => handleCollectFishPetals(fish)}
+                          className="mb-1 px-2 py-0.5 rounded-full bg-[var(--accent)] text-[#3a2b30] text-[10px] font-bold shadow-sm animate-bounce cursor-pointer"
+                        >
+                          +{care?.pendingPetals} {currencyEmoji}
+                        </button>
+                      )}
+                      <div
+                        onClick={() => handleFeedFish(fish)}
+                        title={`Bấm để cho "${fish.name}" ăn`}
+                        className="cursor-pointer hover:scale-110 transition-transform"
+                      >
+                        {renderItem(
+                          'fish',
+                          fish.seed,
+                          fish.rarity,
+                          isEgg ? 'egg' : 'adult',
+                          { size: isEgg ? 44 : 60 }
+                        )}
+                      </div>
+                      <span className="px-2 py-0.5 rounded-full bg-[var(--surface)]/90 border border-[var(--border)] text-[10px] font-bold text-[var(--text)] whitespace-nowrap shadow-2xs">
+                        {fish.name} {isEgg ? '🥚' : isFull ? '💛' : ''}
+                      </span>
                     </div>
-                    <span className="px-2 py-0.5 rounded-full bg-[var(--surface)]/90 border border-[var(--border)] text-[10px] font-bold text-[var(--text)] whitespace-nowrap shadow-2xs">
-                      {f.item.name} {isFull ? '💛' : ''}
-                    </span>
-                  </div>
-                );
-              })}
+                  );
+                })
+              )}
             </div>
 
             {/* Danh sách chi tiết từng chú cá trong hồ */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-              {pondFish.map((f) => {
-                const isFull = f.fullUntil > nowMs;
-                const stageLabel =
-                  f.stage === 'egg'
-                    ? '🥚 Trứng cá'
-                    : f.stage === 'baby'
-                    ? '🐟 Cá con'
-                    : f.stage === 'juvenile'
-                    ? '🐠 Cá nhỡ'
-                    : '👑 Cá trưởng thành';
+            {ownedFish.length > 0 && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                {ownedFish.map((fish) => {
+                  const readyMs = fish.readyAt ? new Date(fish.readyAt).getTime() : 0;
+                  const isEgg = Boolean(fish.readyAt && !Number.isNaN(readyMs) && readyMs > nowMs);
+                  const remainingMs = isEgg ? Math.max(0, readyMs - nowMs) : 0;
+                  const care = fishCareMap[fish.id];
+                  const isFull = (care?.fullUntil || 0) > nowMs;
 
-                return (
-                  <div
-                    key={f.id}
-                    className="p-4 rounded-2xl border border-[var(--border)] bg-[var(--bg)] flex flex-col justify-between gap-3"
-                  >
-                    <div className="flex items-center gap-3">
-                      <div className="w-14 h-14 rounded-2xl bg-[var(--surface)] border border-[var(--border)] flex items-center justify-center shrink-0">
-                        <ProceduralItemSvg
-                          item={f.item}
-                          size={48}
-                          fishStage={f.stage}
-                        />
-                      </div>
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[var(--surface)] border border-[var(--border)]">
-                            {stageLabel}
-                          </span>
-                          <span className="text-[10px] font-bold text-[var(--muted)]">
-                            {RARITY_LABELS[f.item.rarity]}
-                          </span>
+                  return (
+                    <div
+                      key={fish.id}
+                      className="p-4 rounded-2xl border border-[var(--border)] bg-[var(--bg)] flex flex-col justify-between gap-3"
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="w-14 h-14 rounded-2xl bg-[var(--surface)] border border-[var(--border)] flex items-center justify-center shrink-0">
+                          {renderItem(
+                            'fish',
+                            fish.seed,
+                            fish.rarity,
+                            isEgg ? 'egg' : 'adult',
+                            { size: 48 }
+                          )}
                         </div>
-                        <h4 className="font-serif-title text-base font-bold text-[var(--text)] truncate mt-0.5">
-                          {f.item.name}
-                        </h4>
-                        <p className="text-[11px] text-[var(--muted)]">
-                          Độ lớn (XP): {f.xp} ·{' '}
-                          {isFull
-                            ? 'Đang no bụng (Đang tiết Cánh hoa ✨)'
-                            : 'Đang đợi Hạt cá'}
-                        </p>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[var(--surface)] border border-[var(--border)]">
+                              {isEgg ? '🥚 Trứng đang ấp' : '🐟 Cá đang bơi'}
+                            </span>
+                            <span className="text-[10px] font-bold text-[var(--muted)]">
+                              {RARITY_LABELS[fish.rarity]}
+                            </span>
+                          </div>
+                          <h4 className="font-serif-title text-base font-bold text-[var(--text)] truncate mt-0.5">
+                            {fish.name}
+                          </h4>
+                          <p className="text-[11px] text-[var(--muted)]">
+                            {isEgg
+                              ? `Đang lớn, còn ${formatCountdown(remainingMs)}`
+                              : isFull
+                              ? 'Đang no bụng & bơi lội vui vẻ ✨'
+                              : 'Đang bơi chậm trong hồ'}
+                          </p>
+                        </div>
                       </div>
-                    </div>
 
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => handleFeedFish(f.id)}
-                        className="flex-1 py-1.5 rounded-full text-xs font-bold bg-[var(--accent)] text-[#3a2b30] cursor-pointer bouncy-btn"
-                      >
-                        🐟 Cho ăn (-1 Hạt cá)
-                      </button>
-
-                      {f.pendingPetals > 0 && (
+                      <div className="flex items-center gap-2">
                         <button
                           type="button"
-                          onClick={() => handleCollectFishPetals(f.id)}
-                          className="px-3 py-1.5 rounded-full text-xs font-bold border border-[var(--accent)] bg-[var(--surface)] text-[var(--text)] cursor-pointer"
+                          onClick={() => handleFeedFish(fish)}
+                          className="flex-1 py-1.5 rounded-full text-xs font-bold bg-[var(--accent)] text-[#3a2b30] cursor-pointer bouncy-btn"
                         >
-                          Nhận +{f.pendingPetals} {currencyEmoji}
+                          🐟 Cho ăn
                         </button>
-                      )}
+
+                        {(care?.pendingPetals || 0) > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => handleCollectFishPetals(fish)}
+                            className="px-3 py-1.5 rounded-full text-xs font-bold border border-[var(--accent)] bg-[var(--surface)] text-[var(--text)] cursor-pointer"
+                          >
+                            Nhận +{care?.pendingPetals} {currencyEmoji}
+                          </button>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                );
-              })}
-            </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </div>
       )}
 
       {/* =====================================================================
-          KHU 4: PHÒNG TRI KỶ & THÚ CƯNG (KHỚP VIBE TAG CHAR, NUÔI KHÔNG GIỚI HẠN)
+          KHU 4: KHU THÚ CƯNG & PHÒNG TRI KỶ (HIỂN THỊ MỌI MÓN kind = 'pet' TRONG INVENTORY)
          ===================================================================== */}
       {activeZone === 'companion' && (
         <div className="space-y-6">
@@ -2834,7 +3503,6 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                   {activeDialogueText}
                 </blockquote>
 
-                {/* Các nút tương tác theo từng tình huống (chào, trò chuyện, tạm biệt, gắn bó cao) */}
                 <div className="space-y-2.5 pt-1">
                   <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-[var(--muted)]">
                     <span>
@@ -2891,15 +3559,15 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
               {/* Tặng Hoa hoặc Thức uống nhanh trong phòng */}
               <div className="space-y-2.5">
                 <h4 className="text-xs font-bold text-[var(--muted)]">
-                  🎁 Tặng Hoa hoặc Thức uống trong Kho đồ cho {companionChar?.name}:
+                  🎁 Tặng Hoa hoặc Thức uống cho {companionChar?.name}:
                 </h4>
-                {ownedFlowers.length === 0 && ownedDrinks.length === 0 ? (
+                {ownedFlowers.length === 0 && barDrinks.length === 0 ? (
                   <p className="text-xs text-[var(--muted)] italic">
-                    Bạn chưa có Hoa hoặc Thức uống nào trong Kho đồ. Hãy thu hoạch ở Vườn hoa hoặc ghé Quầy thức uống nhé!
+                    Bạn chưa có Hoa hoặc Thức uống nào sẵn sàng. Hãy ghé Chợ nhỏ hoặc mở Gacha nhé!
                   </p>
                 ) : (
                   <div className="flex flex-wrap gap-2">
-                    {[...ownedFlowers, ...ownedDrinks].slice(0, 8).map((gift) => (
+                    {[...ownedFlowers, ...barDrinks].slice(0, 8).map((gift) => (
                       <button
                         key={gift.id}
                         type="button"
@@ -2917,13 +3585,13 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
               </div>
             </div>
 
-            {/* Khu Thú cưng đi lang thang trong phòng & Cho thú ăn */}
+            {/* Khu Thú cưng: hiển thị MỌI món kind = 'pet' trong inventory */}
             <div className="lg:col-span-5 soft-card p-6 space-y-5 flex flex-col justify-between">
               <div className="space-y-3">
                 <div className="flex items-center justify-between flex-wrap gap-2">
                   <h3 className="font-serif-title text-xl font-bold text-[var(--text)] flex items-center gap-2">
                     <PawPrint className="w-5 h-5 text-[var(--accent)]" />
-                    <span>Thú Cưng Trong Phòng ({ownedPets.length})</span>
+                    <span>Khu Thú Cưng ({ownedPets.length})</span>
                   </h3>
 
                   <button
@@ -2936,23 +3604,25 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                 </div>
 
                 <p className="text-xs text-[var(--muted)]">
-                  Mỗi bé thú cưng có dáng vẻ, nhịp bước đi và tiếng kêu theo tính cách riêng. Bạn có thể bấm vào thú cưng để nghe tiếng kêu hoặc cho ăn nhé!
+                  Mọi bé thú cưng trong Kho đồ đều hiện diện tại đây với hình dáng theo seed, tên riêng, độ no và niềm vui.
                 </p>
 
-                {/* Sân nhỏ cho thú cưng đi lang thang theo tính cách */}
+                {/* Sân nhỏ cho thú cưng đi lang thang */}
                 <div className="relative h-48 rounded-2xl border-2 border-dashed border-[var(--border)] bg-[var(--bg)] overflow-hidden p-3">
                   {ownedPets.length === 0 ? (
-                    <div className="h-full flex items-center justify-center text-xs text-[var(--muted)] text-center px-4">
-                      Chưa có bé thú cưng nào trong phòng. Hãy mở Gacha mỗi ngày để đón thú cưng về chăm bẵm cùng người thương nhé!
+                    <div className="h-full flex flex-col items-center justify-center text-xs text-[var(--muted)] text-center px-4 gap-2">
+                      <span>Chưa có bé thú cưng nào trong khu chăm sóc 🐾</span>
+                      <button
+                        type="button"
+                        onClick={() => setActiveZone('market')}
+                        className="px-3.5 py-1.5 rounded-full bg-[var(--accent)] text-[#3a2b30] font-bold text-[11px] cursor-pointer"
+                      >
+                        🛒 Đón thú cưng ở Chợ
+                      </button>
                     </div>
                   ) : (
                     ownedPets.map((pet, idx) => {
                       const behavior = pet.petBehaviorStyle || 'gentle_sway';
-                      // Tốc độ và kiểu di chuyển theo tính cách:
-                      // - calm_slow (lạnh lùng/trầm lặng): đi rất chậm, ít nhảy
-                      // - playful_bouncy (hài hước/tinh nghịch): chạy nhanh, nhún nhảy vui nhộn
-                      // - mystic_float (bí ẩn/kỳ ảo): lướt êm nhẹ nhàng
-                      // - energetic_dash (tsundere/năng động): chạy lon ton
                       const speedDivisor =
                         behavior === 'calm_slow'
                           ? 2800
@@ -2985,7 +3655,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                               ? 5
                               : 3)) %
                         76;
-                      const isFull = (pet.hungerFullUntil || 0) > nowMs;
+                      const pStats = getPetStats(pet.id);
                       const isSpeaking =
                         activePetSpeech?.petId === pet.id ||
                         (stepTick + idx) % 5 === 0;
@@ -3012,9 +3682,9 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                               {pet.petSound}
                             </span>
                           )}
-                          <ProceduralItemSvg item={pet} size={48} />
+                          {renderItem('pet', pet.seed, pet.rarity, 4, { size: 48 })}
                           <span className="px-2 py-0.5 rounded-full bg-[var(--surface)]/95 border border-[var(--border)] text-[10px] font-bold text-[var(--text)] whitespace-nowrap">
-                            {pet.name} {isFull ? '❤️' : '🥣'}
+                            {pet.name} {pStats.fullness >= 70 ? '❤️' : '🥣'}
                           </span>
                         </div>
                       );
@@ -3022,10 +3692,10 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                   )}
                 </div>
 
-                {/* Danh sách thú cưng & ghi chú Vibe/Tính cách (TUYỆT ĐỐI KHÔNG HIỆN TÊN CHAR) */}
-                <div className="space-y-2.5 max-h-64 overflow-y-auto pr-1">
+                {/* Danh sách chi tiết từng bé thú cưng với Độ no, Niềm vui, Cho ăn & Vuốt ve */}
+                <div className="space-y-2.5 max-h-72 overflow-y-auto pr-1">
                   {ownedPets.map((pet) => {
-                    const isFull = (pet.hungerFullUntil || 0) > nowMs;
+                    const pStats = getPetStats(pet.id);
                     const cleanPetNote = sanitizePetVibeNote(
                       pet.vibeReason || pet.description,
                       pet.matchedTag,
@@ -3034,19 +3704,30 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                     return (
                       <div
                         key={pet.id}
-                        className="p-3 rounded-2xl bg-[var(--bg)] border border-[var(--border)] space-y-2 text-xs"
+                        className="p-3 rounded-2xl bg-[var(--bg)] border border-[var(--border)] space-y-2.5 text-xs"
                       >
                         <div className="flex items-center justify-between gap-2">
                           <div className="flex items-center gap-2.5 min-w-0">
-                            <ProceduralItemSvg item={pet} size={38} />
+                            <div className="w-12 h-12 rounded-xl bg-[var(--surface)] border border-[var(--border)] flex items-center justify-center shrink-0">
+                              {renderItem('pet', pet.seed, pet.rarity, 4, {
+                                size: 42,
+                              })}
+                            </div>
                             <div className="min-w-0">
                               <div className="font-bold text-[var(--text)] truncate">
                                 {pet.name}
                               </div>
                               <div className="text-[10px] text-[var(--muted)]">
                                 {pet.petSpecies ? `${pet.petSpecies} · ` : ''}
-                                {RARITY_LABELS[pet.rarity]} ·{' '}
-                                {isFull ? 'Đang no & vui vẻ ❤️' : 'Đang đói bụng'}
+                                {RARITY_LABELS[pet.rarity]}
+                              </div>
+                              <div className="flex items-center gap-2.5 mt-1 text-[10px] font-semibold">
+                                <span className="text-amber-600 dark:text-amber-400">
+                                  🥣 Độ no: {pStats.fullness}%
+                                </span>
+                                <span className="text-rose-500 dark:text-rose-400">
+                                  💗 Niềm vui: {pStats.happiness}%
+                                </span>
                               </div>
                             </div>
                           </div>
@@ -3055,16 +3736,16 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                             <button
                               type="button"
                               onClick={() => handleStrokePet(pet.id)}
-                              className="px-2.5 py-1 rounded-full border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] font-bold text-[10px] cursor-pointer hover:border-[var(--accent)]"
+                              className="px-2.5 py-1.5 rounded-full border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] font-bold text-[10px] cursor-pointer hover:border-[var(--accent)]"
                             >
                               🐾 Vuốt ve
                             </button>
                             <button
                               type="button"
                               onClick={() => handleFeedPet(pet.id)}
-                              className="px-3 py-1 rounded-full bg-[var(--accent)] text-[#3a2b30] font-bold text-[11px] cursor-pointer"
+                              className="px-3 py-1.5 rounded-full bg-[var(--accent)] text-[#3a2b30] font-bold text-[10px] cursor-pointer bouncy-btn"
                             >
-                              Cho ăn (-1)
+                              🍖 Cho ăn
                             </button>
                           </div>
                         </div>
@@ -3081,7 +3762,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
               {/* Bảng tra cứu Vibe Tag -> Thú cưng */}
               <div className="p-3 rounded-2xl bg-[var(--bg)] border border-[var(--border)] text-[11px] text-[var(--muted)] space-y-1">
                 <div className="font-bold text-[var(--text)]">
-                  📖 Một số Vibe Tag & Loài Thú Cưng Tiêu Biểu:
+                  📖 Một số Vibe Tag &amp; Loài Thú Cưng Tiêu Biểu:
                 </div>
                 {effectiveTagPets.slice(0, 5).map((m) => (
                   <div key={m.id}>
@@ -3095,7 +3776,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
       )}
 
       {/* =====================================================================
-          KHU 5: QUẦY THỨC UỐNG (SỐ LOẠI KHÔNG GIỚI HẠN, TÊN RIÊNG, TẶNG CHAR)
+          KHU 5: QUẦY THỨC UỐNG (HIỂN THỊ MỌI MÓN kind = 'drink' TRONG INVENTORY)
          ===================================================================== */}
       {activeZone === 'drinks' && (
         <div className="soft-card p-6 space-y-6">
@@ -3103,42 +3784,54 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
             <div className="space-y-1">
               <h3 className="font-serif-title text-2xl font-bold text-[var(--text)] flex items-center gap-2">
                 <Coffee className="w-5 h-5 text-[var(--accent)]" />
-                <span>Quầy Thức Uống Đêm ({ownedDrinks.length} ly trong bộ sưu tập)</span>
+                <span>Quầy Thức Uống Đêm ({barDrinks.length} ly có sẵn)</span>
               </h3>
               <p className="text-xs text-[var(--muted)]">
-                Mỗi ly thức uống pha ra đều có công thức và tên riêng độc nhất (Americano mật ong, Matcha latte mây...). Dùng để tặng cho {companionChar?.name} hoặc làm điều kiện mở khóa Char.
+                Mọi ly thức uống trong Kho đồ đều được bày tại quầy với màu nước, ống hút và topping vẽ riêng theo seed. Bấm <strong>Tặng cho người thương</strong> để mời {companionChar?.name} thưởng thức!
               </p>
             </div>
 
-            <button
-              type="button"
-              onClick={handleBrewNewDrinkAtBar}
-              className="px-4 py-2.5 rounded-full text-xs font-bold bg-[var(--accent)] text-[#3a2b30] bouncy-btn cursor-pointer inline-flex items-center gap-1.5 shrink-0 shadow-xs"
-            >
-              <Sparkles className="w-4 h-4" />
-              <span>☕ Pha chế / Roll thức uống mới (-10 {currencyEmoji})</span>
-            </button>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => setActiveZone('market')}
+                className="px-4 py-2.5 rounded-full text-xs font-bold border border-[var(--accent)] bg-[var(--surface)] text-[var(--text)] hover:bg-[var(--accent)]/20 cursor-pointer inline-flex items-center gap-1.5"
+              >
+                <Store className="w-4 h-4" />
+                <span>🛒 Mua nước ở Chợ</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleBrewNewDrinkAtBar}
+                className="px-4 py-2.5 rounded-full text-xs font-bold bg-[var(--accent)] text-[#3a2b30] bouncy-btn cursor-pointer inline-flex items-center gap-1.5 shadow-xs"
+              >
+                <Sparkles className="w-4 h-4" />
+                <span>☕ Pha chế ly mới (-10 {currencyEmoji})</span>
+              </button>
+            </div>
           </div>
 
-          {ownedDrinks.length === 0 ? (
+          {barDrinks.length === 0 ? (
             <div className="py-12 text-center space-y-3">
               <p className="text-sm font-bold text-[var(--text)]">
                 Quầy thức uống của bạn đang trống ☕
               </p>
               <p className="text-xs text-[var(--muted)]">
-                Hãy bấm nút Pha chế ở góc trên hoặc mở Gacha mỗi ngày để nhận những ly nước thơm lừng nhé!
+                Hãy mua Thức uống ở Chợ nhỏ, bấm Pha chế ly mới hoặc mở Gacha để bày những ly nước thơm lừng lên quầy nhé!
               </p>
             </div>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-              {ownedDrinks.map((drink) => (
+              {barDrinks.map((drink) => (
                 <div
                   key={drink.id}
                   className="p-4 rounded-2xl border border-[var(--border)] bg-[var(--bg)] flex flex-col justify-between gap-3"
                 >
                   <div className="flex items-center gap-3">
-                    <div className="w-14 h-14 rounded-2xl bg-[var(--surface)] border border-[var(--border)] flex items-center justify-center shrink-0">
-                      <ProceduralItemSvg item={drink} size={48} />
+                    <div className="w-16 h-16 rounded-2xl bg-[var(--surface)] border border-[var(--border)] flex items-center justify-center shrink-0">
+                      {renderItem('drink', drink.seed, drink.rarity, 4, {
+                        size: 54,
+                      })}
                     </div>
                     <div className="min-w-0">
                       <span className="sticker-chip text-[10px] font-bold">
@@ -3159,7 +3852,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                     onClick={() => handleGiftItemToCompanion(drink)}
                     className="w-full py-2 rounded-full text-xs font-bold bg-[var(--accent)] text-[#3a2b30] bouncy-btn cursor-pointer"
                   >
-                    💝 Mời {companionChar?.name} thưởng thức
+                    💝 Tặng cho người thương
                   </button>
                 </div>
               ))}
@@ -3168,50 +3861,426 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
         </div>
       )}
 
-      {/* Hộp quà chúc mừng mua hàng thành công */}
+      {/* Hộp chọn Gieo hạt cho Ô trống trong Vườn hoa */}
+      {plantingModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 backdrop-blur-xs p-4 animate-fade-in"
+          onClick={() => !isPlantingSeed && setPlantingModal(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-lg rounded-3xl border-2 border-[var(--accent)] bg-[var(--surface)] p-6 space-y-4 shadow-2xl max-h-[90vh] flex flex-col"
+          >
+            <div className="flex items-center justify-between border-b border-[var(--border)] pb-3">
+              <div>
+                <h4 className="font-serif-title text-xl font-bold text-[var(--text)] flex items-center gap-2">
+                  <span>🌱 Gieo Hạt Vào Ô Vườn #{plantingModal.slot + 1}</span>
+                </h4>
+                <p className="text-xs text-[var(--muted)] mt-0.5">
+                  Chọn hạt giống có sẵn trong túi hoặc gieo hạt ngẫu nhiên (nở sau 30 phút).
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={isPlantingSeed}
+                onClick={() => setPlantingModal(null)}
+                className="p-1.5 rounded-full text-[var(--muted)] hover:text-[var(--text)] cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Chọn ô trống nếu người chơi bấm "Gieo ngay" từ Kho đồ/Chợ/Gacha */}
+            {emptySlots.length > 0 && (
+              <div className="flex items-center justify-between gap-2 text-xs bg-[var(--bg)] px-3.5 py-2 rounded-2xl border border-[var(--border)]">
+                <span className="font-bold text-[var(--muted)]">
+                  Chọn ô trống để gieo:
+                </span>
+                <select
+                  value={plantingModal.slot}
+                  onChange={(e) =>
+                    setPlantingModal((prev) =>
+                      prev ? { ...prev, slot: Number(e.target.value) } : null
+                    )
+                  }
+                  className="px-3 py-1 rounded-full bg-[var(--surface)] border border-[var(--border)] font-bold text-xs text-[var(--text)] cursor-pointer"
+                >
+                  {emptySlots.map((s) => (
+                    <option key={s} value={s}>
+                      Ô vườn #{s + 1} (Trống)
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {/* Cảnh báo thiếu Xu hoặc lỗi RPC */}
+            {plantingModal.insufficientCoinsDiff && plantingModal.insufficientCoinsDiff > 0 ? (
+              <div className="p-3.5 rounded-2xl border-2 border-rose-400 bg-rose-500/10 text-xs space-y-2">
+                <p className="font-extrabold text-rose-600 dark:text-rose-300">
+                  ⚠️ Chưa đủ {coinCurrencyName}, còn thiếu {plantingModal.insufficientCoinsDiff} {coinCurrencyName}
+                </p>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] text-[var(--muted)]">
+                    Làm nhiệm vụ hằng ngày để nhận thêm {coinCurrencyName} nhé!
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleGoToDailyQuests}
+                    className="px-3 py-1.5 rounded-full bg-[var(--accent)] text-[#3a2b30] font-bold text-[11px] cursor-pointer shrink-0 bouncy-btn"
+                  >
+                    📋 Đi làm nhiệm vụ
+                  </button>
+                </div>
+              </div>
+            ) : plantingModal.errorMsg ? (
+              <div className="p-3 rounded-2xl border border-rose-400 bg-rose-500/10 text-xs font-bold text-rose-600 dark:text-rose-300">
+                ⚠️ {plantingModal.errorMsg}
+              </div>
+            ) : null}
+
+            {/* (a) Danh sách hạt giống trong túi (inventory kind='seed' chưa nằm trong garden_plots) */}
+            <div className="space-y-2 flex-1 overflow-y-auto pr-1 min-h-[140px]">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-bold text-[var(--text)]">
+                  🎒 Hạt giống trong túi ({unplantedSeeds.length} hạt sẵn sàng):
+                </span>
+              </div>
+
+              {unplantedSeeds.length === 0 ? (
+                <div className="p-5 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--bg)]/70 text-center space-y-2.5">
+                  <p className="text-xs font-bold text-[var(--text)]">
+                    Túi của bạn hiện chưa có hạt giống hoa nào chưa gieo 🌱
+                  </p>
+                  <p className="text-[11px] text-[var(--muted)] leading-relaxed">
+                    Bạn có thể ghé <strong>Chợ nhỏ</strong> để mua Hạt giống hoa, mở <strong>Gacha</strong> mỗi ngày, hoặc bấm nút <strong>Gieo hạt ngẫu nhiên</strong> ngay bên dưới nhé!
+                  </p>
+                  <div className="flex items-center justify-center gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPlantingModal(null);
+                        setActiveZone('market');
+                      }}
+                      className="px-3.5 py-1.5 rounded-full text-[11px] font-bold bg-[var(--surface)] border border-[var(--border)] hover:border-[var(--accent)] text-[var(--text)] cursor-pointer"
+                    >
+                      🛒 Đến Chợ nhỏ
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPlantingModal(null);
+                        setActiveZone('gacha_inv');
+                      }}
+                      className="px-3.5 py-1.5 rounded-full text-[11px] font-bold bg-[var(--surface)] border border-[var(--border)] hover:border-[var(--accent)] text-[var(--text)] cursor-pointer"
+                    >
+                      🎁 Mở Gacha
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  {unplantedSeeds.map((seed) => {
+                    const isPreselected =
+                      plantingModal.preselectedSeedId === seed.id;
+                    return (
+                      <div
+                        key={seed.id}
+                        className={`p-3 rounded-2xl border flex items-center justify-between gap-2.5 transition-all ${
+                          isPreselected
+                            ? 'border-2 border-[var(--accent)] bg-[var(--accent)]/15'
+                            : 'border-[var(--border)] bg-[var(--bg)]'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <div className="w-12 h-12 rounded-xl bg-[var(--surface)] border border-[var(--border)] flex items-center justify-center shrink-0">
+                            {renderItem('seed', seed.seed, seed.rarity, 0, {
+                              size: 40,
+                            })}
+                          </div>
+                          <div className="min-w-0">
+                            <p className="text-xs font-bold text-[var(--text)] truncate">
+                              {formatSeedName(seed.name)}
+                            </p>
+                            <span className="text-[10px] font-semibold text-[var(--muted)]">
+                              Độ hiếm: {RARITY_LABELS[seed.rarity]}
+                            </span>
+                          </div>
+                        </div>
+
+                        <button
+                          type="button"
+                          disabled={isPlantingSeed}
+                          onClick={() =>
+                            handlePlantSeedInSlot(plantingModal.slot, seed.id)
+                          }
+                          className="px-3 py-1.5 rounded-full bg-[var(--accent)] text-[#3a2b30] font-extrabold text-[11px] cursor-pointer shrink-0 bouncy-btn disabled:opacity-50"
+                        >
+                          🌱 Gieo
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* (b) Nút "🎲 Gieo hạt ngẫu nhiên (3 Xu)" gọi plant_seed(slot, null) */}
+            <div className="pt-3 border-t border-[var(--border)] space-y-2">
+              <button
+                type="button"
+                disabled={isPlantingSeed}
+                onClick={() => handlePlantSeedInSlot(plantingModal.slot, null)}
+                className="w-full py-3 rounded-full text-xs font-extrabold bg-gradient-to-r from-amber-400 via-amber-300 to-amber-400 text-stone-900 shadow-sm hover:brightness-105 cursor-pointer inline-flex items-center justify-center gap-2 bouncy-btn disabled:opacity-60"
+              >
+                {isPlantingSeed ? (
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                ) : (
+                  <span>🎲</span>
+                )}
+                <span>
+                  {isOwner
+                    ? 'Gieo hạt ngẫu nhiên (Miễn phí - Chủ web)'
+                    : `Gieo hạt ngẫu nhiên (3 ${coinCurrencyName})`}
+                </span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Hộp kết quả sau khi Thu hoạch Hoa thành công */}
+      {harvestResultModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 backdrop-blur-xs p-4 animate-fade-in"
+          onClick={() => setHarvestResultModal(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-md rounded-3xl border-2 border-[var(--accent)] bg-[var(--surface)] p-6 space-y-4 shadow-2xl text-center"
+          >
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--muted)]">
+                🌸 Thu hoạch thành công (Ô #{harvestResultModal.slot + 1})
+              </span>
+              <button
+                type="button"
+                onClick={() => setHarvestResultModal(null)}
+                className="p-1 rounded-full text-[var(--muted)] hover:text-[var(--text)] cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="w-24 h-24 mx-auto rounded-3xl bg-[var(--bg)] border-2 border-[var(--border)] flex items-center justify-center shadow-inner">
+              {renderItem(
+                'flower',
+                harvestResultModal.flowerItem.seed,
+                harvestResultModal.flowerItem.rarity,
+                4,
+                { size: 80 }
+              )}
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-center gap-2">
+                <span className="sticker-chip text-[11px] font-bold">
+                  🌸 Hoa Đã Nở
+                </span>
+                <span className="px-2.5 py-0.5 rounded-full text-[11px] font-extrabold bg-[var(--accent)]/30 text-[var(--text)]">
+                  Độ hiếm: {RARITY_LABELS[harvestResultModal.flowerItem.rarity]}
+                </span>
+              </div>
+
+              <h4 className="font-serif-title text-2xl font-extrabold text-[var(--text)]">
+                {harvestResultModal.flowerItem.name}
+              </h4>
+
+              <p className="text-xs font-bold text-emerald-600 dark:text-emerald-400">
+                Đã cất vào Kho đồ ✨
+              </p>
+              <p className="text-[11px] text-[var(--muted)]">
+                Bông hoa này đã sẵn sàng dùng để mở khóa nhân vật hoặc tặng cho người thương. Ô vườn #{harvestResultModal.slot + 1} đã trống để bạn gieo hạt mới!
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setHarvestResultModal(null);
+                  setInvCategoryFilter('flower');
+                  setActiveZone('gacha_inv');
+                }}
+                className="py-2.5 px-4 rounded-full font-bold text-xs border-2 border-[var(--border)] bg-[var(--bg)] text-[var(--text)] hover:border-[var(--accent)] cursor-pointer"
+              >
+                📦 Xem Kho đồ
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  const slotToReplant = harvestResultModal.slot;
+                  setHarvestResultModal(null);
+                  handleOpenPlantModalForSeed(null, slotToReplant);
+                }}
+                className="py-2.5 px-4 rounded-full font-bold text-xs bg-[var(--accent)] text-[#3a2b30] cursor-pointer shadow-sm bouncy-btn"
+              >
+                🌱 Gieo tiếp vào ô #{harvestResultModal.slot + 1}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Hộp kết quả sau khi mua ở Chợ thành công */}
       {boughtItemModal && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-xs p-4 animate-fade-in"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 backdrop-blur-xs p-4 animate-fade-in"
           onClick={() => setBoughtItemModal(null)}
         >
           <div
             onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-sm rounded-3xl border-2 border-[var(--accent)] bg-[var(--surface)] p-6 space-y-4 shadow-2xl text-center"
+            className="w-full max-w-md rounded-3xl border-2 border-[var(--accent)] bg-[var(--surface)] p-6 space-y-4 shadow-2xl text-center"
           >
-            <div className="w-16 h-16 mx-auto rounded-3xl bg-[var(--accent)]/30 flex items-center justify-center text-3xl animate-bounce">
-              🎁
-            </div>
-            <div className="space-y-1">
+            <div className="flex items-center justify-between">
               <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--muted)]">
-                Hộp quà Chợ nhỏ
+                🎉 Kết quả mua vật phẩm
               </span>
+              <button
+                type="button"
+                onClick={() => setBoughtItemModal(null)}
+                className="p-1 rounded-full text-[var(--muted)] hover:text-[var(--text)] cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Hình SVG riêng của đúng món vừa nhận (vẽ theo seed và độ hiếm) */}
+            <div className="w-24 h-24 mx-auto rounded-3xl bg-[var(--bg)] border-2 border-[var(--border)] flex items-center justify-center shadow-inner">
+              {renderItem(
+                boughtItemModal.item.category,
+                boughtItemModal.item.seed,
+                boughtItemModal.item.rarity,
+                boughtItemModal.item.category === 'seed'
+                  ? 0
+                  : boughtItemModal.item.category === 'flower'
+                  ? 4
+                  : 'adult',
+                { size: 80 }
+              )}
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-center gap-2">
+                <span className="sticker-chip text-[11px] font-bold">
+                  {CATEGORY_LABELS[boughtItemModal.item.category].emoji}{' '}
+                  {CATEGORY_LABELS[boughtItemModal.item.category].name}
+                </span>
+                <span className="px-2.5 py-0.5 rounded-full text-[11px] font-extrabold bg-[var(--accent)]/30 text-[var(--text)]">
+                  Độ hiếm: {RARITY_LABELS[boughtItemModal.item.rarity]}
+                </span>
+              </div>
+
               <h4 className="font-serif-title text-xl font-extrabold text-[var(--text)]">
-                {boughtItemModal.item.item_name}
+                {boughtItemModal.item.category === 'seed' ||
+                boughtItemModal.kind === 'flower'
+                  ? `Bạn nhận được ${formatSeedName(boughtItemModal.item.name)}`
+                  : `Bạn nhận được ${boughtItemModal.item.name}`}
               </h4>
-              <p className="text-xs text-[var(--muted)]">
-                {boughtItemModal.message}
+
+              <p className="text-xs font-bold text-emerald-600 dark:text-emerald-400">
+                Đã cất vào Kho đồ ✨
               </p>
             </div>
 
-            {boughtItemModal.item.ready_at && (
+            {boughtItemModal.item.category === 'seed' ||
+            boughtItemModal.kind === 'flower' ? (
+              <div className="p-3 rounded-2xl bg-[var(--bg)] border border-[var(--border)] text-xs text-[var(--text)] space-y-1">
+                <p className="font-bold flex items-center justify-center gap-1 text-emerald-600 dark:text-emerald-300">
+                  <span>🌱 Hạt giống sẵn sàng đem gieo ở Vườn hoa</span>
+                </p>
+                <p className="text-[11px] text-[var(--muted)]">
+                  Sau khi gieo vào ô vườn, cây sẽ lớn qua 5 giai đoạn và nở thành Hoa sau 30 phút để bạn thu hoạch!
+                </p>
+              </div>
+            ) : boughtItemModal.item.readyAt ? (
               <div className="p-3 rounded-2xl bg-[var(--bg)] border border-[var(--border)] text-xs text-[var(--text)] space-y-1">
                 <p className="font-bold flex items-center justify-center gap-1 text-amber-600 dark:text-amber-300">
                   <Clock className="w-3.5 h-3.5" />
-                  <span>Cần 30 phút lớn khôn trong Kho đồ</span>
+                  <span>Đang phát triển (30 phút để lớn khôn)</span>
                 </p>
                 <p className="text-[11px] text-[var(--muted)]">
-                  Thời gian đếm ngược đang diễn ra trực tiếp trên Kho đồ &amp; Nhân vật.
+                  Bạn có thể ghé chăm sóc ngay hoặc theo dõi đếm ngược trực tiếp trong Kho đồ.
                 </p>
               </div>
-            )}
+            ) : null}
 
-            <button
-              type="button"
-              onClick={() => setBoughtItemModal(null)}
-              className="w-full py-2.5 rounded-full font-bold text-xs bg-[var(--accent)] text-[#3a2b30] cursor-pointer shadow-sm bouncy-btn"
-            >
-              ✨ Cất vào Kho đồ
-            </button>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  const cat = boughtItemModal.item.category;
+                  setBoughtItemModal(null);
+                  setInvCategoryFilter(cat === 'seed' ? 'seed' : 'all');
+                  setActiveZone('gacha_inv');
+                }}
+                className="py-2.5 px-4 rounded-full font-bold text-xs border-2 border-[var(--border)] bg-[var(--bg)] text-[var(--text)] hover:border-[var(--accent)] cursor-pointer"
+              >
+                📦 Xem Kho đồ
+              </button>
+
+              {boughtItemModal.item.category === 'seed' ||
+              boughtItemModal.kind === 'flower' ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const seedId = boughtItemModal.item.id;
+                    setBoughtItemModal(null);
+                    handleOpenPlantModalForSeed(seedId);
+                  }}
+                  className="py-2.5 px-4 rounded-full font-bold text-xs bg-[var(--accent)] text-[#3a2b30] cursor-pointer shadow-sm bouncy-btn"
+                >
+                  🌱 Gieo ngay
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const k = boughtItemModal.item.category;
+                    setBoughtItemModal(null);
+                    if (k === 'fish') setActiveZone('pond');
+                    else if (k === 'pet') setActiveZone('companion');
+                    else setActiveZone('drinks');
+                  }}
+                  className="py-2.5 px-4 rounded-full font-bold text-xs bg-[var(--accent)] text-[#3a2b30] cursor-pointer shadow-sm bouncy-btn"
+                >
+                  {boughtItemModal.item.category === 'fish'
+                    ? '🐟 Đến chăm ngay (Hồ cá)'
+                    : boughtItemModal.item.category === 'pet'
+                    ? '🐾 Đến chăm ngay (Khu thú cưng)'
+                    : '☕ Đến chăm ngay (Quầy thức uống)'}
+                </button>
+              )}
+            </div>
+
+            {(isOwner || coins >= boughtItemModal.buyPrice) && (
+              <button
+                type="button"
+                disabled={Boolean(isBuyingKind)}
+                onClick={() => handleBuyMarketItem(boughtItemModal.kind)}
+                className="w-full py-2 rounded-full text-xs font-bold text-[var(--muted)] hover:text-[var(--text)] border border-dashed border-[var(--border)] hover:border-[var(--accent)] cursor-pointer inline-flex items-center justify-center gap-1.5"
+              >
+                <ShoppingBag className="w-3.5 h-3.5" />
+                <span>
+                  Mua tiếp 1{' '}
+                  {boughtItemModal.kind === 'flower'
+                    ? 'Hạt giống hoa'
+                    : CATEGORY_LABELS[boughtItemModal.kind].name}{' '}
+                  (-{boughtItemModal.buyPrice} {coinCurrencyName})
+                </span>
+              </button>
+            )}
           </div>
         </div>
       )}

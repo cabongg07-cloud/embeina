@@ -17,7 +17,7 @@ import {
 } from './tagCompanionSystem';
 import { getSiteConfig } from './siteSettings';
 
-export type ItemCategory = 'flower' | 'fish' | 'pet' | 'drink';
+export type ItemCategory = 'seed' | 'flower' | 'fish' | 'pet' | 'drink';
 export type ItemRarity = 'common' | 'rare' | 'legendary';
 
 export interface ItemVisualSeed {
@@ -338,11 +338,26 @@ export const RARITY_LABELS: Record<ItemRarity, string> = {
 };
 
 export const CATEGORY_LABELS: Record<ItemCategory, { name: string; emoji: string }> = {
+  seed: { name: 'Hạt giống', emoji: '🌱' },
   flower: { name: 'Hoa', emoji: '🌸' },
   fish: { name: 'Cá', emoji: '🐟' },
   pet: { name: 'Thú cưng', emoji: '🐾' },
   drink: { name: 'Thức uống', emoji: '☕' },
 };
+
+export function formatSeedName(rawName: string): string {
+  const trimmed = (rawName || 'Hoa Nhỏ').trim();
+  if (/^hạt giống/i.test(trimmed)) return trimmed;
+  if (/^hoa\s/i.test(trimmed)) return `Hạt giống ${trimmed}`;
+  return `Hạt giống Hoa ${trimmed}`;
+}
+
+export function formatFlowerNameFromSeed(rawName: string): string {
+  const trimmed = (rawName || 'Hoa Nhỏ').trim();
+  const withoutSeedPrefix = trimmed.replace(/^hạt giống\s+/i, '').trim();
+  if (/^hoa\s/i.test(withoutSeedPrefix)) return withoutSeedPrefix;
+  return `Hoa ${withoutSeedPrefix}`;
+}
 
 /**
  * Tìm loài thú cưng, tính cách, hành vi và ghi chú vibe khớp với Tag của nhân vật đang đồng hành.
@@ -383,7 +398,7 @@ export function generateUniqueGameItem(
 
   while (attempts < 150) {
     attempts++;
-    if (category === 'flower') {
+    if (category === 'flower' || category === 'seed') {
       candidateName = `${pickRandom(FLOWER_PREFIXES)} ${pickRandom(
         FLOWER_ADJECTIVES
       )} ${pickRandom(FLOWER_SUFFIXES)}`;
@@ -422,7 +437,9 @@ export function generateUniqueGameItem(
   const visual = generateVisualFromSeedName(candidateName, rarity);
 
   let description = '';
-  if (category === 'flower') {
+  if (category === 'seed') {
+    description = `Hạt giống mang mầm hoa sắc ${visual.primaryColor}, hãy đem gieo ở Vườn hoa và chờ 30 phút để thu hoạch hoa nở nhé.`;
+  } else if (category === 'flower') {
     description = `Đóa hoa mang sắc ${visual.primaryColor} dịu ngọt, tỏa hương thơm thanh khiết trong khu vườn nhỏ.`;
   } else if (category === 'fish') {
     description = `Chú cá nhỏ bơi lượn êm đềm với chiếc vây óng ánh sắc ${visual.primaryColor}.`;

@@ -53,12 +53,16 @@ export interface SupabaseCharSecretRow {
 export interface SupabaseInventoryRow {
   id: string;
   user_id: string;
-  kind: string;
-  name: string;
+  kind?: string;
+  item_type?: string;
+  name?: string;
+  item_name?: string;
   rarity: string | null;
+  seed?: string | number | null;
+  color?: string | null;
   ready_at: string | null;
   created_at: string;
-  count: number | null;
+  count?: number | null;
 }
 
 export interface SupabasePublicProfileRow {
@@ -75,24 +79,31 @@ const AVATAR_TINTS = [
   '#9cc7ee',
 ];
 
-function hashCode(str: string): number {
-  let h = 0;
+export function hashCode(str: string): number {
+  let h = 2166136261;
   for (let i = 0; i < str.length; i++) {
-    h = (Math.imul(31, h) + str.charCodeAt(i)) | 0;
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
   }
-  return Math.abs(h);
+  return Math.abs(h >>> 0);
 }
 
 /**
- * Tạo visual seed ổn định từ tên & id vật phẩm trên Supabase để hiển thị SVG đa dạng
+ * Tạo visual seed ổn định từ seed, tên & loại vật phẩm trên Supabase để hiển thị SVG đa dạng
  */
 export function buildVisualFromSupabaseItem(
   id: string,
   name: string,
   kind: ItemCategory,
-  rarity: ItemRarity
+  rarity: ItemRarity,
+  rawSeed?: string | number | null
 ): ItemVisualSeed {
-  const seed = hashCode(`${id}_${name}_${kind}`);
+  const effectiveKind = kind === 'seed' ? 'flower' : kind;
+  const seedKey =
+    rawSeed !== undefined && rawSeed !== null && String(rawSeed).trim() !== ''
+      ? `${String(rawSeed)}_${effectiveKind}`
+      : `${name || id}_${effectiveKind}`;
+  const seed = hashCode(seedKey);
   const palettes = [
     ['#f4a3b0', '#fde2e6', '#e07a8c'],
     ['#8fcfbf', '#dcf5ee', '#5ca896'],
@@ -100,15 +111,17 @@ export function buildVisualFromSupabaseItem(
     ['#f2cf7a', '#fbf0d1', '#d9ab43'],
     ['#9cc7ee', '#e1f0fc', '#6aa3d9'],
     ['#f7b299', '#fde8df', '#d98266'],
+    ['#e8a5d3', '#faeaf5', '#bf73a7'],
+    ['#a8d8a0', '#e6f7e3', '#75ad6c'],
   ];
   const pal = palettes[seed % palettes.length];
   return {
     primaryColor: pal[0],
     secondaryColor: pal[1],
     accentColor: pal[2],
-    shapeVariant: seed % 6,
-    patternVariant: (seed >> 3) % 5,
-    petalOrFinCount: 5 + (seed % 6),
+    shapeVariant: (seed >> 2) % 6,
+    patternVariant: (seed >> 5) % 5,
+    petalOrFinCount: 5 + ((seed >> 8) % 6),
     hasSparkle: rarity !== 'common',
   };
 }
@@ -420,69 +433,111 @@ export async function deleteCharOnSupabase(charId: string): Promise<void> {
 
 /**
  * 6. Đọc danh sách vật phẩm từ bảng `inventory` của người dùng hiện tại.
+ * Bảng `inventory` (cột id, kind, name, rarity, seed, ready_at, created_at; kind là flower|fish|pet|drink) là NGUỒN DUY NHẤT.
  */
 export interface SupabaseInventoryItem extends GeneratedGameItem {
+  kind: ItemCategory;
+  seed: string;
   count: number;
   readyAt: string | null;
+}
+
+export function normalizeSupabaseInventoryItem(
+  row: SupabaseInventoryRow | Record<string, unknown>
+): SupabaseInventoryItem {
+  const r = row as Record<string, unknown>;
+  const id = String(r.id || `inv_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`);
+  const rawKind = String(r.kind || r.item_type || 'flower').toLowerCase();
+  const category: ItemCategory =
+    rawKind === 'seed' || rawKind === 'hat_giong' || rawKind === 'hạt giống'
+      ? 'seed'
+      : rawKind === 'fish' || rawKind === 'ca' || rawKind === 'cá'
+      ? 'fish'
+      : rawKind === 'pet' || rawKind === 'thu_cung' || rawKind === 'thú cưng'
+      ? 'pet'
+      : rawKind === 'drink' || rawKind === 'thuc_uong' || rawKind === 'thức uống'
+      ? 'drink'
+      : 'flower';
+
+  const rawRarity = String(r.rarity || 'common').toLowerCase();
+  const rarity: ItemRarity =
+    rawRarity === 'legendary' || rawRarity === 'hiếm' || rawRarity === 'hiem'
+      ? 'legendary'
+      : rawRarity === 'rare' || rawRarity === 'quý' || rawRarity === 'quy'
+      ? 'rare'
+      : 'common';
+
+  const itemName = String(r.name || r.item_name || 'Vật phẩm kỷ niệm');
+  const seedStr =
+    r.seed !== undefined && r.seed !== null && String(r.seed).trim() !== ''
+      ? String(r.seed)
+      : r.color !== undefined && r.color !== null && String(r.color).trim() !== ''
+      ? String(r.color)
+      : `${itemName}_${id}`;
+
+  const count = Math.max(1, Number(r.count) || 1);
+  const readyAt = r.ready_at ? String(r.ready_at) : null;
+  const createdAt = r.created_at ? String(r.created_at) : new Date().toISOString();
+
+  const visual = buildVisualFromSupabaseItem(
+    id,
+    itemName,
+    category,
+    rarity,
+    seedStr
+  );
+
+  return {
+    id,
+    kind: category,
+    category,
+    name: itemName,
+    rarity,
+    seed: seedStr,
+    visual,
+    createdAt,
+    description:
+      category === 'seed'
+        ? 'Hạt giống hoa chờ được gieo ở Vườn hoa, nở sau 30 phút để thu hoạch thành Hoa.'
+        : category === 'flower'
+        ? 'Đóa hoa đã nở trong vườn nhỏ dùng để chăm sóc và mở khóa nhân vật.'
+        : category === 'fish'
+        ? 'Chú cá nhỏ lấp lánh trong hồ dùng để chăm sóc và mở khóa nhân vật.'
+        : category === 'drink'
+        ? 'Ly thức uống thơm dịu tại quầy dùng để tặng người thương hoặc mở khóa nhân vật.'
+        : 'Người bạn thú cưng đáng yêu tại Khu thú cưng dùng để bầu bạn và mở khóa nhân vật.',
+    count,
+    readyAt,
+  };
 }
 
 export async function fetchInventoryFromSupabase(): Promise<
   SupabaseInventoryItem[]
 > {
-  const { data: sessionData } = await supabase.auth.getSession();
+  const { data: sessionData, error: sessionErr } = await supabase.auth.getSession();
+  if (sessionErr) {
+    throw new Error(sessionErr.message || 'Lỗi xác thực phiên đăng nhập khi đọc Kho đồ.');
+  }
   const uid = sessionData.session?.user?.id;
   if (!uid) return [];
 
   const { data, error } = await supabase
     .from('inventory')
-    .select('id, user_id, kind, name, rarity, ready_at, created_at, count')
+    .select('*')
     .eq('user_id', uid)
     .order('created_at', { ascending: false });
 
-  if (error || !Array.isArray(data)) {
+  if (error) {
+    throw new Error(error.message || 'Không thể tải bảng inventory từ Supabase.');
+  }
+
+  if (!Array.isArray(data)) {
     return [];
   }
 
-  return (data as SupabaseInventoryRow[]).map((row) => {
-    const rawKind = String(row.kind || 'flower').toLowerCase();
-    const category: ItemCategory =
-      rawKind === 'fish' ||
-      rawKind === 'flower' ||
-      rawKind === 'drink' ||
-      rawKind === 'pet'
-        ? rawKind
-        : 'flower';
-    const rawRarity = String(row.rarity || 'common').toLowerCase();
-    const rarity: ItemRarity =
-      rawRarity === 'legendary' || rawRarity === 'rare' ? rawRarity : 'common';
-
-    const count = Math.max(1, Number(row.count) || 1);
-    const visual = buildVisualFromSupabaseItem(
-      row.id,
-      row.name || 'Vật phẩm',
-      category,
-      rarity
-    );
-
-    return {
-      id: row.id,
-      name: row.name || 'Vật phẩm kỷ niệm',
-      category,
-      rarity,
-      visual,
-      createdAt: row.created_at || new Date().toISOString(),
-      description:
-        category === 'flower'
-          ? 'Đóa hoa trong vườn nhỏ dùng để mở khóa nhân vật.'
-          : category === 'fish'
-          ? 'Chú cá nhỏ lấp lánh trong hồ dùng để mở khóa nhân vật.'
-          : category === 'drink'
-          ? 'Ly thức uống thơm dịu dùng để mở khóa nhân vật.'
-          : 'Người bạn thú cưng đáng yêu dùng để mở khóa nhân vật.',
-      count,
-      readyAt: row.ready_at || null,
-    };
-  });
+  return data.map((row) =>
+    normalizeSupabaseInventoryItem(row as Record<string, unknown>)
+  );
 }
 
 /**
@@ -502,6 +557,7 @@ export function isInventoryItemReady(
 /**
  * Kiểm tra điều kiện mở khóa Char dựa HOÀN TOÀN trên bảng `inventory` của Supabase
  * (chỉ tính vật phẩm có `ready_at` null hoặc đã qua).
+ * Trả về cả danh sách `selectedItems` chứa đúng các món sẽ dùng để người chơi xác nhận trước khi bấm Mở khóa.
  */
 export function checkSupabaseUnlockRequirements(
   requirements: CharacterUnlockRequirement[],
@@ -509,11 +565,13 @@ export function checkSupabaseUnlockRequirements(
   nowMs = Date.now()
 ): {
   allMet: boolean;
+  selectedItems: SupabaseInventoryItem[];
   details: {
     req: CharacterUnlockRequirement;
     ownedReadyCount: number;
     ownedPendingCount: number;
     isMet: boolean;
+    matchedItemNames: string[];
     hintText: string;
   }[];
 } {
@@ -521,13 +579,15 @@ export function checkSupabaseUnlockRequirements(
   const readyPool = inventoryItems
     .filter((item) => isInventoryItemReady(item, nowMs))
     .map((item) => ({
-      ...item,
-      remaining: Math.max(0, item.count || 1),
+      item,
+      remaining: Math.max(1, item.count || 1),
     }));
 
   const pendingPool = inventoryItems.filter(
     (item) => !isInventoryItemReady(item, nowMs)
   );
+
+  const selectedItems: SupabaseInventoryItem[] = [];
 
   const details = requirements.map((req) => {
     const specific = req.specificItemName?.trim().toLowerCase();
@@ -535,21 +595,26 @@ export function checkSupabaseUnlockRequirements(
     let ownedReadyCount = 0;
     readyPool.forEach((entry) => {
       if (entry.remaining <= 0) return;
-      if (entry.category !== req.category) return;
-      if (specific && entry.name.trim().toLowerCase() !== specific) return;
+      if (entry.item.category !== req.category) return;
+      if (specific && entry.item.name.trim().toLowerCase() !== specific) return;
       ownedReadyCount += entry.remaining;
     });
 
-    // Trừ số lượng đã dùng cho requirement này để các requirement sau không tính trùng
+    // Trừ số lượng đã dùng cho requirement này và ghi nhận đúng tên các món sẽ dùng
     let needed = req.count;
+    const matchedItemNames: string[] = [];
     for (const entry of readyPool) {
       if (needed <= 0) break;
       if (entry.remaining <= 0) continue;
-      if (entry.category !== req.category) continue;
-      if (specific && entry.name.trim().toLowerCase() !== specific) continue;
+      if (entry.item.category !== req.category) continue;
+      if (specific && entry.item.name.trim().toLowerCase() !== specific) continue;
       const take = Math.min(entry.remaining, needed);
       entry.remaining -= take;
       needed -= take;
+      for (let i = 0; i < take; i++) {
+        matchedItemNames.push(entry.item.name);
+        selectedItems.push(entry.item);
+      }
     }
 
     let ownedPendingCount = 0;
@@ -562,7 +627,17 @@ export function checkSupabaseUnlockRequirements(
     const isMet = ownedReadyCount >= req.count;
     let hintText = '';
     if (!isMet) {
-      if (ownedPendingCount > 0) {
+      if (req.category === 'flower') {
+        const ownedSeedsCount = inventoryItems.filter(
+          (it) => it.category === 'seed'
+        ).length;
+        if (ownedSeedsCount > 0) {
+          hintText = `🌱 Bạn đang có ${ownedSeedsCount} hạt giống (hạt giống không tính là Hoa đã nở). Gieo hạt ở Vườn hoa rồi thu hoạch nhé!`;
+        } else {
+          hintText =
+            '🌱 Gieo hạt ở Vườn hoa rồi thu hoạch nhé! (Chỉ tính Hoa đã nở, hạt giống chưa thu hoạch không tính)';
+        }
+      } else if (ownedPendingCount > 0) {
         let minMs: number | null = null;
         pendingPool.forEach((entry) => {
           if (entry.category !== req.category) return;
@@ -594,12 +669,14 @@ export function checkSupabaseUnlockRequirements(
       ownedReadyCount,
       ownedPendingCount,
       isMet,
+      matchedItemNames,
       hintText,
     };
   });
 
   return {
     allMet: details.every((d) => d.isMet),
+    selectedItems,
     details,
   };
 }
@@ -1194,9 +1271,12 @@ export async function updatePersonalPromptOnSupabase(
 export interface DbInventoryRow {
   id: string;
   user_id: string;
+  kind?: string;
   item_type: string;
+  name?: string;
   item_name: string;
   rarity: string | null;
+  seed?: string | number | null;
   color?: string | null;
   ready_at: string | null;
   created_at: string;
@@ -1210,7 +1290,7 @@ export async function fetchMyInventoryFromSupabase(): Promise<DbInventoryRow[]> 
 
   const { data, error } = await supabase
     .from('inventory')
-    .select('id, user_id, kind, name, rarity, ready_at, created_at, count')
+    .select('*')
     .eq('user_id', uid)
     .order('created_at', { ascending: false });
 
@@ -1218,9 +1298,13 @@ export async function fetchMyInventoryFromSupabase(): Promise<DbInventoryRow[]> 
   return (data as SupabaseInventoryRow[]).map((r) => ({
     id: r.id,
     user_id: r.user_id,
-    item_type: r.kind || 'flower',
-    item_name: r.name || 'Vật phẩm',
+    kind: r.kind || r.item_type || 'flower',
+    item_type: r.kind || r.item_type || 'flower',
+    name: r.name || r.item_name || 'Vật phẩm',
+    item_name: r.name || r.item_name || 'Vật phẩm',
     rarity: r.rarity || 'common',
+    seed: r.seed ?? r.color ?? r.name ?? r.id,
+    color: r.color || null,
     ready_at: r.ready_at,
     created_at: r.created_at,
     count: r.count ?? 1,
@@ -1237,40 +1321,45 @@ export async function rollGachaOnSupabase(): Promise<{
   errorCode?: string;
   message: string;
   item?: DbInventoryRow;
+  normalizedItem?: SupabaseInventoryItem;
 }> {
   try {
     const res = await rollDailyGachaViaRpc();
-    const raw = res.rawResult as Record<string, unknown> | null;
-    const latest = res.updatedInventory[0];
+    const rawData = res.rawResult;
+    const rawObj = Array.isArray(rawData)
+      ? (rawData[0] as Record<string, unknown> | undefined)
+      : (rawData as Record<string, unknown> | null);
+
+    let extractedNorm: SupabaseInventoryItem | undefined;
+    if (rawObj && typeof rawObj === 'object') {
+      const candidate =
+        rawObj.item && typeof rawObj.item === 'object'
+          ? (rawObj.item as Record<string, unknown>)
+          : rawObj;
+      if (candidate.id || candidate.name || candidate.item_name || candidate.kind) {
+        extractedNorm = normalizeSupabaseInventoryItem(candidate);
+      }
+    }
+
+    const latest = extractedNorm || res.updatedInventory[0];
     if (latest) {
       return {
         ok: true,
         message: 'Đã nhận quà Gacha thành công!',
+        normalizedItem: latest,
         item: {
           id: latest.id,
           user_id: '',
+          kind: latest.category,
           item_type: latest.category,
+          name: latest.name,
           item_name: latest.name,
           rarity: latest.rarity,
+          seed: latest.seed,
           color: latest.visual.primaryColor,
           ready_at: latest.readyAt,
           created_at: latest.createdAt,
           count: latest.count,
-        },
-      };
-    }
-    if (raw && typeof raw === 'object') {
-      return {
-        ok: true,
-        message: 'Đã nhận quà Gacha thành công!',
-        item: {
-          id: String(raw.id || `gacha_${Date.now()}`),
-          user_id: String(raw.user_id || ''),
-          item_type: String(raw.kind || raw.item_type || 'flower'),
-          item_name: String(raw.name || raw.item_name || 'Hoa Sương Mai Ngọt'),
-          rarity: String(raw.rarity || 'common'),
-          ready_at: raw.ready_at ? String(raw.ready_at) : null,
-          created_at: new Date().toISOString(),
         },
       };
     }
@@ -1313,21 +1402,40 @@ export async function insertCraftedDrinkToInventory(params: {
   item_name: string;
   rarity: string;
   color?: string;
-}): Promise<boolean> {
+}): Promise<DbInventoryRow | null> {
   try {
     const { data: sessionData } = await supabase.auth.getSession();
     const uid = sessionData.session?.user?.id;
-    if (!uid) return false;
-    const { error } = await supabase.from('inventory').insert({
-      user_id: uid,
-      kind: params.item_type || 'drink',
-      name: params.item_name,
-      rarity: params.rarity || 'common',
-      ready_at: null,
-    });
-    return !error;
+    if (!uid) return null;
+    const { data, error } = await supabase
+      .from('inventory')
+      .insert({
+        user_id: uid,
+        kind: params.item_type || 'drink',
+        name: params.item_name,
+        rarity: params.rarity || 'common',
+        ready_at: null,
+      })
+      .select('*')
+      .maybeSingle();
+    if (error || !data) return null;
+    const r = data as SupabaseInventoryRow;
+    return {
+      id: r.id,
+      user_id: r.user_id,
+      kind: r.kind || r.item_type || params.item_type || 'drink',
+      item_type: r.kind || r.item_type || params.item_type || 'drink',
+      name: r.name || r.item_name || params.item_name,
+      item_name: r.name || r.item_name || params.item_name,
+      rarity: r.rarity || params.rarity || 'common',
+      seed: r.seed ?? r.color ?? r.name ?? r.id,
+      color: r.color || params.color || null,
+      ready_at: r.ready_at,
+      created_at: r.created_at,
+      count: r.count ?? 1,
+    };
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -1590,6 +1698,7 @@ export type QuestActionType =
   | 'feed_fish'
   | 'fish_cast'
   | 'gift_drink'
+  | 'gift_flower'
   | 'pet_stroke'
   | 'feed_pet'
   | 'chat_companion'
@@ -2251,6 +2360,7 @@ export async function buyItemViaRpc(
   notLoggedIn?: boolean;
   disabled?: boolean;
   item?: DbInventoryRow;
+  normalizedItem?: SupabaseInventoryItem;
   coins?: number;
   message: string;
 }> {
@@ -2304,47 +2414,79 @@ export async function buyItemViaRpc(
 
     let updatedCoins: number | undefined;
     let createdItem: DbInventoryRow | undefined;
+    let normalizedCreated: SupabaseInventoryItem | undefined;
 
-    if (data && typeof data === 'object') {
-      const obj = data as Record<string, unknown>;
-      if (obj.not_enough_coins) {
+    const rawObj = Array.isArray(data)
+      ? (data[0] as Record<string, unknown> | undefined)
+      : (data as Record<string, unknown> | null);
+
+    if (rawObj && typeof rawObj === 'object') {
+      if (rawObj.not_enough_coins) {
         return {
           ok: false,
           notEnoughCoins: true,
           message: 'Chưa đủ Xu, làm nhiệm vụ để kiếm thêm nhé',
         };
       }
-      if (typeof obj.coins === 'number') updatedCoins = obj.coins;
-      if (obj.item && typeof obj.item === 'object') {
-        const it = obj.item as Record<string, unknown>;
+      if (typeof rawObj.coins === 'number') updatedCoins = rawObj.coins;
+      const itemCandidate =
+        rawObj.item && typeof rawObj.item === 'object'
+          ? (rawObj.item as Record<string, unknown>)
+          : rawObj.name || rawObj.item_name || rawObj.id
+          ? rawObj
+          : undefined;
+
+      if (itemCandidate) {
+        normalizedCreated = normalizeSupabaseInventoryItem({
+          ...itemCandidate,
+          kind:
+            itemCandidate.kind ||
+            itemCandidate.item_type ||
+            (kind === 'flower' ? 'seed' : kind),
+        });
         createdItem = {
-          id: String(it.id || `item_${Date.now()}`),
-          user_id: String(it.user_id || ''),
-          item_type: String(it.kind || it.item_type || kind),
-          item_name: String(it.name || it.item_name || 'Vật phẩm Chợ nhỏ'),
-          rarity: String(it.rarity || 'common'),
-          ready_at: it.ready_at ? String(it.ready_at) : null,
-          created_at: String(it.created_at || new Date().toISOString()),
-          count: Number(it.count) || 1,
-        };
-      } else if (obj.name || obj.item_name || obj.id) {
-        createdItem = {
-          id: String(obj.id || `item_${Date.now()}`),
-          user_id: String(obj.user_id || ''),
-          item_type: String(obj.kind || obj.item_type || kind),
-          item_name: String(obj.name || obj.item_name || 'Vật phẩm Chợ nhỏ'),
-          rarity: String(obj.rarity || 'common'),
-          ready_at: obj.ready_at ? String(obj.ready_at) : null,
-          created_at: String(obj.created_at || new Date().toISOString()),
-          count: Number(obj.count) || 1,
+          id: normalizedCreated.id,
+          user_id: String(itemCandidate.user_id || ''),
+          kind: normalizedCreated.category,
+          item_type: normalizedCreated.category,
+          name: normalizedCreated.name,
+          item_name: normalizedCreated.name,
+          rarity: normalizedCreated.rarity,
+          seed: normalizedCreated.seed,
+          color: normalizedCreated.visual.primaryColor,
+          ready_at: normalizedCreated.readyAt,
+          created_at: normalizedCreated.createdAt,
+          count: normalizedCreated.count,
         };
       }
     }
 
     // Nếu RPC không trả trực tiếp item, ta tải lại kho đồ và lấy item mới nhất
     if (!createdItem) {
-      const inv = await fetchMyInventoryFromSupabase();
-      createdItem = inv[0];
+      const fullInv = await fetchInventoryFromSupabase();
+      const firstMatch =
+        fullInv.find((x) =>
+          kind === 'flower' || kind === 'seed'
+            ? x.category === 'seed' || x.category === 'flower'
+            : x.category === kind
+        ) || fullInv[0];
+      if (firstMatch) {
+        normalizedCreated = firstMatch;
+        createdItem = {
+          id: firstMatch.id,
+          user_id: '',
+          kind: firstMatch.category,
+          item_type: firstMatch.category,
+          name: firstMatch.name,
+          item_name: firstMatch.name,
+          rarity: firstMatch.rarity,
+          seed: firstMatch.seed,
+          color: firstMatch.visual.primaryColor,
+          ready_at: firstMatch.readyAt,
+          created_at: firstMatch.createdAt,
+          count: firstMatch.count,
+        };
+      }
     }
 
     if (updatedCoins === undefined) {
@@ -2355,6 +2497,7 @@ export async function buyItemViaRpc(
       ok: true,
       coins: updatedCoins,
       item: createdItem,
+      normalizedItem: normalizedCreated,
       message: `✨ Chúc mừng bạn đã mua thành công "${createdItem?.item_name || 'Vật phẩm'}"!`,
     };
   } catch (err) {
@@ -2381,6 +2524,7 @@ export async function sellItemViaRpc(
 ): Promise<{
   ok: boolean;
   notLoggedIn?: boolean;
+  errorCode?: string;
   coins?: number;
   message: string;
 }> {
@@ -2399,6 +2543,14 @@ export async function sellItemViaRpc(
     });
 
     if (error) {
+      const rawErr = `${error.message || ''} ${error.details || ''} ${error.hint || ''}`.toLowerCase();
+      if (rawErr.includes('planted')) {
+        return {
+          ok: false,
+          errorCode: 'planted',
+          message: '🌱 Hạt giống này đang được gieo trong Vườn hoa nên không bán được nhé!',
+        };
+      }
       return {
         ok: false,
         message: error.message || 'Không thể bán vật phẩm lúc này.',
@@ -2410,6 +2562,14 @@ export async function sellItemViaRpc(
       updatedCoins = data;
     } else if (data && typeof data === 'object') {
       const obj = data as Record<string, unknown>;
+      const objErr = String(obj.error || obj.reason || '').toLowerCase();
+      if (obj.planted || objErr.includes('planted')) {
+        return {
+          ok: false,
+          errorCode: 'planted',
+          message: '🌱 Hạt giống này đang được gieo trong Vườn hoa nên không bán được nhé!',
+        };
+      }
       if (typeof obj.coins === 'number') updatedCoins = obj.coins;
     }
 
@@ -2423,9 +2583,17 @@ export async function sellItemViaRpc(
       message: '✨ Đã bán vật phẩm và nhận Xu thành công!',
     };
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err || '');
+    if (msg.toLowerCase().includes('planted')) {
+      return {
+        ok: false,
+        errorCode: 'planted',
+        message: '🌱 Hạt giống này đang được gieo trong Vườn hoa nên không bán được nhé!',
+      };
+    }
     return {
       ok: false,
-      message: err instanceof Error ? err.message : 'Có lỗi khi bán vật phẩm.',
+      message: msg || 'Có lỗi khi bán vật phẩm.',
     };
   }
 }
@@ -2617,5 +2785,405 @@ export async function ownerRefillViaRpc(): Promise<{
     return { ok: false };
   }
 }
+
+// ============================================================================
+// 16) HỆ THỐNG VƯỜN HOA MỚI: BẢNG `garden_plots`, CỘT `profiles.plots` & RPCs
+// - Bảng `garden_plots` (slot, seed_id, planted_at; đọc của mình)
+// - Cột `profiles.plots` (số ô vườn, mặc định 10, tối đa 40)
+// - RPC: `plant_seed(p_slot, p_item)`, `harvest_plot(p_slot)`, `buy_plot()`
+// ============================================================================
+
+export interface SupabaseGardenPlotRow {
+  slot: number;
+  seed_id: string;
+  planted_at: string;
+}
+
+export async function fetchGardenPlotsFromSupabase(): Promise<
+  SupabaseGardenPlotRow[]
+> {
+  const { data: sessionData, error: sessionErr } = await supabase.auth.getSession();
+  if (sessionErr) {
+    throw new Error(sessionErr.message || 'Lỗi xác thực khi đọc Vườn hoa.');
+  }
+  const uid = sessionData.session?.user?.id;
+  if (!uid) return [];
+
+  const { data, error } = await supabase
+    .from('garden_plots')
+    .select('*')
+    .order('slot', { ascending: true });
+
+  if (error) {
+    throw new Error(error.message || 'Không thể tải bảng garden_plots từ Supabase.');
+  }
+
+  if (!Array.isArray(data)) return [];
+
+  return (data as Record<string, unknown>[])
+    .filter((row) => {
+      if (row.user_id && String(row.user_id) !== uid) return false;
+      if (row.seed_id === null || row.seed_id === undefined || String(row.seed_id).trim() === '') {
+        return false;
+      }
+      return true;
+    })
+    .map((row) => ({
+      slot: Number(row.slot ?? 0),
+      seed_id: String(row.seed_id),
+      planted_at: row.planted_at ? String(row.planted_at) : new Date().toISOString(),
+    }));
+}
+
+export async function fetchMyProfileGameStatsFromSupabase(): Promise<{
+  coins: number;
+  plots: number;
+}> {
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    const uid = sessionData.session?.user?.id;
+    if (!uid) return { coins: 0, plots: 10 };
+
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('coins, plots')
+      .eq('id', uid)
+      .maybeSingle();
+
+    if (error || !data) {
+      return { coins: 0, plots: 10 };
+    }
+    const row = data as Record<string, unknown>;
+    return {
+      coins: typeof row.coins === 'number' ? row.coins : 0,
+      plots:
+        typeof row.plots === 'number' && row.plots > 0
+          ? Math.min(40, Math.max(10, row.plots))
+          : 10,
+    };
+  } catch {
+    return { coins: 0, plots: 10 };
+  }
+}
+
+export function translateGardenRpcError(rawErrorText: string): {
+  errorCode: string;
+  message: string;
+} {
+  const low = (rawErrorText || '').toLowerCase();
+  if (low.includes('not_bloomed') || low.includes('not bloomed')) {
+    return { errorCode: 'not_bloomed', message: 'Hoa chưa nở nhé' };
+  }
+  if (low.includes('plot_busy') || low.includes('plot busy')) {
+    return {
+      errorCode: 'plot_busy',
+      message: 'Ô vườn này đang có cây trồng rồi, bạn chọn ô trống khác nhé 🌱',
+    };
+  }
+  if (
+    low.includes('not_enough_coins') ||
+    low.includes('insufficient') ||
+    low.includes('chưa đủ xu') ||
+    low.includes('không đủ xu')
+  ) {
+    return {
+      errorCode: 'not_enough_coins',
+      message: 'Chưa đủ Xu, làm nhiệm vụ để kiếm thêm nhé',
+    };
+  }
+  if (low.includes('bad_slot') || low.includes('bad slot')) {
+    return {
+      errorCode: 'bad_slot',
+      message: 'Số thứ tự ô vườn không hợp lệ.',
+    };
+  }
+  if (low.includes('seed_not_found') || low.includes('seed not found')) {
+    return {
+      errorCode: 'seed_not_found',
+      message: 'Không tìm thấy hạt giống này trong Kho đồ.',
+    };
+  }
+  if (low.includes('already_planted') || low.includes('already planted')) {
+    return {
+      errorCode: 'already_planted',
+      message: 'Hạt giống này đang được gieo ở một ô vườn khác rồi nhé 🌱',
+    };
+  }
+  if (low.includes('max_plots') || low.includes('max plots')) {
+    return {
+      errorCode: 'max_plots',
+      message: 'Vườn hoa của bạn đã mở tối đa 40 ô rồi ✨',
+    };
+  }
+  if (low.includes('planted')) {
+    return {
+      errorCode: 'planted',
+      message: 'Hạt giống đang được gieo trong Vườn hoa nên không bán được nhé 🌱',
+    };
+  }
+  if (
+    low.includes('not_logged_in') ||
+    low.includes('unauthenticated') ||
+    low.includes('permission denied')
+  ) {
+    return {
+      errorCode: 'not_logged_in',
+      message: 'Mời bạn đăng nhập để chăm sóc Vườn hoa nhé 🌸',
+    };
+  }
+  return {
+    errorCode: 'unknown',
+    message: rawErrorText || 'Có lỗi xảy ra khi thao tác ở Vườn hoa.',
+  };
+}
+
+/**
+ * Gọi RPC `plant_seed(p_slot, p_item)`
+ * - p_item = item_id của hạt giống trong Kho đồ, hoặc null = gieo hạt NGẪU NHIÊN tốn 3 Xu (Chủ web miễn phí).
+ */
+export async function plantSeedViaRpc(
+  slot: number,
+  itemId: string | null
+): Promise<{
+  ok: boolean;
+  errorCode?: string;
+  notEnoughCoins?: boolean;
+  message: string;
+  rawResult?: unknown;
+}> {
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    if (!sessionData.session?.user?.id) {
+      return {
+        ok: false,
+        errorCode: 'not_logged_in',
+        message: 'Mời bạn đăng nhập để gieo hạt trong Vườn hoa nhé 🌸',
+      };
+    }
+
+    const { data, error } = await supabase.rpc('plant_seed', {
+      p_slot: slot,
+      p_item: itemId,
+    });
+
+    if (error) {
+      const combined = `${error.message || ''} ${error.details || ''} ${error.hint || ''}`;
+      const parsed = translateGardenRpcError(combined);
+      return {
+        ok: false,
+        errorCode: parsed.errorCode,
+        notEnoughCoins: parsed.errorCode === 'not_enough_coins',
+        message: parsed.message,
+      };
+    }
+
+    const rawObj = Array.isArray(data)
+      ? (data[0] as Record<string, unknown> | undefined)
+      : (data as Record<string, unknown> | null);
+
+    if (rawObj && typeof rawObj === 'object') {
+      const errField = String(rawObj.error || rawObj.reason || rawObj.code || '');
+      if (rawObj.ok === false || errField) {
+        const parsed = translateGardenRpcError(errField);
+        if (parsed.errorCode !== 'unknown' || rawObj.ok === false) {
+          return {
+            ok: false,
+            errorCode: parsed.errorCode,
+            notEnoughCoins: parsed.errorCode === 'not_enough_coins',
+            message: parsed.message,
+          };
+        }
+      }
+    }
+
+    return {
+      ok: true,
+      rawResult: data,
+      message: itemId
+        ? `🌱 Đã gieo hạt vào ô #${slot + 1} thành công!`
+        : `🎲 Đã gieo hạt giống ngẫu nhiên vào ô #${slot + 1} thành công!`,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err || '');
+    const parsed = translateGardenRpcError(msg);
+    return {
+      ok: false,
+      errorCode: parsed.errorCode,
+      notEnoughCoins: parsed.errorCode === 'not_enough_coins',
+      message: parsed.message,
+    };
+  }
+}
+
+/**
+ * Gọi RPC `harvest_plot(p_slot)`
+ * - Thu hoạch ô đã nở thành Hoa (kind='flower') trong Kho đồ, xóa ô trong garden_plots.
+ * - Bắt lỗi `not_bloomed` ("Hoa chưa nở nhé").
+ */
+export async function harvestPlotViaRpc(
+  slot: number
+): Promise<{
+  ok: boolean;
+  errorCode?: string;
+  message: string;
+  harvestedItem?: SupabaseInventoryItem;
+  rawResult?: unknown;
+}> {
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    if (!sessionData.session?.user?.id) {
+      return {
+        ok: false,
+        errorCode: 'not_logged_in',
+        message: 'Mời bạn đăng nhập để thu hoạch hoa nhé 🌸',
+      };
+    }
+
+    const { data, error } = await supabase.rpc('harvest_plot', {
+      p_slot: slot,
+    });
+
+    if (error) {
+      const combined = `${error.message || ''} ${error.details || ''} ${error.hint || ''}`;
+      const parsed = translateGardenRpcError(combined);
+      return {
+        ok: false,
+        errorCode: parsed.errorCode,
+        message: parsed.message,
+      };
+    }
+
+    const rawObj = Array.isArray(data)
+      ? (data[0] as Record<string, unknown> | undefined)
+      : (data as Record<string, unknown> | null);
+
+    let harvestedItem: SupabaseInventoryItem | undefined;
+
+    if (rawObj && typeof rawObj === 'object') {
+      const errField = String(rawObj.error || rawObj.reason || rawObj.code || '');
+      if (rawObj.ok === false || errField) {
+        const parsed = translateGardenRpcError(errField);
+        if (parsed.errorCode !== 'unknown' || rawObj.ok === false) {
+          return {
+            ok: false,
+            errorCode: parsed.errorCode,
+            message: parsed.message,
+          };
+        }
+      }
+
+      const candidate =
+        rawObj.item && typeof rawObj.item === 'object'
+          ? (rawObj.item as Record<string, unknown>)
+          : rawObj.flower && typeof rawObj.flower === 'object'
+          ? (rawObj.flower as Record<string, unknown>)
+          : rawObj.name || rawObj.item_name || rawObj.id
+          ? rawObj
+          : undefined;
+
+      if (candidate) {
+        harvestedItem = normalizeSupabaseInventoryItem({
+          ...candidate,
+          kind: 'flower',
+        });
+      }
+    }
+
+    return {
+      ok: true,
+      harvestedItem,
+      rawResult: data,
+      message: '✨ Thu hoạch hoa thành công! Đã cất vào Kho đồ.',
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err || '');
+    const parsed = translateGardenRpcError(msg);
+    return {
+      ok: false,
+      errorCode: parsed.errorCode,
+      message: parsed.message,
+    };
+  }
+}
+
+/**
+ * Gọi RPC `buy_plot()`
+ * - Mua thêm 1 ô vườn với giá = 20 + (số ô hiện tại - 10) * 10 Xu, tối đa 40 ô (Chủ web miễn phí).
+ */
+export async function buyPlotViaRpc(): Promise<{
+  ok: boolean;
+  errorCode?: string;
+  notEnoughCoins?: boolean;
+  plots?: number;
+  coins?: number;
+  message: string;
+}> {
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    if (!sessionData.session?.user?.id) {
+      return {
+        ok: false,
+        errorCode: 'not_logged_in',
+        message: 'Mời bạn đăng nhập để mua thêm ô vườn nhé 🌸',
+      };
+    }
+
+    const { data, error } = await supabase.rpc('buy_plot');
+
+    if (error) {
+      const combined = `${error.message || ''} ${error.details || ''} ${error.hint || ''}`;
+      const parsed = translateGardenRpcError(combined);
+      return {
+        ok: false,
+        errorCode: parsed.errorCode,
+        notEnoughCoins: parsed.errorCode === 'not_enough_coins',
+        message: parsed.message,
+      };
+    }
+
+    const rawObj = Array.isArray(data)
+      ? (data[0] as Record<string, unknown> | undefined)
+      : (data as Record<string, unknown> | null);
+
+    let newPlots: number | undefined;
+    let newCoins: number | undefined;
+
+    if (typeof data === 'number') {
+      newPlots = data;
+    } else if (rawObj && typeof rawObj === 'object') {
+      const errField = String(rawObj.error || rawObj.reason || rawObj.code || '');
+      if (rawObj.ok === false || errField) {
+        const parsed = translateGardenRpcError(errField);
+        if (parsed.errorCode !== 'unknown' || rawObj.ok === false) {
+          return {
+            ok: false,
+            errorCode: parsed.errorCode,
+            notEnoughCoins: parsed.errorCode === 'not_enough_coins',
+            message: parsed.message,
+          };
+        }
+      }
+      if (typeof rawObj.plots === 'number') newPlots = rawObj.plots;
+      if (typeof rawObj.coins === 'number') newCoins = rawObj.coins;
+    }
+
+    return {
+      ok: true,
+      plots: newPlots,
+      coins: newCoins,
+      message: '✨ Đã mua thêm 1 ô vườn mới thành công!',
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err || '');
+    const parsed = translateGardenRpcError(msg);
+    return {
+      ok: false,
+      errorCode: parsed.errorCode,
+      notEnoughCoins: parsed.errorCode === 'not_enough_coins',
+      message: parsed.message,
+    };
+  }
+}
+
 
 

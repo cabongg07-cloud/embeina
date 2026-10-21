@@ -190,7 +190,7 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
   // Kiểm tra trạng thái đủ / thiếu của từng yêu cầu vật phẩm trên bảng inventory (chỉ tính ready_at null hoặc đã qua)
   const requirementStatus = useMemo(() => {
     if (!requiresUnlock) {
-      return { allMet: true, details: [] };
+      return { allMet: true, details: [], selectedItems: [] as SupabaseInventoryItem[] };
     }
     return checkSupabaseUnlockRequirements(
       effectiveRequirements,
@@ -1149,7 +1149,7 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
                 <span>Yêu cầu vật phẩm mở khóa {character.name}</span>
               </span>
               <span className="text-[11px] text-[var(--muted)]">
-                Chỉ tính hoa đã nở / cá đã lớn
+                Chỉ tính hoa đã nở (hạt giống không tính) / cá đã lớn
               </span>
             </div>
 
@@ -1195,24 +1195,62 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
                             : `❌ Còn thiếu (${detail.ownedReadyCount}/${detail.req.count})`}
                         </span>
                       </div>
+                      {detail.matchedItemNames && detail.matchedItemNames.length > 0 && (
+                        <div className="text-[11px] text-emerald-700 dark:text-emerald-300 font-medium pt-1 border-t border-[var(--border)]/40">
+                          Sẽ dùng trong kho: <span className="font-bold">{detail.matchedItemNames.join(', ')}</span>
+                        </div>
+                      )}
                       {!detail.isMet && (
                         <div className="text-[11px] text-[var(--muted)] flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-[var(--border)]/40">
                           <span>{detail.hintText}</span>
                           {onGoToMiniGame && (
-                            <button
-                              type="button"
-                              onClick={() => onGoToMiniGame('market', detail.req.category)}
-                              className="px-2.5 py-1 rounded-full bg-[var(--accent)] text-[#3a2b30] font-bold text-[10px] hover:scale-105 transition-all cursor-pointer inline-flex items-center gap-1 shadow-2xs shrink-0"
-                              title={`Ghé Chợ nhỏ để mua ${catInfo.name}`}
-                            >
-                              <span>🛒 Mua nhanh ở Chợ</span>
-                            </button>
+                            <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                              {detail.req.category === 'flower' && (
+                                <button
+                                  type="button"
+                                  onClick={() => onGoToMiniGame('garden', 'flower')}
+                                  className="px-2.5 py-1 rounded-full bg-emerald-500/20 border border-emerald-400/50 text-emerald-800 dark:text-emerald-200 font-bold text-[10px] hover:scale-105 transition-all cursor-pointer inline-flex items-center gap-1 shadow-2xs shrink-0"
+                                  title="Đến Vườn hoa để gieo hạt và thu hoạch hoa"
+                                >
+                                  <span>🌱 Đến Vườn hoa</span>
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => onGoToMiniGame('market', detail.req.category)}
+                                className="px-2.5 py-1 rounded-full bg-[var(--accent)] text-[#3a2b30] font-bold text-[10px] hover:scale-105 transition-all cursor-pointer inline-flex items-center gap-1 shadow-2xs shrink-0"
+                                title={`Ghé Chợ nhỏ để mua ${detail.req.category === 'flower' ? 'Hạt giống hoa' : catInfo.name}`}
+                              >
+                                <span>🛒 Mua nhanh ở Chợ</span>
+                              </button>
+                            </div>
                           )}
                         </div>
                       )}
                     </div>
                   );
                 })}
+              </div>
+            )}
+
+            {requirementStatus.selectedItems.length > 0 && (
+              <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-400/40 text-[11px] text-[var(--text)]">
+                <p className="font-bold mb-1">
+                  📦 Vật phẩm trong Kho đồ sẽ dùng để mở khóa ({requirementStatus.selectedItems.length} món):
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {requirementStatus.selectedItems.map((it) => {
+                    const catInfo = CATEGORY_LABELS[it.kind] || CATEGORY_LABELS[it.category];
+                    return (
+                      <span
+                        key={it.id}
+                        className="px-2 py-0.5 rounded-full bg-[var(--card)] border border-[var(--border)] font-semibold text-[10px]"
+                      >
+                        {catInfo?.emoji || '✨'} {it.name}
+                      </span>
+                    );
+                  })}
+                </div>
               </div>
             )}
 
@@ -1225,8 +1263,8 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
             <div className="flex items-center justify-between gap-2 pt-1">
               <span className="text-[11px] text-[var(--muted)]">
                 {requirementStatus.allMet
-                  ? '🎉 Bạn đã có đủ vật phẩm sẵn sàng trong Kho đồ!'
-                  : '🌸 Chỉ tính hoa/cá có thời gian ready_at đã hoàn tất trong Kho đồ.'}
+                  ? '🎉 Xác nhận dùng các vật phẩm trên trong Kho đồ để mở khóa nhé!'
+                  : '🌸 Chỉ tính hoa đã nở / cá đã lớn trong Kho đồ.'}
               </span>
               <button
                 type="button"
