@@ -48,12 +48,30 @@ import {
 import {
   TagVoiceProfile,
   TagPetProfile,
+  AddressKeywordRule,
   DEFAULT_TAG_VOICES,
   DEFAULT_TAG_PETS,
+  DEFAULT_ADDRESS_MAP,
 } from './tagCompanionSystem';
 
 export const DEFAULT_GACHA_DAILY_DESC =
-  'Mỗi ngày bạn có 1 lượt mở quà miễn phí (không phạt nếu bỏ lỡ ngày). Quà mở ra ngẫu nhiên 1 trong 4 loại: 🌱 Hạt giống Hoa (đưa về Vườn hoa), 🥚 Trứng Cá (thả vào Hồ cá), 🐾 Thú cưng (chăm bẵm cùng người thương), hoặc ☕ Thức uống (cất vào Quầy thức uống).';
+  'Mỗi ngày bạn có 1 lượt mở quà miễn phí (làm mới lúc 7 giờ sáng). Quà mở ra ngẫu nhiên 1 trong 4 loại: 🌱 Hạt giống Hoa (đưa về Vườn hoa), 🥚 Trứng Cá (thả vào Hồ cá), 🐾 Thú cưng (chăm bẵm cùng người thương), hoặc ☕ Thức uống (cất vào Quầy thức uống).';
+
+export interface MarketTextsConfig {
+  seed: string;
+  drink: string;
+  fish: string;
+  pet: string;
+  plot: string;
+}
+
+export const DEFAULT_MARKET_TEXTS: MarketTextsConfig = {
+  seed: 'Mua hạt về chăm hoa nở nè 🌱',
+  drink: 'Hôm nay uống gì nào? ☕',
+  fish: 'Rước một bé cá về hồ nè 🐟',
+  pet: 'Rước bé thú cưng về nuôi cùng người thương nhé 🐾',
+  plot: 'Mở rộng vườn cho thêm nhiều hoa nè 🌷',
+};
 
 export type SiteSettingsKey =
   | 'texts'
@@ -64,7 +82,9 @@ export type SiteSettingsKey =
   | 'faqs'
   | 'presets'
   | 'tag_voices'
-  | 'tag_pets';
+  | 'tag_pets'
+  | 'market_texts'
+  | 'address_map';
 
 export interface NavTabConfig extends NavTab {
   visible: boolean;
@@ -104,6 +124,8 @@ export interface SiteConfig {
   customTexts: Record<string, string>;
   tagVoices: TagVoiceProfile[];
   tagPets: TagPetProfile[];
+  marketTexts: MarketTextsConfig;
+  addressMap: AddressKeywordRule[];
 }
 
 export const SITE_CONFIG_KEY = 'site_settings_supabase_v1';
@@ -190,6 +212,8 @@ export function getDefaultSiteConfig(initialMusicUrls: string[] = []): SiteConfi
     },
     tagVoices: JSON.parse(JSON.stringify(DEFAULT_TAG_VOICES)),
     tagPets: JSON.parse(JSON.stringify(DEFAULT_TAG_PETS)),
+    marketTexts: { ...DEFAULT_MARKET_TEXTS },
+    addressMap: JSON.parse(JSON.stringify(DEFAULT_ADDRESS_MAP)),
   };
 }
 
@@ -349,6 +373,8 @@ export async function fetchSiteSettingsFromSupabase(
     const presetsVal = rowMap.get('presets') || {};
     const tagVoicesVal = rowMap.get('tag_voices') || {};
     const tagPetsVal = rowMap.get('tag_pets') || {};
+    const marketTextsVal = rowMap.get('market_texts') || {};
+    const addressMapVal = rowMap.get('address_map') || {};
 
     const rawMusicUrls = Array.isArray(webPlaylistVal.musicUrls)
       ? (webPlaylistVal.musicUrls as string[]).map((u) => String(u).trim()).filter(Boolean)
@@ -483,6 +509,34 @@ export async function fetchSiteSettingsFromSupabase(
         Array.isArray(tagPetsVal.items) && tagPetsVal.items.length > 0
           ? (tagPetsVal.items as TagPetProfile[])
           : defaults.tagPets,
+      marketTexts: {
+        seed:
+          typeof marketTextsVal.seed === 'string' && marketTextsVal.seed.trim()
+            ? marketTextsVal.seed
+            : defaults.marketTexts.seed,
+        drink:
+          typeof marketTextsVal.drink === 'string' && marketTextsVal.drink.trim()
+            ? marketTextsVal.drink
+            : defaults.marketTexts.drink,
+        fish:
+          typeof marketTextsVal.fish === 'string' && marketTextsVal.fish.trim()
+            ? marketTextsVal.fish
+            : defaults.marketTexts.fish,
+        pet:
+          typeof marketTextsVal.pet === 'string' && marketTextsVal.pet.trim()
+            ? marketTextsVal.pet
+            : defaults.marketTexts.pet,
+        plot:
+          typeof marketTextsVal.plot === 'string' && marketTextsVal.plot.trim()
+            ? marketTextsVal.plot
+            : defaults.marketTexts.plot,
+      },
+      addressMap:
+        Array.isArray(addressMapVal.items) && addressMapVal.items.length > 0
+          ? (addressMapVal.items as AddressKeywordRule[])
+          : Array.isArray(addressMapVal.rules) && addressMapVal.rules.length > 0
+          ? (addressMapVal.rules as AddressKeywordRule[])
+          : defaults.addressMap,
     };
 
     currentSiteConfigState = nextConfig;
@@ -599,6 +653,24 @@ function buildSiteSettingsPayloadForKeys(
           items: cfg.tagPets,
         },
       });
+    } else if (key === 'market_texts') {
+      rows.push({
+        key: 'market_texts',
+        value: {
+          seed: cfg.marketTexts.seed,
+          drink: cfg.marketTexts.drink,
+          fish: cfg.marketTexts.fish,
+          pet: cfg.marketTexts.pet,
+          plot: cfg.marketTexts.plot,
+        },
+      });
+    } else if (key === 'address_map') {
+      rows.push({
+        key: 'address_map',
+        value: {
+          items: cfg.addressMap,
+        },
+      });
     }
   });
 
@@ -663,6 +735,14 @@ function detectChangedKeys(patch: Partial<SiteConfig>): SiteSettingsKey[] {
 
   if ('tagPets' in patch) {
     keys.add('tag_pets');
+  }
+
+  if ('marketTexts' in patch) {
+    keys.add('market_texts');
+  }
+
+  if ('addressMap' in patch) {
+    keys.add('address_map');
   }
 
   return Array.from(keys);
@@ -840,6 +920,10 @@ export async function undoSiteSettingsOnSupabase(): Promise<{
     'web_playlist',
     'faqs',
     'presets',
+    'tag_voices',
+    'tag_pets',
+    'market_texts',
+    'address_map',
   ];
   const rows = buildSiteSettingsPayloadForKeys(currentSiteConfigState, allKeys);
 
@@ -899,6 +983,8 @@ export async function resetSiteSettingsToDefaultsOnSupabase(
     'presets',
     'tag_voices',
     'tag_pets',
+    'market_texts',
+    'address_map',
   ];
   const rows = buildSiteSettingsPayloadForKeys(defaults, allKeys);
 

@@ -24,7 +24,9 @@ export interface Creator extends BaseEntity {
 export interface CharacterItem extends BaseEntity {
   id: string;
   name: string;
+  caption?: string; // Cap đầu thẻ (tùy chọn, công khai, lưu trong chars.caption)
   epithet: string;
+  addressTerms?: string; // Cách xưng hô do Chủ web đặt (VD: "anh - em")
   creatorId: string;
   creatorName?: string; // Tên creator hiển thị trực tiếp
   tags: string[];

@@ -36,9 +36,11 @@ export interface SupabaseCharRow {
   id: string;
   creator_id: string;
   name: string;
+  caption?: string | null;
   image_url: string | null;
   tags: string[] | null;
   description: string | null;
+  address_terms?: string | null;
   locked: boolean | null;
   requirements: SupabaseRequirementJson[] | unknown;
   created_at: string;
@@ -63,6 +65,7 @@ export interface SupabaseInventoryRow {
   ready_at: string | null;
   created_at: string;
   count?: number | null;
+  meta?: Record<string, unknown> | null;
 }
 
 export interface SupabasePublicProfileRow {
@@ -179,6 +182,113 @@ export function toSupabaseRequirementsJson(
   }));
 }
 
+interface CharSubtitlesSettingsValue {
+  subtitles: Record<string, string>;
+  notes: Record<string, string>;
+}
+
+async function fetchCharSubtitlesMap(): Promise<CharSubtitlesSettingsValue> {
+  try {
+    const { data, error } = await supabase
+      .from('site_settings')
+      .select('key, value')
+      .eq('key', 'char_subtitles')
+      .maybeSingle();
+
+    if (error || !data || !data.value || typeof data.value !== 'object') {
+      return { subtitles: {}, notes: {} };
+    }
+
+    const val = data.value as Record<string, unknown>;
+    const rawSubtitles =
+      val.subtitles && typeof val.subtitles === 'object'
+        ? (val.subtitles as Record<string, unknown>)
+        : {};
+    const rawNotes =
+      val.notes && typeof val.notes === 'object'
+        ? (val.notes as Record<string, unknown>)
+        : {};
+
+    const subtitles: Record<string, string> = {};
+    Object.entries(rawSubtitles).forEach(([k, v]) => {
+      if (typeof v === 'string') {
+        subtitles[k] = v;
+      }
+    });
+
+    const notes: Record<string, string> = {};
+    Object.entries(rawNotes).forEach(([k, v]) => {
+      if (typeof v === 'string') {
+        notes[k] = v;
+      }
+    });
+
+    return { subtitles, notes };
+  } catch {
+    return { subtitles: {}, notes: {} };
+  }
+}
+
+async function upsertCharSubtitleAndNote(
+  charId: string,
+  patch: { epithet?: string; creatorNote?: string }
+): Promise<void> {
+  try {
+    const current = await fetchCharSubtitlesMap();
+    const nextSubtitles = { ...current.subtitles };
+    const nextNotes = { ...current.notes };
+
+    if (patch.epithet !== undefined) {
+      nextSubtitles[charId] = patch.epithet.trim().slice(0, 80);
+    }
+    if (patch.creatorNote !== undefined) {
+      nextNotes[charId] = patch.creatorNote.trim();
+    }
+
+    await supabase.from('site_settings').upsert(
+      {
+        key: 'char_subtitles',
+        value: {
+          subtitles: nextSubtitles,
+          notes: nextNotes,
+        },
+      },
+      { onConflict: 'key' }
+    );
+  } catch {
+    // Ignore non-fatal metadata sync error
+  }
+}
+
+async function removeCharSubtitleAndNote(charId: string): Promise<void> {
+  try {
+    const current = await fetchCharSubtitlesMap();
+    if (
+      !Object.prototype.hasOwnProperty.call(current.subtitles, charId) &&
+      !Object.prototype.hasOwnProperty.call(current.notes, charId)
+    ) {
+      return;
+    }
+    const nextSubtitles = { ...current.subtitles };
+    const nextNotes = { ...current.notes };
+    delete nextSubtitles[charId];
+    delete nextNotes[charId];
+
+    await supabase.from('site_settings').upsert(
+      {
+        key: 'char_subtitles',
+        value: {
+          subtitles: nextSubtitles,
+          notes: nextNotes,
+        },
+      },
+      { onConflict: 'key' }
+    );
+  } catch {
+    // Ignore
+  }
+}
+
 /**
  * 1. Đọc danh sách Char từ bảng `chars` và tên Creator từ view `public_profiles`.
  * LƯU Ý BẢO MẬT:
@@ -188,14 +298,13 @@ export async function fetchCharsAndCreatorsFromSupabase(): Promise<{
   characters: CharacterItem[];
   creators: Creator[];
 }> {
-  const [charsRes, profilesRes] = await Promise.all([
+  const [charsRes, profilesRes, subtitlesMeta] = await Promise.all([
     supabase
       .from('chars')
-      .select(
-        'id, creator_id, name, image_url, tags, description, locked, requirements, created_at'
-      )
+      .select('*')
       .order('created_at', { ascending: false }),
     supabase.from('public_profiles').select('id, display_name, role'),
+    fetchCharSubtitlesMap(),
   ]);
 
   const profileRows: SupabasePublicProfileRow[] = Array.isArray(profilesRes.data)
@@ -254,16 +363,46 @@ export async function fetchCharsAndCreatorsFromSupabase(): Promise<{
     const creatorName = creatorProf?.display_name || 'Chủ web';
     const reqs = parseSupabaseRequirements(row.requirements);
     const isLocked = Boolean(row.locked);
+    const rawRow = row as unknown as Record<string, unknown>;
+
+    const storedEpithet = Object.prototype.hasOwnProperty.call(
+      subtitlesMeta.subtitles,
+      row.id
+    )
+      ? subtitlesMeta.subtitles[row.id]
+      : typeof rawRow.subtitle === 'string'
+      ? rawRow.subtitle
+      : typeof rawRow.epithet === 'string'
+      ? rawRow.epithet
+      : '';
+
+    const storedNote = Object.prototype.hasOwnProperty.call(
+      subtitlesMeta.notes,
+      row.id
+    )
+      ? subtitlesMeta.notes[row.id]
+      : typeof rawRow.creator_note === 'string'
+      ? rawRow.creator_note
+      : '';
+
+    const storedAddressTerms =
+      typeof rawRow.address_terms === 'string' ? rawRow.address_terms.trim() : '';
+
+    const storedCaption =
+      typeof rawRow.caption === 'string' ? rawRow.caption : '';
 
     return {
       id: row.id,
       name: row.name || 'Nhân vật mới',
+      caption: storedCaption,
       creatorId: row.creator_id,
       creatorName,
       avatarSymbol: (row.name || 'NV').slice(0, 2).toUpperCase(),
       avatarTint: AVATAR_TINTS[idx % AVATAR_TINTS.length],
       imageUrl: row.image_url || undefined,
-      epithet: isLocked ? 'Nhân vật khóa vật phẩm' : 'Bạn đồng hành dịu dàng',
+      epithet: storedEpithet,
+      addressTerms: storedAddressTerms,
+      creatorNote: storedNote || undefined,
       tags: Array.isArray(row.tags) && row.tags.length > 0 ? row.tags : ['Đời thường'],
       description: row.description || '',
       // TUYỆT ĐỐI KHÔNG lưu open_scene và chat_link vào state toàn cục!
@@ -313,12 +452,56 @@ export async function fetchCharSecretOnDemand(
 }
 
 /**
+ * 2b. Tải theo lô `chat_link` và `open_scene` từ bảng `char_secrets` bằng `.in('char_id', [...])`
+ * dành cho Chủ web (mọi char đang hiển thị) và các char đã mở khóa của Người dùng/Khách.
+ */
+export async function fetchCharSecretsBatch(
+  charIds: string[]
+): Promise<Record<string, { chatLink: string; openScene: string }>> {
+  const uniqueIds = Array.from(new Set(charIds.filter(Boolean)));
+  if (uniqueIds.length === 0) return {};
+
+  const { data, error } = await supabase
+    .from('char_secrets')
+    .select('char_id, chat_link, open_scene')
+    .in('char_id', uniqueIds);
+
+  if (error) {
+    throw new Error(
+      error.message || 'Không thể tải Open Scene từ máy chủ.'
+    );
+  }
+
+  const map: Record<string, { chatLink: string; openScene: string }> = {};
+  uniqueIds.forEach((id) => {
+    map[id] = { chatLink: '', openScene: '' };
+  });
+
+  if (Array.isArray(data)) {
+    (data as SupabaseCharSecretRow[]).forEach((row) => {
+      if (row && row.char_id) {
+        map[row.char_id] = {
+          chatLink: row.chat_link || '',
+          openScene: row.open_scene || '',
+        };
+      }
+    });
+  }
+
+  return map;
+}
+
+/**
  * 3. Thêm nhân vật mới (Chỉ Creator/Owner):
  * Ghi vào bảng `chars` và `char_secrets`.
  */
 export async function createCharOnSupabase(params: {
   creatorId: string;
   name: string;
+  caption?: string;
+  epithet?: string;
+  addressTerms?: string;
+  creatorNote?: string;
   imageUrl?: string;
   tags: string[];
   description: string;
@@ -331,19 +514,37 @@ export async function createCharOnSupabase(params: {
     ? toSupabaseRequirementsJson(params.requirements)
     : [];
 
-  const { data: insertedChar, error: charErr } = await supabase
+  const insertPayload: Record<string, unknown> = {
+    creator_id: params.creatorId,
+    name: params.name.trim(),
+    caption:
+      params.caption !== undefined ? params.caption.trim().slice(0, 60) : '',
+    image_url: params.imageUrl?.trim() || null,
+    tags: params.tags.length > 0 ? params.tags : ['Đời thường'],
+    description: params.description.trim(),
+    address_terms:
+      params.addressTerms !== undefined ? params.addressTerms.trim() : '',
+    locked: params.locked,
+    requirements: reqJson,
+  };
+
+  let { data: insertedChar, error: charErr } = await supabase
     .from('chars')
-    .insert({
-      creator_id: params.creatorId,
-      name: params.name.trim(),
-      image_url: params.imageUrl?.trim() || null,
-      tags: params.tags.length > 0 ? params.tags : ['Đời thường'],
-      description: params.description.trim(),
-      locked: params.locked,
-      requirements: reqJson,
-    })
+    .insert(insertPayload)
     .select('*')
     .single();
+
+  if (charErr && String(charErr.message || '').includes('address_terms')) {
+    const fallbackPayload = { ...insertPayload };
+    delete fallbackPayload.address_terms;
+    const retry = await supabase
+      .from('chars')
+      .insert(fallbackPayload)
+      .select('*')
+      .single();
+    insertedChar = retry.data;
+    charErr = retry.error;
+  }
 
   if (charErr || !insertedChar) {
     throw new Error(
@@ -368,6 +569,11 @@ export async function createCharOnSupabase(params: {
     );
   }
 
+  await upsertCharSubtitleAndNote(charRow.id, {
+    epithet: params.epithet !== undefined ? params.epithet.trim().slice(0, 80) : '',
+    creatorNote: params.creatorNote !== undefined ? params.creatorNote.trim() : '',
+  });
+
   return charRow;
 }
 
@@ -384,23 +590,53 @@ export async function updateCharOnSupabase(
   const dbPatch: Record<string, unknown> = {};
 
   if (patch.name !== undefined) dbPatch.name = patch.name.trim();
+  if ('caption' in patch && patch.caption !== undefined) {
+    dbPatch.caption = patch.caption.trim().slice(0, 60);
+  }
   if ('imageUrl' in patch) dbPatch.image_url = patch.imageUrl?.trim() || null;
   if (patch.tags !== undefined) dbPatch.tags = patch.tags;
   if (patch.description !== undefined)
     dbPatch.description = patch.description.trim();
+  if ('addressTerms' in patch) {
+    dbPatch.address_terms = (patch.addressTerms || '').trim();
+  }
   if (patch.isLocked !== undefined) dbPatch.locked = patch.isLocked;
   if (patch.unlockRequirements !== undefined) {
     dbPatch.requirements = toSupabaseRequirementsJson(patch.unlockRequirements);
   }
 
   if (Object.keys(dbPatch).length > 0) {
-    const { error } = await supabase
+    let { error } = await supabase
       .from('chars')
       .update(dbPatch)
       .eq('id', charId);
+    if (error && String(error.message || '').includes('address_terms')) {
+      const fallbackPatch = { ...dbPatch };
+      delete fallbackPatch.address_terms;
+      if (Object.keys(fallbackPatch).length > 0) {
+        const retry = await supabase
+          .from('chars')
+          .update(fallbackPatch)
+          .eq('id', charId);
+        error = retry.error;
+      } else {
+        error = null;
+      }
+    }
     if (error) {
       throw new Error(error.message || 'Lỗi cập nhật bảng chars.');
     }
+  }
+
+  if (patch.epithet !== undefined || 'creatorNote' in patch) {
+    await upsertCharSubtitleAndNote(charId, {
+      epithet:
+        patch.epithet !== undefined
+          ? patch.epithet.trim().slice(0, 80)
+          : undefined,
+      creatorNote:
+        'creatorNote' in patch ? (patch.creatorNote || '').trim() : undefined,
+    });
   }
 
   if (patch.chatLink !== undefined || patch.openSceneSecret !== undefined) {
@@ -425,6 +661,7 @@ export async function updateCharOnSupabase(
  */
 export async function deleteCharOnSupabase(charId: string): Promise<void> {
   await supabase.from('char_secrets').delete().eq('char_id', charId);
+  await removeCharSubtitleAndNote(charId);
   const { error } = await supabase.from('chars').delete().eq('id', charId);
   if (error) {
     throw new Error(error.message || 'Không thể xóa nhân vật này.');
@@ -478,6 +715,10 @@ export function normalizeSupabaseInventoryItem(
   const count = Math.max(1, Number(r.count) || 1);
   const readyAt = r.ready_at ? String(r.ready_at) : null;
   const createdAt = r.created_at ? String(r.created_at) : new Date().toISOString();
+  const meta =
+    r.meta && typeof r.meta === 'object'
+      ? (r.meta as Record<string, unknown>)
+      : null;
 
   const visual = buildVisualFromSupabaseItem(
     id,
@@ -486,6 +727,15 @@ export function normalizeSupabaseInventoryItem(
     rarity,
     seedStr
   );
+
+  if (meta && typeof meta.color === 'string' && meta.color.trim()) {
+    visual.primaryColor = meta.color.trim();
+  }
+
+  const recipeDesc =
+    category === 'drink' && meta && (meta.base || meta.flavor || meta.topping)
+      ? `Công thức: ${[meta.base, meta.flavor, meta.topping].filter(Boolean).join(' · ')}`
+      : null;
 
   return {
     id,
@@ -497,7 +747,8 @@ export function normalizeSupabaseInventoryItem(
     visual,
     createdAt,
     description:
-      category === 'seed'
+      recipeDesc ||
+      (category === 'seed'
         ? 'Hạt giống hoa chờ được gieo ở Vườn hoa, nở sau 30 phút để thu hoạch thành Hoa.'
         : category === 'flower'
         ? 'Đóa hoa đã nở trong vườn nhỏ dùng để chăm sóc và mở khóa nhân vật.'
@@ -505,9 +756,10 @@ export function normalizeSupabaseInventoryItem(
         ? 'Chú cá nhỏ lấp lánh trong hồ dùng để chăm sóc và mở khóa nhân vật.'
         : category === 'drink'
         ? 'Ly thức uống thơm dịu tại quầy dùng để tặng người thương hoặc mở khóa nhân vật.'
-        : 'Người bạn thú cưng đáng yêu tại Khu thú cưng dùng để bầu bạn và mở khóa nhân vật.',
+        : 'Người bạn thú cưng đáng yêu tại Khu thú cưng dùng để bầu bạn và mở khóa nhân vật.'),
     count,
     readyAt,
+    meta,
   };
 }
 
@@ -1960,12 +2212,27 @@ export async function deleteQuestPoolRow(id: string | number): Promise<boolean> 
 }
 
 /**
- * Tính thời điểm nửa đêm kế tiếp (UTC / Ngày mới) làm fallback nếu rpc không trả về resets_at
+ * Tính thời điểm 7:00 SÁNG giờ Việt Nam (UTC+7) kế tiếp làm fallback chuẩn nếu rpc không trả về resets_at
+ * (7:00 AM UTC+7 tương ứng đúng 00:00:00 UTC)
  */
+export function getNextVietnam7AmIso(): string {
+  const nowMs = Date.now();
+  const vnOffsetMs = 7 * 60 * 60 * 1000;
+  const vnNow = new Date(nowMs + vnOffsetMs);
+  const y = vnNow.getUTCFullYear();
+  const m = vnNow.getUTCMonth();
+  const d = vnNow.getUTCDate();
+  const h = vnNow.getUTCHours();
+
+  // Mốc 7:00 sáng theo giờ VN
+  const targetDay = h >= 7 ? d + 1 : d;
+  const targetVnMs = Date.UTC(y, m, targetDay, 7, 0, 0, 0);
+  const targetUtcMs = targetVnMs - vnOffsetMs;
+  return new Date(targetUtcMs).toISOString();
+}
+
 function getNextMidnightIso(): string {
-  const now = new Date();
-  const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0));
-  return next.toISOString();
+  return getNextVietnam7AmIso();
 }
 
 /**
@@ -3180,6 +3447,667 @@ export async function buyPlotViaRpc(): Promise<{
       ok: false,
       errorCode: parsed.errorCode,
       notEnoughCoins: parsed.errorCode === 'not_enough_coins',
+      message: parsed.message,
+    };
+  }
+}
+
+// ============================================================================
+// 17) HỆ THỐNG `daily_status()` (RESET LÚC 7:00 SÁNG GIỜ VIỆT NAM)
+// Trả về: { day, resets_at, checked_in, rolled, casts_used, brews_used }
+// ============================================================================
+
+export interface DailyStatusData {
+  day: string;
+  resets_at: string;
+  checked_in: boolean;
+  rolled: boolean;
+  casts_used: number;
+  brews_used: number;
+}
+
+export async function fetchDailyStatusViaRpc(): Promise<{
+  ok: boolean;
+  status: DailyStatusData;
+  error?: string;
+}> {
+  const fallback: DailyStatusData = {
+    day: new Date().toISOString().slice(0, 10),
+    resets_at: getNextVietnam7AmIso(),
+    checked_in: false,
+    rolled: false,
+    casts_used: 0,
+    brews_used: 0,
+  };
+
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    if (!sessionData.session?.user?.id) {
+      return { ok: false, status: fallback, error: 'not_logged_in' };
+    }
+
+    const { data, error } = await supabase.rpc('daily_status');
+    if (error) {
+      return {
+        ok: false,
+        status: fallback,
+        error: error.message || 'Không thể đọc daily_status từ server.',
+      };
+    }
+
+    const rawObj = Array.isArray(data)
+      ? (data[0] as Record<string, unknown> | undefined)
+      : (data as Record<string, unknown> | null);
+
+    if (!rawObj || typeof rawObj !== 'object') {
+      return { ok: true, status: fallback };
+    }
+
+    return {
+      ok: true,
+      status: {
+        day: typeof rawObj.day === 'string' ? rawObj.day : fallback.day,
+        resets_at:
+          typeof rawObj.resets_at === 'string' && rawObj.resets_at.trim()
+            ? rawObj.resets_at
+            : fallback.resets_at,
+        checked_in: Boolean(rawObj.checked_in),
+        rolled: Boolean(rawObj.rolled),
+        casts_used: Math.max(0, Number(rawObj.casts_used ?? 0)),
+        brews_used: Math.max(0, Number(rawObj.brews_used ?? 0)),
+      },
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      status: fallback,
+      error: err instanceof Error ? err.message : 'Lỗi khi tải daily_status.',
+    };
+  }
+}
+
+// ============================================================================
+// 18) HỆ THỐNG HỒ CÁ MỚI: BẢNG `pond_fish` & RPC `fish_cast`, `fish_catch`, `release_fish`, `take_out_fish`
+// ============================================================================
+
+export interface SupabasePondFishRow {
+  fish_id: string;
+  user_id?: string;
+}
+
+export async function fetchPondFishFromSupabase(): Promise<SupabasePondFishRow[]> {
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    const uid = sessionData.session?.user?.id;
+    if (!uid) return [];
+
+    const { data, error } = await supabase
+      .from('pond_fish')
+      .select('fish_id, user_id')
+      .eq('user_id', uid);
+
+    if (error || !Array.isArray(data)) return [];
+    return (data as Record<string, unknown>[])
+      .filter((r) => r.fish_id)
+      .map((r) => ({
+        fish_id: String(r.fish_id),
+        user_id: r.user_id ? String(r.user_id) : uid,
+      }));
+  } catch {
+    return [];
+  }
+}
+
+export function translatePondAndBrewRpcError(rawErrorText: string): {
+  errorCode: string;
+  message: string;
+} {
+  const low = (rawErrorText || '').toLowerCase();
+  if (
+    low.includes('not_enough_coins') ||
+    low.includes('insufficient') ||
+    low.includes('chưa đủ xu') ||
+    low.includes('không đủ xu')
+  ) {
+    return {
+      errorCode: 'not_enough_coins',
+      message: 'Chưa đủ Xu, bạn ghé làm nhiệm vụ nhỏ để nhận thêm Xu nhé!',
+    };
+  }
+  if (low.includes('session_closed') || low.includes('session closed')) {
+    return {
+      errorCode: 'session_closed',
+      message: 'Phiên câu cá này đã khép lại rồi, bạn thả cần lượt mới nhé 🎣',
+    };
+  }
+  if (low.includes('no_session') || low.includes('no session')) {
+    return {
+      errorCode: 'no_session',
+      message: 'Không tìm thấy phiên câu cá, bạn bấm Thả cần lại nhé 🎣',
+    };
+  }
+  if (low.includes('already_in_pond') || low.includes('already in pond')) {
+    return {
+      errorCode: 'already_in_pond',
+      message: 'Bé cá này đang bơi trong hồ rồi nhé 🐟',
+    };
+  }
+  if (low.includes('fish_not_found') || low.includes('fish not found')) {
+    return {
+      errorCode: 'fish_not_found',
+      message: 'Không tìm thấy bé cá này trong Kho đồ 🐟',
+    };
+  }
+  if (low.includes('too_many_brewing') || low.includes('too many brewing')) {
+    return {
+      errorCode: 'too_many_brewing',
+      message: 'Quầy đang pha tối đa 3 ly cùng lúc rồi, bạn chờ ly hiện tại hoàn tất nhé ☕',
+    };
+  }
+  if (low.includes('not_ready') || low.includes('not ready')) {
+    return {
+      errorCode: 'not_ready',
+      message: 'Thức uống vẫn đang pha, chờ thêm chút xíu nhé ☕',
+    };
+  }
+  if (low.includes('already_collected') || low.includes('already collected')) {
+    return {
+      errorCode: 'already_collected',
+      message: 'Ly thức uống này đã được cất vào Kho đồ và lên kệ rồi ✨',
+    };
+  }
+  return {
+    errorCode: 'unknown',
+    message: rawErrorText || 'Có lỗi xảy ra khi thực hiện thao tác.',
+  };
+}
+
+/**
+ * Gọi RPC `fish_cast()` -> trả { session, cost, casts_used, free_left }
+ */
+export async function fishCastViaRpc(): Promise<{
+  ok: boolean;
+  session?: string;
+  cost?: number;
+  casts_used?: number;
+  free_left?: number;
+  errorCode?: string;
+  notEnoughCoins?: boolean;
+  message: string;
+}> {
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    if (!sessionData.session?.user?.id) {
+      return {
+        ok: false,
+        errorCode: 'not_logged_in',
+        message: 'Mời bạn đăng nhập để thả cần câu cá nhé 🎣',
+      };
+    }
+
+    const { data, error } = await supabase.rpc('fish_cast');
+    if (error) {
+      const combined = `${error.message || ''} ${error.details || ''} ${error.hint || ''}`;
+      const parsed = translatePondAndBrewRpcError(combined);
+      return {
+        ok: false,
+        errorCode: parsed.errorCode,
+        notEnoughCoins: parsed.errorCode === 'not_enough_coins',
+        message: parsed.message,
+      };
+    }
+
+    const rawObj = Array.isArray(data)
+      ? (data[0] as Record<string, unknown> | undefined)
+      : (data as Record<string, unknown> | null);
+
+    if (typeof data === 'string') {
+      return {
+        ok: true,
+        session: data,
+        message: '🎣 Đã thả cần!',
+      };
+    }
+
+    if (rawObj && typeof rawObj === 'object') {
+      const errField = String(rawObj.error || rawObj.reason || rawObj.code || '');
+      if (rawObj.ok === false || errField) {
+        const parsed = translatePondAndBrewRpcError(errField);
+        if (parsed.errorCode !== 'unknown' || rawObj.ok === false) {
+          return {
+            ok: false,
+            errorCode: parsed.errorCode,
+            notEnoughCoins: parsed.errorCode === 'not_enough_coins',
+            message: parsed.message,
+          };
+        }
+      }
+
+      const session = String(rawObj.session || rawObj.session_id || rawObj.id || '');
+      return {
+        ok: true,
+        session,
+        cost: typeof rawObj.cost === 'number' ? rawObj.cost : undefined,
+        casts_used: typeof rawObj.casts_used === 'number' ? rawObj.casts_used : undefined,
+        free_left: typeof rawObj.free_left === 'number' ? rawObj.free_left : undefined,
+        message: '🎣 Đã thả cần!',
+      };
+    }
+
+    return {
+      ok: true,
+      session: '',
+      message: '🎣 Đã thả cần!',
+    };
+  } catch (err) {
+    const parsed = translatePondAndBrewRpcError(
+      err instanceof Error ? err.message : String(err || '')
+    );
+    return {
+      ok: false,
+      errorCode: parsed.errorCode,
+      notEnoughCoins: parsed.errorCode === 'not_enough_coins',
+      message: parsed.message,
+    };
+  }
+}
+
+/**
+ * Gọi RPC `fish_catch(p_session, p_caught)` -> trả { missed: true } hoặc { missed: false, item }
+ */
+export async function fishCatchViaRpc(
+  p_session: string,
+  p_caught: boolean
+): Promise<{
+  ok: boolean;
+  missed: boolean;
+  item?: SupabaseInventoryItem;
+  errorCode?: string;
+  message: string;
+}> {
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    if (!sessionData.session?.user?.id) {
+      return {
+        ok: false,
+        missed: !p_caught,
+        errorCode: 'not_logged_in',
+        message: 'Mời bạn đăng nhập để câu cá nhé 🎣',
+      };
+    }
+
+    const { data, error } = await supabase.rpc('fish_catch', {
+      p_session,
+      p_caught,
+    });
+
+    if (error) {
+      const combined = `${error.message || ''} ${error.details || ''} ${error.hint || ''}`;
+      const parsed = translatePondAndBrewRpcError(combined);
+      return {
+        ok: false,
+        missed: !p_caught,
+        errorCode: parsed.errorCode,
+        message: parsed.message,
+      };
+    }
+
+    const rawObj = Array.isArray(data)
+      ? (data[0] as Record<string, unknown> | undefined)
+      : (data as Record<string, unknown> | null);
+
+    if (!p_caught || (rawObj && rawObj.missed === true)) {
+      return {
+        ok: true,
+        missed: true,
+        message: 'Hụt mất quà rồi, thử lại nhé 🥺',
+      };
+    }
+
+    let caughtItem: SupabaseInventoryItem | undefined;
+    if (rawObj && typeof rawObj === 'object') {
+      const errField = String(rawObj.error || rawObj.reason || rawObj.code || '');
+      if (rawObj.ok === false || errField) {
+        const parsed = translatePondAndBrewRpcError(errField);
+        if (parsed.errorCode !== 'unknown' || rawObj.ok === false) {
+          return {
+            ok: false,
+            missed: true,
+            errorCode: parsed.errorCode,
+            message: parsed.message,
+          };
+        }
+      }
+
+      const candidate =
+        rawObj.item && typeof rawObj.item === 'object'
+          ? (rawObj.item as Record<string, unknown>)
+          : rawObj.name || rawObj.item_name || rawObj.kind || rawObj.id
+          ? rawObj
+          : undefined;
+
+      if (candidate) {
+        caughtItem = normalizeSupabaseInventoryItem(candidate);
+      }
+    }
+
+    return {
+      ok: true,
+      missed: false,
+      item: caughtItem,
+      message: caughtItem
+        ? `🎉 Câu trúng hộp quà! Bạn nhận được ${caughtItem.name}.`
+        : '🎉 Câu trúng hộp quà! Đã cất vào Kho đồ ✨',
+    };
+  } catch (err) {
+    const parsed = translatePondAndBrewRpcError(
+      err instanceof Error ? err.message : String(err || '')
+    );
+    return {
+      ok: false,
+      missed: !p_caught,
+      errorCode: parsed.errorCode,
+      message: parsed.message,
+    };
+  }
+}
+
+/**
+ * Gọi RPC `release_fish(p_item)` để thả cá từ Kho đồ vào Hồ cá
+ */
+export async function releaseFishViaRpc(p_item: string): Promise<{
+  ok: boolean;
+  errorCode?: string;
+  message: string;
+}> {
+  try {
+    const { data, error } = await supabase.rpc('release_fish', { p_item });
+    if (error) {
+      const combined = `${error.message || ''} ${error.details || ''} ${error.hint || ''}`;
+      const parsed = translatePondAndBrewRpcError(combined);
+      return { ok: false, errorCode: parsed.errorCode, message: parsed.message };
+    }
+    const rawObj = Array.isArray(data)
+      ? (data[0] as Record<string, unknown> | undefined)
+      : (data as Record<string, unknown> | null);
+    if (rawObj && typeof rawObj === 'object') {
+      const errField = String(rawObj.error || rawObj.reason || rawObj.code || '');
+      if (rawObj.ok === false || errField) {
+        const parsed = translatePondAndBrewRpcError(errField);
+        if (parsed.errorCode !== 'unknown' || rawObj.ok === false) {
+          return { ok: false, errorCode: parsed.errorCode, message: parsed.message };
+        }
+      }
+    }
+    return { ok: true, message: '🐟 Đã thả bé cá xuống hồ nước mát lành!' };
+  } catch (err) {
+    const parsed = translatePondAndBrewRpcError(
+      err instanceof Error ? err.message : String(err || '')
+    );
+    return { ok: false, errorCode: parsed.errorCode, message: parsed.message };
+  }
+}
+
+/**
+ * Gọi RPC `take_out_fish(p_item)` để nhấc cá từ Hồ cá về lại Kho đồ
+ */
+export async function takeOutFishViaRpc(p_item: string): Promise<{
+  ok: boolean;
+  errorCode?: string;
+  message: string;
+}> {
+  try {
+    const { data, error } = await supabase.rpc('take_out_fish', { p_item });
+    if (error) {
+      const combined = `${error.message || ''} ${error.details || ''} ${error.hint || ''}`;
+      const parsed = translatePondAndBrewRpcError(combined);
+      return { ok: false, errorCode: parsed.errorCode, message: parsed.message };
+    }
+    const rawObj = Array.isArray(data)
+      ? (data[0] as Record<string, unknown> | undefined)
+      : (data as Record<string, unknown> | null);
+    if (rawObj && typeof rawObj === 'object') {
+      const errField = String(rawObj.error || rawObj.reason || rawObj.code || '');
+      if (rawObj.ok === false || errField) {
+        const parsed = translatePondAndBrewRpcError(errField);
+        if (parsed.errorCode !== 'unknown' || rawObj.ok === false) {
+          return { ok: false, errorCode: parsed.errorCode, message: parsed.message };
+        }
+      }
+    }
+    return { ok: true, message: '🫧 Đã nhấc bé cá lên cất vào Kho đồ!' };
+  } catch (err) {
+    const parsed = translatePondAndBrewRpcError(
+      err instanceof Error ? err.message : String(err || '')
+    );
+    return { ok: false, errorCode: parsed.errorCode, message: parsed.message };
+  }
+}
+
+// ============================================================================
+// 19) HỆ THỐNG QUẦY PHA CHẾ: BẢNG `brew_orders` & RPC `brew_start`, `brew_collect`
+// ============================================================================
+
+export interface BrewRecipePayload {
+  base: string;
+  flavor: string;
+  topping: string;
+  color: string;
+}
+
+export interface SupabaseBrewOrderRow {
+  id: string;
+  recipe: BrewRecipePayload;
+  ready_at: string;
+  collected: boolean;
+}
+
+export async function fetchBrewOrdersFromSupabase(): Promise<SupabaseBrewOrderRow[]> {
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    const uid = sessionData.session?.user?.id;
+    if (!uid) return [];
+
+    const { data, error } = await supabase
+      .from('brew_orders')
+      .select('id, recipe, ready_at, collected, user_id')
+      .eq('collected', false)
+      .order('ready_at', { ascending: true });
+
+    if (error || !Array.isArray(data)) return [];
+    return (data as Record<string, unknown>[])
+      .filter((r) => !r.user_id || String(r.user_id) === uid)
+      .map((r) => {
+        const rawRecipe =
+          r.recipe && typeof r.recipe === 'object'
+            ? (r.recipe as Record<string, unknown>)
+            : {};
+        return {
+          id: String(r.id),
+          recipe: {
+            base: String(rawRecipe.base || 'Trà sữa'),
+            flavor: String(rawRecipe.flavor || 'Dịu ngọt'),
+            topping: String(rawRecipe.topping || 'Kem mây'),
+            color: String(rawRecipe.color || '#f4a3b0'),
+          },
+          ready_at: r.ready_at ? String(r.ready_at) : new Date().toISOString(),
+          collected: Boolean(r.collected),
+        };
+      });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Gọi RPC `brew_start(p_recipe jsonb)` -> trả { order, ready_at, cost, brews_used }
+ */
+export async function brewStartViaRpc(
+  p_recipe: BrewRecipePayload
+): Promise<{
+  ok: boolean;
+  order?: string;
+  ready_at?: string;
+  cost?: number;
+  brews_used?: number;
+  errorCode?: string;
+  notEnoughCoins?: boolean;
+  message: string;
+}> {
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    if (!sessionData.session?.user?.id) {
+      return {
+        ok: false,
+        errorCode: 'not_logged_in',
+        message: 'Mời bạn đăng nhập để pha chế thức uống nhé ☕',
+      };
+    }
+
+    const { data, error } = await supabase.rpc('brew_start', {
+      p_recipe,
+    });
+
+    if (error) {
+      const combined = `${error.message || ''} ${error.details || ''} ${error.hint || ''}`;
+      const parsed = translatePondAndBrewRpcError(combined);
+      return {
+        ok: false,
+        errorCode: parsed.errorCode,
+        notEnoughCoins: parsed.errorCode === 'not_enough_coins',
+        message: parsed.message,
+      };
+    }
+
+    const rawObj = Array.isArray(data)
+      ? (data[0] as Record<string, unknown> | undefined)
+      : (data as Record<string, unknown> | null);
+
+    if (rawObj && typeof rawObj === 'object') {
+      const errField = String(rawObj.error || rawObj.reason || rawObj.code || '');
+      if (rawObj.ok === false || errField) {
+        const parsed = translatePondAndBrewRpcError(errField);
+        if (parsed.errorCode !== 'unknown' || rawObj.ok === false) {
+          return {
+            ok: false,
+            errorCode: parsed.errorCode,
+            notEnoughCoins: parsed.errorCode === 'not_enough_coins',
+            message: parsed.message,
+          };
+        }
+      }
+
+      const orderId = String(rawObj.order || rawObj.order_id || rawObj.id || '');
+      const readyAt =
+        typeof rawObj.ready_at === 'string'
+          ? rawObj.ready_at
+          : new Date(Date.now() + 60_000).toISOString();
+
+      return {
+        ok: true,
+        order: orderId,
+        ready_at: readyAt,
+        cost: typeof rawObj.cost === 'number' ? rawObj.cost : undefined,
+        brews_used: typeof rawObj.brews_used === 'number' ? rawObj.brews_used : undefined,
+        message: '☕ Đã bắt đầu pha chế! Chờ 1 phút để thức uống hoàn tất nhé.',
+      };
+    }
+
+    return {
+      ok: true,
+      ready_at: new Date(Date.now() + 60_000).toISOString(),
+      message: '☕ Đã bắt đầu pha chế!',
+    };
+  } catch (err) {
+    const parsed = translatePondAndBrewRpcError(
+      err instanceof Error ? err.message : String(err || '')
+    );
+    return {
+      ok: false,
+      errorCode: parsed.errorCode,
+      notEnoughCoins: parsed.errorCode === 'not_enough_coins',
+      message: parsed.message,
+    };
+  }
+}
+
+/**
+ * Gọi RPC `brew_collect(p_order)` -> trả item vừa pha xong (kind='drink', meta=recipe)
+ */
+export async function brewCollectViaRpc(p_order: string): Promise<{
+  ok: boolean;
+  item?: SupabaseInventoryItem;
+  errorCode?: string;
+  message: string;
+}> {
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    if (!sessionData.session?.user?.id) {
+      return {
+        ok: false,
+        errorCode: 'not_logged_in',
+        message: 'Mời bạn đăng nhập để nhận ly thức uống nhé ☕',
+      };
+    }
+
+    const { data, error } = await supabase.rpc('brew_collect', { p_order });
+    if (error) {
+      const combined = `${error.message || ''} ${error.details || ''} ${error.hint || ''}`;
+      const parsed = translatePondAndBrewRpcError(combined);
+      return {
+        ok: false,
+        errorCode: parsed.errorCode,
+        message: parsed.message,
+      };
+    }
+
+    const rawObj = Array.isArray(data)
+      ? (data[0] as Record<string, unknown> | undefined)
+      : (data as Record<string, unknown> | null);
+
+    let drinkItem: SupabaseInventoryItem | undefined;
+    if (rawObj && typeof rawObj === 'object') {
+      const errField = String(rawObj.error || rawObj.reason || rawObj.code || '');
+      if (rawObj.ok === false || errField) {
+        const parsed = translatePondAndBrewRpcError(errField);
+        if (parsed.errorCode !== 'unknown' || rawObj.ok === false) {
+          return {
+            ok: false,
+            errorCode: parsed.errorCode,
+            message: parsed.message,
+          };
+        }
+      }
+
+      const candidate =
+        rawObj.item && typeof rawObj.item === 'object'
+          ? (rawObj.item as Record<string, unknown>)
+          : rawObj.drink && typeof rawObj.drink === 'object'
+          ? (rawObj.drink as Record<string, unknown>)
+          : rawObj.name || rawObj.item_name || rawObj.id
+          ? rawObj
+          : undefined;
+
+      if (candidate) {
+        drinkItem = normalizeSupabaseInventoryItem({
+          ...candidate,
+          kind: 'drink',
+        });
+      }
+    }
+
+    return {
+      ok: true,
+      item: drinkItem,
+      message: 'Đã cất vào Kho đồ và treo lên kệ ✨',
+    };
+  } catch (err) {
+    const parsed = translatePondAndBrewRpcError(
+      err instanceof Error ? err.message : String(err || '')
+    );
+    return {
+      ok: false,
+      errorCode: parsed.errorCode,
       message: parsed.message,
     };
   }

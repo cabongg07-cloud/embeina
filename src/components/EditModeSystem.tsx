@@ -50,6 +50,8 @@ import {
   SiteConfig,
   NavTabConfig,
   DEFAULT_GACHA_DAILY_DESC,
+  DEFAULT_MARKET_TEXTS,
+  MarketTextsConfig,
 } from '../services/siteSettings';
 import {
   TagVoiceProfile,
@@ -59,7 +61,11 @@ import {
   DEFAULT_TAG_VOICES,
   DEFAULT_TAG_PETS,
   sanitizePetVibeNote,
+  AddressKeywordRule,
+  DEFAULT_ADDRESS_MAP,
+  resolveAddress,
 } from '../services/tagCompanionSystem';
+import { CharacterItem } from '../data/sampleData';
 import { ThemeConfig, ColorMode } from '../constants/themes';
 
 interface EditModeSystemProps {
@@ -81,6 +87,7 @@ interface EditModeSystemProps {
   onCloseGuideModal: () => void;
   onOpenGuideModal: () => void;
   onNotify: (msg: string) => void;
+  characters?: CharacterItem[];
 }
 
 export const EditModeSystem: React.FC<EditModeSystemProps> = ({
@@ -102,6 +109,7 @@ export const EditModeSystem: React.FC<EditModeSystemProps> = ({
   onCloseGuideModal,
   onOpenGuideModal,
   onNotify,
+  characters = [],
 }) => {
   const [confirmResetOpen, setConfirmResetOpen] = useState(false);
   const [newMp3Url, setNewMp3Url] = useState('');
@@ -161,6 +169,21 @@ export const EditModeSystem: React.FC<EditModeSystemProps> = ({
   const [newQuestAction, setNewQuestAction] = useState<QuestActionType>('water');
   const [newQuestTarget, setNewQuestTarget] = useState<number>(1);
   const [newQuestReward, setNewQuestReward] = useState<number>(5);
+
+  // 8. Quản lý Xưng hô và giọng nói (address_map)
+  const addressMapList: AddressKeywordRule[] =
+    Array.isArray(siteConfig.addressMap) && siteConfig.addressMap.length > 0
+      ? siteConfig.addressMap
+      : DEFAULT_ADDRESS_MAP;
+  const [newRuleKeywords, setNewRuleKeywords] = useState('');
+  const [newRuleSelf, setNewRuleSelf] = useState('anh');
+  const [newRuleUser, setNewRuleUser] = useState('em');
+  const [newRuleNote, setNewRuleNote] = useState('');
+
+  const marketTexts: MarketTextsConfig = {
+    ...DEFAULT_MARKET_TEXTS,
+    ...(siteConfig.marketTexts || {}),
+  };
 
   const flashMarketFeedback = (msg: string) => {
     setMarketFeedbackMsg(msg);
@@ -2093,6 +2116,67 @@ export const EditModeSystem: React.FC<EditModeSystemProps> = ({
                   </div>
                 </div>
 
+                {/* 7.1b. Lời chào thân mật từng nhóm hàng ở Chợ nhỏ (market_texts trong site_settings) */}
+                <div className="space-y-3 p-4 rounded-2xl border border-[var(--border)] bg-[var(--bg)]">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <h4 className="font-bold text-xs text-[var(--text)] flex items-center gap-1.5">
+                        <span>💬 Lời nhắn thân mật từng nhóm hàng ở Chợ nhỏ (market_texts)</span>
+                      </h4>
+                      <p className="text-[10px] text-[var(--muted)] mt-0.5">
+                        Mỗi nhóm hàng hiển thị lời chào riêng biệt. Tự động lưu vào <code>site_settings</code> (key <code>market_texts</code>).
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onUpdateSiteConfig(
+                          { marketTexts: { ...DEFAULT_MARKET_TEXTS } },
+                          'Khôi phục lời chào Chợ nhỏ mặc định'
+                        );
+                        flashMarketFeedback('Đã khôi phục lời chào Chợ nhỏ mặc định!');
+                      }}
+                      className="px-2.5 py-1 rounded-lg border border-[var(--border)] bg-[var(--surface)] text-[10px] font-semibold text-[var(--muted)] hover:text-[var(--text)] cursor-pointer"
+                    >
+                      Khôi phục mặc định
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
+                    {(
+                      [
+                        { key: 'seed', label: '🌱 Hạt giống', placeholder: DEFAULT_MARKET_TEXTS.seed },
+                        { key: 'drink', label: '☕ Thức uống', placeholder: DEFAULT_MARKET_TEXTS.drink },
+                        { key: 'fish', label: '🐟 Cá', placeholder: DEFAULT_MARKET_TEXTS.fish },
+                        { key: 'pet', label: '🐾 Thú cưng', placeholder: DEFAULT_MARKET_TEXTS.pet },
+                        { key: 'plot', label: '🌷 Ô vườn', placeholder: DEFAULT_MARKET_TEXTS.plot },
+                      ] as const
+                    ).map((field) => (
+                      <div key={field.key} className="space-y-1">
+                        <label className="block text-[11px] font-bold text-[var(--text)]">
+                          {field.label}
+                        </label>
+                        <input
+                          type="text"
+                          value={marketTexts[field.key] || ''}
+                          onChange={(e) => {
+                            const nextTexts: MarketTextsConfig = {
+                              ...marketTexts,
+                              [field.key]: e.target.value,
+                            };
+                            onUpdateSiteConfig(
+                              { marketTexts: nextTexts },
+                              `Đổi lời chào ${field.label}`
+                            );
+                          }}
+                          placeholder={field.placeholder}
+                          className="w-full px-2.5 py-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] text-xs text-[var(--text)]"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
                 {/* 7.2. Kho nhiệm vụ nhận Xu (quest_pool) */}
                 <div className="space-y-3 p-4 rounded-2xl border border-[var(--border)] bg-[var(--bg)]">
                   <div className="flex items-center justify-between">
@@ -2364,6 +2448,275 @@ export const EditModeSystem: React.FC<EditModeSystemProps> = ({
                       </button>
                     </div>
                   </form>
+                </div>
+              </section>
+
+              {/* Mục 8: Xưng hô và giọng nói (address_map trong site_settings) */}
+              <section className="space-y-4 pt-4 border-t border-[var(--border)]">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h3 className="font-serif-title text-lg font-bold text-[var(--text)] flex items-center gap-1.5">
+                      <span>🗣️ 8. Xưng hô và giọng nói</span>
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-[var(--accent)]/25 text-[var(--text)] border border-[var(--border)]">
+                        address_map
+                      </span>
+                    </h3>
+                    <p className="text-[11px] text-[var(--muted)]">
+                      Xem cặp xưng hô <code>(xưng - gọi)</code> đang dùng của từng nhân vật và tùy chỉnh bảng từ khóa xưng hô theo danh xưng/tag.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onUpdateSiteConfig(
+                        { addressMap: DEFAULT_ADDRESS_MAP },
+                        'Khôi phục bảng xưng hô mặc định'
+                      );
+                      flashTagCompanionSaved('Đã khôi phục bảng từ khóa xưng hô mặc định!');
+                    }}
+                    className="px-2.5 py-1.5 rounded-xl border border-[var(--border)] bg-[var(--bg)] text-[11px] font-semibold text-[var(--muted)] hover:text-[var(--text)] cursor-pointer inline-flex items-center gap-1"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    <span>Khôi phục bảng mặc định</span>
+                  </button>
+                </div>
+
+                {/* 8.1. Bảng xem nhanh cặp xưng hô đang dùng của từng char */}
+                <div className="space-y-2.5 p-4 rounded-2xl border border-[var(--border)] bg-[var(--bg)]">
+                  <div className="flex items-center justify-between">
+                    <h4 className="font-bold text-xs text-[var(--text)]">
+                      👥 Cặp xưng hô đang áp dụng của từng nhân vật ({characters.length})
+                    </h4>
+                    <span className="text-[10px] text-[var(--muted)]">
+                      Ưu tiên: Cách xưng hô riêng → Open Scene → Danh xưng & Tag → mình - bạn
+                    </span>
+                  </div>
+
+                  {characters.length === 0 ? (
+                    <p className="text-[11px] text-[var(--muted)] italic py-2">
+                      Chưa có nhân vật nào trong danh sách.
+                    </p>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-60 overflow-y-auto pr-1">
+                      {characters.map((ch) => {
+                        const resolved = resolveAddress(ch, {
+                          addressMap: addressMapList,
+                        });
+                        const sourceLabelMap: Record<string, string> = {
+                          address_terms: 'Ghi riêng trên thẻ',
+                          open_scene: 'Đoán từ Open Scene',
+                          epithet_tags: 'Từ Danh xưng / Tag',
+                          default: 'Mặc định thân thiện',
+                        };
+                        return (
+                          <div
+                            key={ch.id}
+                            className="p-2.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] flex items-center justify-between gap-2 text-xs"
+                          >
+                            <div className="min-w-0">
+                              <div className="font-bold text-[var(--text)] truncate">
+                                {ch.name}
+                              </div>
+                              <div className="text-[10px] text-[var(--muted)] truncate">
+                                {ch.subtitle ? `${ch.subtitle} · ` : ''}
+                                {sourceLabelMap[resolved.source] || resolved.source}
+                              </div>
+                            </div>
+                            <span className="px-2.5 py-1 rounded-full bg-[var(--accent)]/25 border border-[var(--border)] font-bold text-[11px] text-[var(--text)] shrink-0">
+                              {resolved.self} - {resolved.user}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                {/* 8.2. Bảng từ khóa ánh xạ danh xưng & tag -> cặp xưng hô */}
+                <div className="space-y-3 p-4 rounded-2xl border border-[var(--border)] bg-[var(--bg)]">
+                  <div>
+                    <h4 className="font-bold text-xs text-[var(--text)]">
+                      🔑 Bảng từ khóa danh xưng & tag (site_settings: address_map)
+                    </h4>
+                    <p className="text-[10px] text-[var(--muted)] mt-0.5">
+                      Khi nhân vật không điền sẵn ô "Cách xưng hô" và không tìm thấy trong Open Scene, hệ thống dò các từ khóa bên dưới trong Danh xưng và Tag.
+                    </p>
+                  </div>
+
+                  <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+                    {addressMapList.map((rule, idx) => (
+                      <div
+                        key={rule.id || idx}
+                        className="p-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] space-y-2"
+                      >
+                        <div className="flex flex-wrap items-center gap-2 justify-between">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-[10px] text-[var(--muted)] font-bold">
+                              Xưng:
+                            </span>
+                            <input
+                              type="text"
+                              value={rule.self}
+                              onChange={(e) => {
+                                const next = addressMapList.map((r, i) =>
+                                  i === idx ? { ...r, self: e.target.value } : r
+                                );
+                                onUpdateSiteConfig(
+                                  { addressMap: next },
+                                  'Sửa từ xưng trong address_map'
+                                );
+                              }}
+                              className="w-20 px-2 py-1 rounded-lg border border-[var(--border)] bg-[var(--bg)] text-xs font-bold text-[var(--text)] text-center"
+                            />
+                            <span className="text-xs text-[var(--muted)] font-bold">-</span>
+                            <span className="text-[10px] text-[var(--muted)] font-bold">
+                              Gọi:
+                            </span>
+                            <input
+                              type="text"
+                              value={rule.user}
+                              onChange={(e) => {
+                                const next = addressMapList.map((r, i) =>
+                                  i === idx ? { ...r, user: e.target.value } : r
+                                );
+                                onUpdateSiteConfig(
+                                  { addressMap: next },
+                                  'Sửa từ gọi trong address_map'
+                                );
+                              }}
+                              className="w-20 px-2 py-1 rounded-lg border border-[var(--border)] bg-[var(--bg)] text-xs font-bold text-[var(--text)] text-center"
+                            />
+                          </div>
+
+                          <div className="flex items-center gap-1.5">
+                            <input
+                              type="text"
+                              value={rule.note || ''}
+                              onChange={(e) => {
+                                const next = addressMapList.map((r, i) =>
+                                  i === idx ? { ...r, note: e.target.value } : r
+                                );
+                                onUpdateSiteConfig(
+                                  { addressMap: next },
+                                  'Sửa ghi chú quy tắc xưng hô'
+                                );
+                              }}
+                              placeholder="Ghi chú nhóm..."
+                              className="w-36 px-2 py-1 rounded-lg border border-[var(--border)] bg-[var(--bg)] text-[11px] text-[var(--muted)]"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const next = addressMapList.filter((_, i) => i !== idx);
+                                onUpdateSiteConfig(
+                                  { addressMap: next },
+                                  'Xóa quy tắc xưng hô'
+                                );
+                              }}
+                              className="p-1 rounded-lg text-rose-500 hover:bg-rose-500/10 cursor-pointer"
+                              title="Xóa dòng này"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+
+                        <div>
+                          <label className="block text-[10px] text-[var(--muted)] mb-0.5">
+                            Từ khóa nhận diện (phân cách bằng dấu phẩy):
+                          </label>
+                          <input
+                            type="text"
+                            value={rule.keywords.join(', ')}
+                            onChange={(e) => {
+                              const kw = e.target.value
+                                .split(',')
+                                .map((s) => s.trim())
+                                .filter(Boolean);
+                              const next = addressMapList.map((r, i) =>
+                                i === idx ? { ...r, keywords: kw } : r
+                              );
+                              onUpdateSiteConfig(
+                                { addressMap: next },
+                                'Cập nhật từ khóa xưng hô'
+                              );
+                            }}
+                            className="w-full px-2.5 py-1.5 rounded-lg border border-[var(--border)] bg-[var(--bg)] text-xs text-[var(--text)]"
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Thêm quy tắc xưng hô mới */}
+                  <div className="pt-3 border-t border-[var(--border)]/60 space-y-2">
+                    <div className="text-[11px] font-bold text-[var(--text)]">
+                      ➕ Thêm quy tắc từ khóa xưng hô mới:
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                      <input
+                        type="text"
+                        value={newRuleKeywords}
+                        onChange={(e) => setNewRuleKeywords(e.target.value)}
+                        placeholder="Từ khóa (VD: tiền bối, học trưởng)"
+                        className="sm:col-span-2 px-2.5 py-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] text-xs text-[var(--text)]"
+                      />
+                      <input
+                        type="text"
+                        value={newRuleNote}
+                        onChange={(e) => setNewRuleNote(e.target.value)}
+                        placeholder="Ghi chú (tùy chọn)"
+                        className="px-2.5 py-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface)] text-xs text-[var(--text)]"
+                      />
+                    </div>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5 text-xs">
+                        <span className="text-[10px] text-[var(--muted)] font-bold">Xưng:</span>
+                        <input
+                          type="text"
+                          value={newRuleSelf}
+                          onChange={(e) => setNewRuleSelf(e.target.value)}
+                          className="w-20 px-2 py-1 rounded-lg border border-[var(--border)] bg-[var(--surface)] text-xs font-bold text-[var(--text)] text-center"
+                        />
+                        <span className="text-[var(--muted)]">-</span>
+                        <span className="text-[10px] text-[var(--muted)] font-bold">Gọi:</span>
+                        <input
+                          type="text"
+                          value={newRuleUser}
+                          onChange={(e) => setNewRuleUser(e.target.value)}
+                          className="w-20 px-2 py-1 rounded-lg border border-[var(--border)] bg-[var(--surface)] text-xs font-bold text-[var(--text)] text-center"
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        disabled={!newRuleKeywords.trim() || !newRuleSelf.trim() || !newRuleUser.trim()}
+                        onClick={() => {
+                          const kw = newRuleKeywords
+                            .split(',')
+                            .map((s) => s.trim())
+                            .filter(Boolean);
+                          if (kw.length === 0) return;
+                          const nextRule: AddressKeywordRule = {
+                            id: `rule_${Date.now()}`,
+                            keywords: kw,
+                            self: newRuleSelf.trim().toLowerCase(),
+                            user: newRuleUser.trim().toLowerCase(),
+                            note: newRuleNote.trim() || undefined,
+                          };
+                          onUpdateSiteConfig(
+                            { addressMap: [...addressMapList, nextRule] },
+                            'Thêm quy tắc xưng hô mới'
+                          );
+                          setNewRuleKeywords('');
+                          setNewRuleNote('');
+                        }}
+                        className="px-3.5 py-1.5 rounded-xl bg-[var(--accent)] text-[#3a2b30] font-bold text-xs cursor-pointer inline-flex items-center gap-1 disabled:opacity-50"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>Thêm quy tắc</span>
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </section>
             </div>

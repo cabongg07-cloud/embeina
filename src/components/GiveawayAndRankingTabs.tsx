@@ -888,9 +888,11 @@ export const RankingTab: React.FC<RankingTabProps> = ({
                     )}
                   </div>
 
-                  <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--muted)]">
-                    <span>{entry.char.epithet}</span>
-                  </div>
+                  {entry.char.epithet && entry.char.epithet.trim() !== '' && (
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--muted)]">
+                      <span>{entry.char.epithet}</span>
+                    </div>
+                  )}
                 </div>
               </div>
 

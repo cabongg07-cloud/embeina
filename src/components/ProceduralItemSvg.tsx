@@ -43,6 +43,7 @@ export interface RenderItemOptions {
   className?: string;
   label?: string;
   petSpeciesHint?: string;
+  meta?: Record<string, unknown> | null;
 }
 
 /**
@@ -794,10 +795,31 @@ export function renderItem(
   }
 
   // ==========================================================================
-  // 4. VẼ LY THỨC UỐNG (DRINK) - Đổi màu đồ uống, ống hút, topping theo seed
+  // 4. VẼ LY THỨC UỐNG (DRINK) - Đổi màu đồ uống, ống hút, topping theo seed & meta công thức
   // ==========================================================================
+  const metaObj =
+    options?.meta && typeof options.meta === 'object' ? options.meta : null;
+  const metaColor =
+    metaObj && typeof metaObj.color === 'string' && metaObj.color.trim()
+      ? metaObj.color.trim()
+      : null;
+  const metaTopping =
+    metaObj && typeof metaObj.topping === 'string'
+      ? metaObj.topping.toLowerCase()
+      : '';
+  const drinkLiquidColor = metaColor || primaryColor;
+
   const strawStyle = (h >> 3) % 3; // 0: ống hút nghiêng phải, 1: ống hút nghiêng trái, 2: ống hút xoắn kẻ
-  const toppingStyle = (h >> 6) % 4; // 0: trân châu, 1: thạch đào vuông, 2: lát cam & lá bạc hà, 3: kem bông cherry
+  let toppingStyle = (h >> 6) % 4; // 0: trân châu, 1: mật ong / thạch đào, 2: hoa khô / lát cam & lá bạc hà, 3: kem mây / kem bông
+  if (metaTopping.includes('trân châu') || metaTopping.includes('tran chau')) {
+    toppingStyle = 0;
+  } else if (metaTopping.includes('mật ong') || metaTopping.includes('mat ong') || metaTopping.includes('thạch')) {
+    toppingStyle = 1;
+  } else if (metaTopping.includes('hoa khô') || metaTopping.includes('hoa kho') || metaTopping.includes('cam')) {
+    toppingStyle = 2;
+  } else if (metaTopping.includes('kem mây') || metaTopping.includes('kem may') || metaTopping.includes('kem')) {
+    toppingStyle = 3;
+  }
 
   return (
     <svg
@@ -823,7 +845,7 @@ export function renderItem(
         <path
           d="M42 18 L34 10 L30 12 L46 44"
           fill="none"
-          stroke={primaryColor}
+          stroke={drinkLiquidColor}
           strokeWidth="4"
           strokeLinecap="round"
         />
@@ -847,11 +869,11 @@ export function renderItem(
         strokeWidth="2"
       />
 
-      {/* Lớp nước thơm bên trong theo màu seed */}
+      {/* Lớp nước thơm bên trong theo màu công thức hoặc seed */}
       <path
         d="M30 45 L34 80 Q50 85 66 80 L70 45 Z"
-        fill={primaryColor}
-        opacity="0.9"
+        fill={drinkLiquidColor}
+        opacity="0.92"
       />
 
       {/* Lớp kem bọt trên miệng ly */}
@@ -865,39 +887,51 @@ export function renderItem(
         strokeWidth="1.6"
       />
 
-      {/* Topping đa dạng theo seed */}
+      {/* Topping đa dạng theo công thức hoặc seed */}
       {toppingStyle === 0 && (
         <g>
-          <circle cx="41" cy="74" r="3.2" fill={accentColor} />
-          <circle cx="50" cy="76" r="3.2" fill={accentColor} />
-          <circle cx="59" cy="73" r="3.2" fill={accentColor} />
-          <circle cx="46" cy="69" r="2.6" fill={accentColor} opacity="0.8" />
+          {/* Trân châu */}
+          <circle cx="41" cy="74" r="3.4" fill="#4a3531" />
+          <circle cx="50" cy="76" r="3.4" fill="#4a3531" />
+          <circle cx="59" cy="73" r="3.4" fill="#4a3531" />
+          <circle cx="46" cy="69" r="2.8" fill="#5e433e" opacity="0.85" />
+          <circle cx="54" cy="70" r="2.6" fill="#5e433e" opacity="0.85" />
         </g>
       )}
       {toppingStyle === 1 && (
         <g>
+          {/* Mật ong óng ánh & thạch đào */}
+          <path
+            d="M35 37 Q42 44 49 37 Q56 45 64 37"
+            fill="none"
+            stroke="#e8a938"
+            strokeWidth="2.4"
+            strokeLinecap="round"
+          />
           <rect x="38" y="69" width="6" height="6" rx="1.5" fill="#fffdf5" opacity="0.9" />
-          <rect x="48" y="71" width="6" height="6" rx="1.5" fill={accentColor} />
+          <rect x="48" y="71" width="6" height="6" rx="1.5" fill="#f2b857" />
           <rect x="56" y="67" width="5.5" height="5.5" rx="1.5" fill="#fffdf5" opacity="0.9" />
         </g>
       )}
       {toppingStyle === 2 && (
         <g>
-          {/* Lát cam vàng & lá bạc hà */}
-          <circle cx="64" cy="33" r="7" fill="#f7b267" stroke="#e08e45" strokeWidth="1.4" />
-          <ellipse cx="40" cy="33" rx="6" ry="3" transform="rotate(-20 40 33)" fill="#7fc479" />
+          {/* Hoa khô / Lát cam vàng & lá bạc hà */}
+          <circle cx="63" cy="33" r="6.5" fill="#f7b267" stroke="#e08e45" strokeWidth="1.4" />
+          <circle cx="46" cy="34" r="3" fill="#f291a3" />
+          <circle cx="52" cy="35" r="2.4" fill="#f5cf67" />
+          <ellipse cx="38" cy="33" rx="6" ry="3" transform="rotate(-20 38 33)" fill="#7fc479" />
         </g>
       )}
       {toppingStyle === 3 && (
         <g>
-          {/* Kem bông và quả cherry đỏ trên miệng ly */}
+          {/* Kem mây bồng bềnh và quả cherry đỏ trên miệng ly */}
           <path
-            d="M36 36 Q50 22 64 36"
+            d="M34 36 Q42 22 50 28 Q58 22 66 36"
             fill="#fffdf9"
             stroke={accentColor}
-            strokeWidth="1.4"
+            strokeWidth="1.5"
           />
-          <circle cx="50" cy="26" r="4" fill="#e05a6d" />
+          <circle cx="50" cy="24" r="3.8" fill="#e05a6d" />
         </g>
       )}
     </svg>
@@ -936,5 +970,6 @@ export const ProceduralItemSvg: React.FC<ProceduralItemSvgProps> = ({
     className,
     label: item.name,
     petSpeciesHint: item.petSpecies || item.name,
+    meta: item.meta,
   });
 };

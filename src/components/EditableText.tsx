@@ -6,6 +6,7 @@ interface EditableTextProps {
   onSave: (newValue: string) => void;
   editMode: boolean;
   multiline?: boolean;
+  allowEmpty?: boolean;
   className?: string;
   inputClassName?: string;
   placeholder?: string;
@@ -22,6 +23,7 @@ export const EditableText: React.FC<EditableTextProps> = ({
   onSave,
   editMode,
   multiline = false,
+  allowEmpty = false,
   className = '',
   inputClassName = '',
   placeholder = 'Nhập nội dung...',
@@ -57,6 +59,14 @@ export const EditableText: React.FC<EditableTextProps> = ({
   const commitChange = () => {
     setIsEditing(false);
     const trimmed = draft.trim();
+    if (allowEmpty) {
+      if (trimmed !== value) {
+        onSave(trimmed);
+      } else {
+        setDraft(value);
+      }
+      return;
+    }
     if (trimmed && trimmed !== value) {
       onSave(trimmed);
     } else {

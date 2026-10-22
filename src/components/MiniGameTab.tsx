@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   Sparkles,
   Droplets,
@@ -29,11 +29,13 @@ import {
   DbInventoryRow,
   SupabaseInventoryItem,
   SupabaseGardenPlotRow,
-  fetchMyInventoryFromSupabase,
-  fetchMyDailyRollToday,
+  SupabasePondFishRow,
+  SupabaseBrewOrderRow,
+  BrewRecipePayload,
+  DailyStatusData,
+  fetchDailyStatusViaRpc,
+  getNextVietnam7AmIso,
   rollGachaOnSupabase,
-  updateInventoryItemReadyAt,
-  insertCraftedDrinkToInventory,
   fetchMyCoinsFromSupabase,
   fetchMyProfileGameStatsFromSupabase,
   fetchMarketPricesFromSupabase,
@@ -45,6 +47,15 @@ import {
   plantSeedViaRpc,
   harvestPlotViaRpc,
   buyPlotViaRpc,
+  fetchPondFishFromSupabase,
+  fishCastViaRpc,
+  fishCatchViaRpc,
+  releaseFishViaRpc,
+  takeOutFishViaRpc,
+  fetchBrewOrdersFromSupabase,
+  brewStartViaRpc,
+  brewCollectViaRpc,
+  fetchCharSecretOnDemand,
   MarketPriceRow,
   DailyQuestItem,
   DEFAULT_MARKET_PRICES,
@@ -58,25 +69,13 @@ import {
   GeneratedGameItem,
   ItemCategory,
   ItemRarity,
-  GardenPlotState,
   GardenStage,
-  PondFishState,
   CompanionRoomState,
   RARITY_LABELS,
   CATEGORY_LABELS,
-  STAGE_DURATIONS_MS,
   GARDEN_STAGE_NAMES,
   formatSeedName,
   formatFlowerNameFromSeed,
-  generateUniqueGameItem,
-  getInventoryItems,
-  saveInventoryItems,
-  addItemToInventory,
-  removeItemFromInventory,
-  getGardenPlots,
-  saveGardenPlots,
-  getPondFishList,
-  savePondFishList,
   getCompanionRoomState,
   saveCompanionRoomState,
 } from '../services/itemSystem';
@@ -86,7 +85,11 @@ import {
   DialogueSituation,
   DEFAULT_TAG_VOICES,
   DEFAULT_TAG_PETS,
+  AddressKeywordRule,
+  DEFAULT_ADDRESS_MAP,
+  resolveAddress,
   generateCompanionDialogueByTags,
+  generateCompanionPetComment,
   resolveBlendedVoicesForCharacter,
   getPersistedTraitForPet,
   selectPetTraitForCompanionTags,
@@ -95,6 +98,8 @@ import {
 } from '../services/tagCompanionSystem';
 import {
   DEFAULT_GACHA_DAILY_DESC,
+  DEFAULT_MARKET_TEXTS,
+  MarketTextsConfig,
   getSiteConfig,
 } from '../services/siteSettings';
 import { ProceduralItemSvg, renderItem } from './ProceduralItemSvg';
@@ -131,9 +136,10 @@ export type ExtendedGameItem = GeneratedGameItem & {
 };
 
 function mapDbInvRowToGameItem(
-  row: DbInventoryRow,
+  row: DbInventoryRow & { meta?: Record<string, unknown> | null },
   companionCharTags: string[] = ['Dịu dàng'],
-  customPets: TagPetProfile[] = DEFAULT_TAG_PETS
+  customPets: TagPetProfile[] = DEFAULT_TAG_PETS,
+  companionCharName?: string
 ): ExtendedGameItem {
   const rawType = String(row.kind || row.item_type || 'flower').toLowerCase();
   const category: ItemCategory =
@@ -173,6 +179,14 @@ function mapDbInvRowToGameItem(
     { primary: '#FFCC80', secondary: '#FFF3E0', accent: '#F48FB1' },
   ];
   const pal = palettes[absH % palettes.length];
+  const metaObj =
+    row.meta && typeof row.meta === 'object' && !Array.isArray(row.meta)
+      ? (row.meta as Record<string, unknown>)
+      : null;
+  const metaColor =
+    metaObj && typeof metaObj.color === 'string' && metaObj.color.trim()
+      ? metaObj.color.trim()
+      : null;
 
   if (category === 'pet') {
     let petTrait = getPersistedTraitForPet(row.id, displayName, customPets);
@@ -183,7 +197,8 @@ function mapDbInvRowToGameItem(
     const cleanVibe = sanitizePetVibeNote(
       petTrait.vibeReason,
       petTrait.matchedTag,
-      petTrait.petSpecies
+      petTrait.petSpecies,
+      companionCharName
     );
     return {
       id: row.id,
@@ -209,7 +224,20 @@ function mapDbInvRowToGameItem(
       petBehaviorStyle: petTrait.behaviorStyle,
       petSound: petTrait.sound,
       readyAt: row.ready_at || null,
+      meta: metaObj,
     };
+  }
+
+  let drinkDesc = `Vật phẩm ${CATEGORY_LABELS[category].name} thuộc phẩm cấp ${RARITY_LABELS[rarity]} được lưu trữ trong Kho đồ.`;
+  if (category === 'drink' && metaObj) {
+    const parts = [
+      typeof metaObj.base === 'string' ? `Nền: ${metaObj.base}` : '',
+      typeof metaObj.flavor === 'string' ? `Hương: ${metaObj.flavor}` : '',
+      typeof metaObj.topping === 'string' ? `Topping: ${metaObj.topping}` : '',
+    ].filter(Boolean);
+    if (parts.length > 0) {
+      drinkDesc = `Công thức pha chế: ${parts.join(' · ')}`;
+    }
   }
 
   return {
@@ -219,7 +247,7 @@ function mapDbInvRowToGameItem(
     category,
     rarity,
     visual: {
-      primaryColor: row.color || pal.primary,
+      primaryColor: metaColor || row.color || pal.primary,
       secondaryColor: pal.secondary,
       accentColor: pal.accent,
       shapeVariant: absH % 6,
@@ -228,8 +256,9 @@ function mapDbInvRowToGameItem(
       hasSparkle: rarity !== 'common',
     },
     createdAt: row.created_at || new Date().toISOString(),
-    description: `Vật phẩm ${CATEGORY_LABELS[category].name} thuộc phẩm cấp ${RARITY_LABELS[rarity]} được lưu trữ trong Kho đồ.`,
+    description: drinkDesc,
     readyAt: row.ready_at || null,
+    meta: metaObj,
   };
 }
 
@@ -258,6 +287,9 @@ interface MiniGameTabProps {
   tagPets?: TagPetProfile[];
   initialSubZone?: string;
   initialTargetKind?: string;
+  unlockedCharIds?: string[];
+  marketTexts?: MarketTextsConfig;
+  addressMap?: AddressKeywordRule[];
 }
 
 type MiniZone = 'market' | 'gacha_inv' | 'garden' | 'pond' | 'companion' | 'drinks';
@@ -331,9 +363,29 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
   tagPets,
   initialSubZone,
   initialTargetKind,
+  unlockedCharIds = [],
+  marketTexts: marketTextsProp,
+  addressMap: addressMapProp,
 }) => {
   const canEdit = Boolean(editMode && can('edit', currentUser));
   const isOwner = Boolean(currentUser?.profileRole === 'owner');
+
+  const effectiveMarketTexts = useMemo<MarketTextsConfig>(
+    () => ({
+      ...DEFAULT_MARKET_TEXTS,
+      ...(getSiteConfig().marketTexts || {}),
+      ...(marketTextsProp || {}),
+    }),
+    [marketTextsProp]
+  );
+
+  const effectiveAddressMap = useMemo<AddressKeywordRule[]>(
+    () =>
+      addressMapProp && addressMapProp.length > 0
+        ? addressMapProp
+        : getSiteConfig().addressMap || DEFAULT_ADDRESS_MAP,
+    [addressMapProp]
+  );
 
   // Điều hướng 6 khu vực trong Mini Game (bao gồm Chợ Nhỏ)
   const [activeZone, setActiveZone] = useState<MiniZone>(() =>
@@ -379,12 +431,22 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
   );
 
   // ============================================================================
-  // STATE CHỢ NHỎ: TIỀN XU (profiles.coins), BẢNG GIÁ & NHIỆM VỤ NGÀY
+  // STATE DAILY STATUS (daily_status RPC), CHỢ NHỎ, XU & NHIỆM VỤ NGÀY (RESET 7:00 SÁNG VN)
   // ============================================================================
+  const [dailyStatus, setDailyStatus] = useState<DailyStatusData>(() => ({
+    day: new Date().toISOString().slice(0, 10),
+    resets_at: getNextVietnam7AmIso(),
+    checked_in: false,
+    rolled: false,
+    casts_used: 0,
+    brews_used: 0,
+  }));
+  const [checkInJustSparkled, setCheckInJustSparkled] = useState(false);
+
   const [coins, setCoins] = useState<number>(0);
   const [marketPrices, setMarketPrices] = useState<MarketPriceRow[]>(DEFAULT_MARKET_PRICES);
   const [dailyQuests, setDailyQuests] = useState<DailyQuestItem[]>([]);
-  const [resetsAtIso, setResetsAtIso] = useState<string>('');
+  const [resetsAtIso, setResetsAtIso] = useState<string>(() => getNextVietnam7AmIso());
   const [questCountdownStr, setQuestCountdownStr] = useState<string>('00:00:00');
   const [isClaimingDaily, setIsClaimingDaily] = useState(false);
   const [isBuyingKind, setIsBuyingKind] = useState<string | null>(null);
@@ -468,7 +530,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
   const inventory = useMemo<ExtendedGameItem[]>(() => {
     const charTagsForPet = companionChar?.tags || ['Dịu dàng'];
     return (supabaseInventory || []).map((item) => {
-      const dbRow: DbInventoryRow = {
+      const dbRow: DbInventoryRow & { meta?: Record<string, unknown> | null } = {
         id: item.id,
         user_id: '',
         kind: item.kind || item.category,
@@ -480,10 +542,16 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
         ready_at: item.readyAt,
         created_at: item.createdAt,
         count: item.count,
+        meta: item.meta || null,
       };
-      return mapDbInvRowToGameItem(dbRow, charTagsForPet, effectiveTagPets);
+      return mapDbInvRowToGameItem(
+        dbRow,
+        charTagsForPet,
+        effectiveTagPets,
+        companionChar?.name
+      );
     });
-  }, [supabaseInventory, companionChar?.tags, effectiveTagPets]);
+  }, [supabaseInventory, companionChar?.tags, companionChar?.name, effectiveTagPets]);
 
   // Phân loại từ nguồn duy nhất inventory (Hạt giống kind='seed' tách riêng với Hoa đã nở kind='flower')
   const ownedSeeds = useMemo(
@@ -578,6 +646,43 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     }, 4200);
   };
 
+  // Open Scene chỉ giữ trong RAM khi nhân vật đồng hành đã mở khóa hoặc là Chủ web (TUYỆT ĐỐI không lưu vào localStorage)
+  const [inMemoryCompanionOpenScene, setInMemoryCompanionOpenScene] = useState<string | null>(null);
+  useEffect(() => {
+    let active = true;
+    const charId = companionChar?.id;
+    if (!charId) {
+      setInMemoryCompanionOpenScene(null);
+      return;
+    }
+    const isUnlocked = isOwner || unlockedCharIds.includes(charId);
+    if (!isUnlocked) {
+      setInMemoryCompanionOpenScene(null);
+      return;
+    }
+    fetchCharSecretOnDemand(charId)
+      .then((secret) => {
+        if (!active) return;
+        setInMemoryCompanionOpenScene(secret?.openScene || null);
+      })
+      .catch(() => {
+        if (active) setInMemoryCompanionOpenScene(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [companionChar?.id, isOwner, unlockedCharIds]);
+
+  // Cặp xưng hô (xưng, gọi) tính từ resolveAddress(companionChar)
+  const companionAddressPair = useMemo(
+    () =>
+      resolveAddress(companionChar, {
+        inMemoryOpenScene: inMemoryCompanionOpenScene,
+        addressMap: effectiveAddressMap,
+      }),
+    [companionChar, inMemoryCompanionOpenScene, effectiveAddressMap]
+  );
+
   // Giọng văn kết hợp từ 2-3 tag đầu của nhân vật đang đồng hành
   const companionBlendedVoices = useMemo(
     () =>
@@ -592,27 +697,82 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     const firstChar =
       characters.find((c) => c.id === roomState.companionCharId) ||
       characters[0];
+    const initialPair = resolveAddress(firstChar, {
+      addressMap: effectiveAddressMap,
+    });
     return generateCompanionDialogueByTags({
       charTags: firstChar?.tags || ['Dịu dàng'],
       situation: 'greeting',
       bondPoints: roomState.bondPoints,
       customVoices: effectiveTagVoices,
+      addressPair: initialPair,
+      charName: firstChar?.name,
     }).text;
   });
 
-  const todayStr = new Date().toISOString().slice(0, 10);
-  const hasFreeGachaToday = roomState.lastFreeGachaDate !== todayStr;
+  // Lời nhận xét riêng của nhân vật đồng hành về thú cưng ở Khu thú cưng
+  const [companionPetComment, setCompanionPetComment] = useState<string>('');
+
+  useEffect(() => {
+    if (!companionChar) return;
+    const firstPet = ownedPets[0];
+    setCompanionPetComment(
+      generateCompanionPetComment({
+        char: companionChar,
+        petName: firstPet?.name || 'bé thú nhỏ',
+        petSpecies: firstPet?.petSpecies,
+        action: 'select',
+        bondPoints: roomState.bondPoints,
+        inMemoryOpenScene: inMemoryCompanionOpenScene,
+        addressMap: effectiveAddressMap,
+        customVoices: effectiveTagVoices,
+      }).text
+    );
+  }, [
+    companionChar,
+    ownedPets,
+    roomState.bondPoints,
+    inMemoryCompanionOpenScene,
+    effectiveAddressMap,
+    effectiveTagVoices,
+  ]);
+
+  const todayStr = dailyStatus.day || new Date().toISOString().slice(0, 10);
+  // Gacha miễn phí hôm nay chỉ dựa vào daily_status().rolled từ server
+  const hasFreeGachaToday = !dailyStatus.rolled;
+
+  const loadDailyStatus = useCallback(async () => {
+    if (!currentUser || currentUser.role === 'guest' || !currentUser.id) {
+      const nextReset = getNextVietnam7AmIso();
+      setDailyStatus({
+        day: new Date().toISOString().slice(0, 10),
+        resets_at: nextReset,
+        checked_in: false,
+        rolled: false,
+        casts_used: 0,
+        brews_used: 0,
+      });
+      setResetsAtIso(nextReset);
+      return;
+    }
+    const res = await fetchDailyStatusViaRpc();
+    setDailyStatus(res.status);
+    if (res.status.resets_at) {
+      setResetsAtIso(res.status.resets_at);
+    }
+  }, [currentUser]);
 
   const refreshSupabaseInventoryAndRoll = useCallback(async () => {
     const [, profileStats] = await Promise.all([
       onRefreshInventory ? onRefreshInventory() : Promise.resolve(),
       fetchMyProfileGameStatsFromSupabase(),
+      loadDailyStatus(),
     ]);
     setCoins(profileStats.coins);
     if (profileStats.plots >= 10) {
       setLocalPlotsCount(profileStats.plots);
     }
-  }, [onRefreshInventory]);
+  }, [onRefreshInventory, loadDailyStatus]);
 
   useEffect(() => {
     refreshSupabaseInventoryAndRoll();
@@ -622,6 +782,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     const [prices, profileStats] = await Promise.all([
       fetchMarketPricesFromSupabase(),
       fetchMyProfileGameStatsFromSupabase(),
+      loadDailyStatus(),
     ]);
     setMarketPrices(prices);
     setCoins(profileStats.coins);
@@ -633,7 +794,9 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
       const qRes = await getDailyQuestsViaRpc();
       if (qRes.ok) {
         setDailyQuests(qRes.quests);
-        setResetsAtIso(qRes.resetsAt);
+        if (qRes.resetsAt) {
+          setResetsAtIso(qRes.resetsAt);
+        }
         if (typeof qRes.coins === 'number') {
           setCoins(qRes.coins);
         }
@@ -644,11 +807,9 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
         { index: 1, id: 2, title: 'Mở Phòng tri kỷ ghé thăm người thương', reward: 5, completed: false, action: 'visit_room', target: 1, progress: 0 },
         { index: 2, id: 3, title: 'Lắng nghe trọn vẹn một bản nhạc êm', reward: 8, completed: false, action: 'listen_song', target: 1, progress: 0 },
       ]);
-      const tomorrow = new Date();
-      tomorrow.setUTCHours(24, 0, 0, 0);
-      setResetsAtIso(tomorrow.toISOString());
+      setResetsAtIso(getNextVietnam7AmIso());
     }
-  }, [currentUser]);
+  }, [currentUser, loadDailyStatus]);
 
   const loadDailyQuests = useCallback(async () => {
     if (!currentUser || currentUser.role === 'guest' || !currentUser.id) return;
@@ -670,11 +831,13 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     loadMarketDataAndCoins();
   }, [loadMarketDataAndCoins]);
 
+  // Gọi daily_status() khi mở tab Mini game/Chợ hoặc đổi sub-tab
   useEffect(() => {
+    loadDailyStatus();
     if (activeZone === 'market') {
       loadMarketDataAndCoins();
     }
-  }, [activeZone, loadMarketDataAndCoins]);
+  }, [activeZone, loadDailyStatus, loadMarketDataAndCoins]);
 
   useEffect(() => {
     const unsub = onQuestActionLogged(() => {
@@ -692,14 +855,21 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     return () => clearInterval(interval);
   }, [activeZone, currentUser, loadDailyQuests]);
 
+  // Đồng hồ đếm ngược đến resets_at (7:00 sáng giờ Việt Nam); về 0 tự gọi lại get_daily_quests & daily_status
   useEffect(() => {
-    if (!resetsAtIso) return;
+    const targetIso = dailyStatus.resets_at || resetsAtIso || getNextVietnam7AmIso();
+    let refreshedOnZero = false;
 
     const tickCountdown = () => {
-      const diff = new Date(resetsAtIso).getTime() - Date.now();
+      const diff = new Date(targetIso).getTime() - Date.now();
       if (diff <= 0) {
         setQuestCountdownStr('00:00:00');
-        loadMarketDataAndCoins();
+        if (!refreshedOnZero) {
+          refreshedOnZero = true;
+          loadDailyStatus();
+          loadDailyQuests();
+          loadMarketDataAndCoins();
+        }
         return;
       }
       const totalSec = Math.floor(diff / 1000);
@@ -714,7 +884,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     tickCountdown();
     const timer = setInterval(tickCountdown, 1000);
     return () => clearInterval(timer);
-  }, [resetsAtIso, loadMarketDataAndCoins]);
+  }, [dailyStatus.resets_at, resetsAtIso, loadDailyStatus, loadDailyQuests, loadMarketDataAndCoins]);
 
   useEffect(() => {
     if (initialSubZone === 'garden') {
@@ -736,24 +906,32 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     }
   }, [initialSubZone, initialTargetKind]);
 
+  // Điểm danh chỉ gọi khi người chơi bấm nút; trạng thái lấy từ daily_status()
   const handleClaimDailyCoins = async () => {
     if (!currentUser || currentUser.role === 'guest') {
-      onRequireAuth?.(`Mời bạn đăng nhập để nhận quà 10 ${coinCurrencyName} mỗi ngày nhé 🌸`);
+      onRequireAuth?.(`Mời bạn đăng nhập để điểm danh nhận +10 ${coinCurrencyName} mỗi ngày nhé 🌸`);
       return;
     }
-    if (isClaimingDaily) return;
+    if (isClaimingDaily || dailyStatus.checked_in) return;
     setIsClaimingDaily(true);
     try {
       const res = await claimDailyCoinsViaRpc();
       if (res.ok) {
+        setCheckInJustSparkled(true);
+        setTimeout(() => setCheckInJustSparkled(false), 4500);
         if (typeof res.coins === 'number') {
           setCoins(res.coins);
         } else {
           const c = await fetchMyCoinsFromSupabase();
           setCoins(c);
         }
+        await loadDailyStatus();
         showToast(res.message);
+      } else if (res.alreadyClaimed) {
+        // Nếu rpc báo already_claimed thì gọi lại daily_status rồi hiện đúng trạng thái theo server, không tự bịa thông báo
+        await loadDailyStatus();
       } else {
+        await loadDailyStatus();
         showToast(res.message);
       }
     } finally {
@@ -936,172 +1114,79 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
   };
 
   // ============================================================================
-  // 1. XỬ LÝ GACHA MỖI NGÀY: Gọi rpc roll_gacha trên Supabase + cập nhật lạc quan + refreshInventory()
+  // 1. XỬ LÝ GACHA MỖI NGÀY: Dùng daily_status().rolled + Gọi rpc roll_gacha trên Supabase
   // ============================================================================
-  const handleRollGacha = async (useFreeRoll: boolean) => {
+  const handleRollGacha = async () => {
     if (!currentUser || currentUser.role === 'guest') {
       onRequireAuth?.('Mời bạn đăng nhập để mở Gacha và nhận quà mỗi ngày nhé 🌸');
       return;
     }
     if (isRollingGacha) return;
-    const rollCost = 15;
-
-    if (useFreeRoll) {
-      if (!hasFreeGachaToday) {
-        showToast('Hôm nay bạn đã nhận rồi, mai quay lại nhé');
-        return;
-      }
-      setIsRollingGacha(true);
-      setLastGachaResult(null);
-
-      try {
-        const res = await rollGachaOnSupabase();
-        if (!res.ok) {
-          if (res.errorCode === 'already_rolled') {
-            const nextRoom = {
-              ...roomState,
-              lastFreeGachaDate: todayStr,
-            };
-            setRoomState(nextRoom);
-            saveCompanionRoomState(nextRoom);
-            showToast('Hôm nay bạn đã nhận rồi, mai quay lại nhé');
-          } else {
-            showToast(res.message);
-          }
-          return;
-        }
-
-        const nextRoom = {
-          ...roomState,
-          lastFreeGachaDate: todayStr,
-        };
-        setRoomState(nextRoom);
-        saveCompanionRoomState(nextRoom);
-        markDailyTaskReady('gacha');
-
-        if (res.normalizedItem) {
-          onOptimisticAddInventoryItem?.(res.normalizedItem);
-          setNewlyReceivedIds((prev) => {
-            const next = new Set(prev);
-            next.add(res.normalizedItem!.id);
-            return next;
-          });
-        }
-
-        await refreshSupabaseInventoryAndRoll();
-
-        if (res.item) {
-          const newItem = mapDbInvRowToGameItem(
-            res.item,
-            companionChar?.tags || ['Dịu dàng'],
-            effectiveTagPets
-          );
-          let destinationNote = 'Đã cất vào Kho đồ ✨';
-          if (newItem.category === 'seed' || newItem.category === 'flower') {
-            destinationNote = 'Đã cất vào Kho đồ ✨ Hãy đem gieo vào ô Vườn hoa để nở thành Hoa nhé!';
-          } else if (newItem.category === 'fish') {
-            destinationNote = 'Đã cất vào Kho đồ ✨ & thả vào Hồ cá!';
-          } else if (newItem.category === 'pet') {
-            destinationNote = 'Đã cất vào Kho đồ ✨ & đón thú cưng về Khu thú cưng!';
-          } else if (newItem.category === 'drink') {
-            destinationNote = 'Đã cất vào Kho đồ ✨ & bày sẵn ở Quầy thức uống!';
-          }
-          setLastGachaResult({ item: newItem, destinationNote });
-          emitGameQuestAction('gacha');
-          showToast(
-            `🎉 Bạn nhận được ${
-              newItem.category === 'seed' || newItem.category === 'flower'
-                ? formatSeedName(newItem.name)
-                : newItem.name
-            } (${RARITY_LABELS[newItem.rarity]})!`
-          );
-        } else {
-          showToast(`🎉 ${res.message}`);
-        }
-      } finally {
-        setIsRollingGacha(false);
-      }
+    if (!hasFreeGachaToday) {
+      showToast('Hôm nay bạn đã mở quà rồi, 7 giờ sáng mai có lượt miễn phí mới nhé');
       return;
     }
 
-    // Mở thêm bằng Cánh hoa -> lưu trực tiếp vào bảng inventory trên Supabase
-    if (!isOwner && petalsBalance < rollCost) {
-      showToast(
-        `Bạn cần ${rollCost} ${currencyName} để mở thêm hộp quà Gacha nhé 🌸`
-      );
-      return;
-    }
-    onAddPetals(-rollCost);
     setIsRollingGacha(true);
     setLastGachaResult(null);
-    markDailyTaskReady('gacha');
 
-    setTimeout(async () => {
-      try {
-        const categories: ItemCategory[] = ['seed', 'fish', 'pet', 'drink'];
-        const chosenCategory =
-          categories[Math.floor(Math.random() * categories.length)];
-
-        const generated = generateUniqueGameItem(chosenCategory, {
-          companionCharTags: companionChar?.tags || ['Dịu dàng'],
-        });
-
-        const inserted = await insertCraftedDrinkToInventory({
-          item_type: generated.category,
-          item_name: generated.name,
-          rarity: generated.rarity,
-          color: generated.visual.primaryColor,
-        });
-
-        const realId = inserted?.id || generated.id;
-        if (generated.category === 'pet') {
-          persistTraitForPet(realId, generated.name, {
-            petSpecies: generated.petSpecies || 'Mèo Bông',
-            matchedTag: generated.matchedTag || 'Dịu dàng',
-            personality: generated.petPersonality || 'hiền lành, điềm đạm',
-            behaviorStyle: generated.petBehaviorStyle || 'gentle_sway',
-            sound: generated.petSound || 'Meo~ 🌸',
-            vibeReason: sanitizePetVibeNote(
-              generated.vibeReason,
-              generated.matchedTag,
-              generated.petSpecies
-            ),
-          });
+    try {
+      const res = await rollGachaOnSupabase();
+      if (!res.ok) {
+        await loadDailyStatus();
+        if (res.errorCode === 'already_rolled') {
+          showToast('Hôm nay bạn đã mở quà rồi, 7 giờ sáng mai có lượt miễn phí mới nhé');
+        } else {
+          showToast(res.message);
         }
-
-        if (inserted) {
-          setNewlyReceivedIds((prev) => {
-            const next = new Set(prev);
-            next.add(inserted.id);
-            return next;
-          });
-        }
-
-        await refreshSupabaseInventoryAndRoll();
-        emitGameQuestAction('gacha');
-
-        const displayItem: ExtendedGameItem = inserted
-          ? mapDbInvRowToGameItem(
-              inserted,
-              companionChar?.tags || ['Dịu dàng'],
-              effectiveTagPets
-            )
-          : { ...generated, seed: `${generated.name}_${generated.id}` };
-
-        const destinationNote =
-          displayItem.category === 'seed' || displayItem.category === 'flower'
-            ? 'Đã cất vào Kho đồ ✨ Hãy đem gieo vào ô Vườn hoa để nở thành Hoa nhé!'
-            : displayItem.category === 'fish'
-            ? 'Đã cất vào Kho đồ ✨ & xuất hiện tại Hồ cá!'
-            : displayItem.category === 'pet'
-            ? `Đã cất vào Kho đồ ✨ & đón "${displayItem.name}" về Khu thú cưng!`
-            : `Đã cất vào Kho đồ ✨ & thêm "${displayItem.name}" vào Quầy thức uống!`;
-
-        setLastGachaResult({ item: displayItem, destinationNote });
-      } finally {
-        setIsRollingGacha(false);
+        return;
       }
-    }, 650);
+
+      markDailyTaskReady('gacha');
+
+      if (res.normalizedItem) {
+        onOptimisticAddInventoryItem?.(res.normalizedItem);
+        setNewlyReceivedIds((prev) => {
+          const next = new Set(prev);
+          next.add(res.normalizedItem!.id);
+          return next;
+        });
+      }
+
+      await refreshSupabaseInventoryAndRoll();
+
+      if (res.item) {
+        const newItem = mapDbInvRowToGameItem(
+          res.item,
+          companionChar?.tags || ['Dịu dàng'],
+          effectiveTagPets,
+          companionChar?.name
+        );
+        let destinationNote = 'Đã cất vào Kho đồ ✨';
+        if (newItem.category === 'seed' || newItem.category === 'flower') {
+          destinationNote = 'Đã cất vào Kho đồ ✨ Hãy đem gieo vào ô Vườn hoa để nở thành Hoa nhé!';
+        } else if (newItem.category === 'fish') {
+          destinationNote = 'Đã cất vào Kho đồ ✨ Hãy ghé Hồ cá để thả bé xuống hồ nhé!';
+        } else if (newItem.category === 'pet') {
+          destinationNote = 'Đã cất vào Kho đồ ✨ & đón thú cưng về Khu thú cưng!';
+        } else if (newItem.category === 'drink') {
+          destinationNote = 'Đã cất vào Kho đồ ✨ & treo lên kệ tại Quầy pha chế!';
+        }
+        setLastGachaResult({ item: newItem, destinationNote });
+        emitGameQuestAction('gacha');
+        showToast(
+          `🎉 Bạn nhận được ${
+            newItem.category === 'seed' || newItem.category === 'flower'
+              ? formatSeedName(newItem.name)
+              : newItem.name
+          } (${RARITY_LABELS[newItem.rarity]})!`
+        );
+      } else {
+        showToast(`🎉 ${res.message}`);
+      }
+    } finally {
+      setIsRollingGacha(false);
+    }
   };
 
   // ============================================================================
@@ -1110,6 +1195,9 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
   const handleGoToDailyQuests = () => {
     setPlantingModal(null);
     setPlotBuyShortfallDiff(null);
+    setCastShortfallDiff(null);
+    setBrewShortfallDiff(null);
+    setConfirmPaidCastModal(false);
     setActiveZone('market');
     setTimeout(() => {
       const questSection = document.getElementById('daily-quests-section');
@@ -1258,7 +1346,8 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
               created_at: res.harvestedItem.createdAt,
             },
             companionChar?.tags || ['Dịu dàng'],
-            effectiveTagPets
+            effectiveTagPets,
+            companionChar?.name
           )
         : {
             id: seedItem?.id || `harvested-${slot}-${Date.now()}`,
@@ -1348,8 +1437,81 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
   };
 
   // ============================================================================
-  // 3. XỬ LÝ HỒ CÁ (HIỂN THỊ MỌI MÓN kind = 'fish' TRONG INVENTORY)
+  // 3. XỬ LÝ HỒ CÁ: CÂU CÁ (fish_cast / fish_catch) & THẢ CÁ VÀO HỒ (pond_fish)
   // ============================================================================
+  const [pondFishRows, setPondFishRows] = useState<SupabasePondFishRow[]>([]);
+  const [pondLoading, setPondLoading] = useState(false);
+  const [releaseFishModalOpen, setReleaseFishModalOpen] = useState(false);
+  const [selectedFishIdsToRelease, setSelectedFishIdsToRelease] = useState<string[]>([]);
+  const [isReleasingFish, setIsReleasingFish] = useState(false);
+  const [takingOutFishId, setTakingOutFishId] = useState<string | null>(null);
+  const [pondSplashEffect, setPondSplashEffect] = useState<boolean>(false);
+
+  const loadPondFish = useCallback(async () => {
+    if (!currentUser || currentUser.role === 'guest' || !currentUser.id) {
+      setPondFishRows([]);
+      return;
+    }
+    setPondLoading(true);
+    try {
+      const rows = await fetchPondFishFromSupabase();
+      setPondFishRows(rows);
+    } finally {
+      setPondLoading(false);
+    }
+  }, [currentUser]);
+
+  useEffect(() => {
+    loadPondFish();
+  }, [loadPondFish]);
+
+  useEffect(() => {
+    if (activeZone === 'pond') {
+      loadPondFish();
+    }
+  }, [activeZone, loadPondFish]);
+
+  const pondFishIdSet = useMemo(() => {
+    const s = new Set<string>();
+    for (const r of pondFishRows) {
+      if (r.fish_id) s.add(String(r.fish_id));
+    }
+    return s;
+  }, [pondFishRows]);
+
+  // Hồ chỉ hiện cá có trong bảng pond_fish (join với inventory qua fish_id)
+  const pondFishItems = useMemo(
+    () => ownedFish.filter((f) => pondFishIdSet.has(f.id)),
+    [ownedFish, pondFishIdSet]
+  );
+
+  // Cá trong Kho đồ (kind='fish') chưa có trong pond_fish
+  const unreleasedFishItems = useMemo(
+    () => ownedFish.filter((f) => !pondFishIdSet.has(f.id)),
+    [ownedFish, pondFishIdSet]
+  );
+
+  // Trạng thái câu cá tương tác 5 giây
+  const freeCastsLeft = Math.max(0, 5 - (dailyStatus?.casts_used || 0));
+  const [fishingPhase, setFishingPhase] = useState<
+    'idle' | 'dropping' | 'active' | 'catching' | 'missed'
+  >('idle');
+  const [fishingSession, setFishingSession] = useState<string | null>(null);
+  const [fishingStartMs, setFishingStartMs] = useState<number>(0);
+  const [fishingRemainingMs, setFishingRemainingMs] = useState<number>(5000);
+  const [fishingBoxX, setFishingBoxX] = useState<number>(45);
+  const [fishingBoxY, setFishingBoxY] = useState<number>(52);
+  const fishingDirRef = useRef<number>(1);
+  const fishingSpeedRef = useRef<number>(2.1);
+  const fishingSessionRef = useRef<string | null>(null);
+  const fishingHandledRef = useRef<boolean>(false);
+  const [confirmPaidCastModal, setConfirmPaidCastModal] = useState<boolean>(false);
+  const [castShortfallDiff, setCastShortfallDiff] = useState<number | null>(null);
+  const [fishingResultModal, setFishingResultModal] = useState<{
+    item: ExtendedGameItem;
+  } | null>(null);
+  const [fishingMissMessage, setFishingMissMessage] = useState<string | null>(null);
+
   const handleBuyFishFood = () => {
     const cost = 8;
     if (!isOwner && petalsBalance < cost) {
@@ -1402,19 +1564,258 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     showToast(`🐟 Đã cho "${fish.name}" ăn Hạt cá! Chú cá quẫy đuôi vui vẻ ✨`);
   };
 
-  const [isCastingRod, setIsCastingRod] = useState(false);
-
-  const handleFishCast = () => {
-    if (isCastingRod) return;
-    setIsCastingRod(true);
-    if (currentUser && currentUser.role !== 'guest') {
-      logGameActionViaRpc('fish_cast');
+  // Bắt đầu thả cần câu (gọi sau khi bấm nút hoặc xác nhận tốn 5 Xu)
+  const executeFishingCast = async () => {
+    if (!currentUser || currentUser.role === 'guest') {
+      onRequireAuth?.('Mời bạn đăng nhập để thả cần câu ở Hồ cá nhé 🎣');
+      return;
     }
-    showToast('🎣 Bạn vung nhẹ cần câu xuống mặt hồ êm đềm... Đàn cá tò mò quẫy đuôi!');
-    setTimeout(() => {
-      setIsCastingRod(false);
-      showToast('✨ Một làn gợn sóng lấp lánh xuất hiện trên mặt hồ!');
-    }, 1800);
+    if (fishingPhase !== 'idle' && fishingPhase !== 'missed') return;
+
+    setConfirmPaidCastModal(false);
+    setCastShortfallDiff(null);
+    setFishingMissMessage(null);
+    setFishingPhase('dropping');
+
+    // Hoạt ảnh thả dây câu xuống nước ~1 giây + vòng sóng lan, ngay khi hộp quà hiện ra mới gọi fish_cast()
+    setTimeout(async () => {
+      const res = await fishCastViaRpc();
+      if (!res.ok || !res.session) {
+        setFishingPhase('idle');
+        if (res.errorCode === 'not_enough_coins') {
+          const diff = Math.max(1, 5 - coins);
+          setCastShortfallDiff(diff);
+          showToast(`Chưa đủ ${coinCurrencyName}, còn thiếu ${diff} ${coinCurrencyName}`);
+        } else {
+          showToast(res.message || 'Không thể thả cần câu lúc này.');
+        }
+        await loadDailyStatus();
+        return;
+      }
+
+      if (typeof res.cost === 'number' && res.cost > 0) {
+        const c = await fetchMyCoinsFromSupabase();
+        setCoins(c);
+      }
+      setDailyStatus((prev) => ({
+        ...prev,
+        casts_used:
+          typeof res.casts_used === 'number' ? res.casts_used : prev.casts_used + 1,
+      }));
+
+      fishingSessionRef.current = res.session;
+      fishingHandledRef.current = false;
+      setFishingSession(res.session);
+      const start = Date.now();
+      setFishingStartMs(start);
+      setFishingRemainingMs(5000);
+      setFishingBoxX(25 + Math.random() * 45);
+      setFishingBoxY(38 + Math.random() * 28);
+      fishingDirRef.current = Math.random() > 0.5 ? 1 : -1;
+      fishingSpeedRef.current = 1.8 + Math.random() * 1.6;
+      setFishingPhase('active');
+    }, 950);
+  };
+
+  const handleClickCastButton = () => {
+    if (!currentUser || currentUser.role === 'guest') {
+      onRequireAuth?.('Mời bạn đăng nhập để thả cần câu ở Hồ cá nhé 🎣');
+      return;
+    }
+    if (fishingPhase === 'dropping' || fishingPhase === 'active' || fishingPhase === 'catching') {
+      return;
+    }
+    if (freeCastsLeft <= 0 && !isOwner) {
+      if (coins < 5) {
+        const diff = Math.max(1, 5 - coins);
+        setCastShortfallDiff(diff);
+        showToast(`Chưa đủ ${coinCurrencyName}, còn thiếu ${diff} ${coinCurrencyName}`);
+        return;
+      }
+      setConfirmPaidCastModal(true);
+      return;
+    }
+    executeFishingCast();
+  };
+
+  // Xử lý khi hết 5 giây hoặc bấm trượt hộp quà
+  const handleFishingMiss = useCallback(
+    async (sessionToClose: string) => {
+      if (fishingHandledRef.current) return;
+      fishingHandledRef.current = true;
+      setFishingPhase('missed');
+      setFishingMissMessage('Hụt mất quà rồi, thử lại nhé 🥺');
+      setTimeout(() => {
+        setFishingPhase((p) => (p === 'missed' ? 'idle' : p));
+      }, 2800);
+      try {
+        await fishCatchViaRpc(sessionToClose, false);
+        await loadDailyStatus();
+        await loadDailyQuests();
+      } catch {
+        // ignore
+      }
+    },
+    [loadDailyStatus, loadDailyQuests]
+  );
+
+  // Xử lý khi người chơi bấm trúng hộp quà 🎁 trong 5 giây
+  const handleFishingCatchSuccess = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const activeSession = fishingSessionRef.current || fishingSession;
+    if (!activeSession || fishingPhase !== 'active' || fishingHandledRef.current) {
+      return;
+    }
+    fishingHandledRef.current = true;
+    setFishingPhase('catching');
+
+    try {
+      const res = await fishCatchViaRpc(activeSession, true);
+      if (!res.ok || res.missed) {
+        setFishingPhase('missed');
+        setFishingMissMessage('Hụt mất quà rồi, thử lại nhé 🥺');
+        setTimeout(() => {
+          setFishingPhase((p) => (p === 'missed' ? 'idle' : p));
+        }, 2600);
+        await loadDailyStatus();
+        return;
+      }
+
+      if (res.item) {
+        onOptimisticAddInventoryItem?.(res.item);
+        setNewlyReceivedIds((prev) => {
+          const next = new Set(prev);
+          next.add(res.item!.id);
+          return next;
+        });
+      }
+
+      await refreshSupabaseInventoryAndRoll();
+      await loadDailyQuests();
+      setFishingPhase('idle');
+
+      if (res.item) {
+        const dbRow: DbInventoryRow & { meta?: Record<string, unknown> | null } = {
+          id: res.item.id,
+          user_id: '',
+          kind: res.item.kind || res.item.category,
+          item_type: res.item.kind || res.item.category,
+          name: res.item.name,
+          item_name: res.item.name,
+          rarity: res.item.rarity,
+          seed: res.item.seed || `${res.item.name}_${res.item.id}`,
+          ready_at: res.item.readyAt,
+          created_at: res.item.createdAt,
+          count: res.item.count,
+          meta: res.item.meta || null,
+        };
+        const caughtItem = mapDbInvRowToGameItem(
+          dbRow,
+          companionChar?.tags || ['Dịu dàng'],
+          effectiveTagPets,
+          companionChar?.name
+        );
+        setFishingResultModal({ item: caughtItem });
+      } else {
+        showToast(res.message);
+      }
+    } catch {
+      setFishingPhase('idle');
+    }
+  };
+
+  // Hiệu ứng hộp quà 🎁 chạy qua lại ngẫu nhiên + đếm ngược 5 giây
+  useEffect(() => {
+    if (fishingPhase !== 'active' || !fishingStartMs) return;
+
+    const interval = window.setInterval(() => {
+      const elapsed = Date.now() - fishingStartMs;
+      const remain = Math.max(0, 5000 - elapsed);
+      setFishingRemainingMs(remain);
+
+      if (remain <= 0) {
+        window.clearInterval(interval);
+        const sess = fishingSessionRef.current;
+        if (sess) {
+          handleFishingMiss(sess);
+        }
+        return;
+      }
+
+      // Đổi tốc độ/hướng nhẹ ngẫu nhiên
+      if (Math.random() < 0.14) {
+        fishingDirRef.current = -fishingDirRef.current;
+      }
+      if (Math.random() < 0.22) {
+        fishingSpeedRef.current = 1.5 + Math.random() * 2.4;
+      }
+
+      setFishingBoxX((prevX) => {
+        let nextX = prevX + fishingDirRef.current * fishingSpeedRef.current;
+        if (nextX <= 12) {
+          nextX = 12;
+          fishingDirRef.current = 1;
+        } else if (nextX >= 82) {
+          nextX = 82;
+          fishingDirRef.current = -1;
+        }
+        return nextX;
+      });
+
+      setFishingBoxY((prevY) => {
+        const wave = Math.sin(Date.now() / 240) * 1.4;
+        return Math.max(26, Math.min(72, prevY + wave));
+      });
+    }, 60);
+
+    return () => window.clearInterval(interval);
+  }, [fishingPhase, fishingStartMs, handleFishingMiss]);
+
+  // Thả 1 hoặc nhiều cá từ Kho đồ vào hồ (release_fish)
+  const handleReleaseSelectedFish = async (fishIds: string[]) => {
+    if (!currentUser || currentUser.role === 'guest') {
+      onRequireAuth?.('Mời bạn đăng nhập để thả cá vào hồ nhé 🐟');
+      return;
+    }
+    if (fishIds.length === 0 || isReleasingFish) return;
+    setIsReleasingFish(true);
+    try {
+      let successCount = 0;
+      for (const id of fishIds) {
+        const res = await releaseFishViaRpc(id);
+        if (res.ok) successCount++;
+      }
+      await Promise.all([loadPondFish(), refreshSupabaseInventoryAndRoll()]);
+      setReleaseFishModalOpen(false);
+      setSelectedFishIdsToRelease([]);
+      if (successCount > 0) {
+        setPondSplashEffect(true);
+        setTimeout(() => setPondSplashEffect(false), 2600);
+        showToast(
+          `💦 Đã thả ${successCount} chú cá xuống Hồ cá đêm! Nước bắn tung tóe mát lành ✨`
+        );
+      }
+    } finally {
+      setIsReleasingFish(false);
+    }
+  };
+
+  // Nhấc cá từ hồ về Kho đồ (take_out_fish)
+  const handleTakeOutFish = async (fish: ExtendedGameItem) => {
+    if (!currentUser || currentUser.role === 'guest') return;
+    if (takingOutFishId) return;
+    setTakingOutFishId(fish.id);
+    try {
+      const res = await takeOutFishViaRpc(fish.id);
+      if (res.ok) {
+        await Promise.all([loadPondFish(), refreshSupabaseInventoryAndRoll()]);
+        showToast(`🐟 Đã nhấc "${fish.name}" lên cất lại vào Kho đồ!`);
+      } else {
+        showToast(res.message);
+      }
+    } finally {
+      setTakingOutFishId(null);
+    }
   };
 
   const handleCollectFishPetals = (fish: ExtendedGameItem) => {
@@ -1436,7 +1837,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
   };
 
   // ============================================================================
-  // 4. XỬ LÝ PHÒNG TRI KỶ, KHU THÚ CƯNG & QUẦY THỨC UỐNG
+  // 4. XỬ LÝ PHÒNG TRI KỶ, KHU THÚ CƯNG & QUẦY PHA CHẾ
   // ============================================================================
   const triggerCompanionDialogue = useCallback(
     (
@@ -1445,14 +1846,21 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
         charTagsOverride?: string[];
         bondOverride?: number;
         itemName?: string;
+        charOverride?: CharacterItem;
       }
     ) => {
+      const targetChar = options?.charOverride || companionChar;
       const tagsToUse =
-        options?.charTagsOverride || companionChar?.tags || ['Dịu dàng'];
+        options?.charTagsOverride || targetChar?.tags || ['Dịu dàng'];
       const bondToUse =
         options?.bondOverride !== undefined
           ? options.bondOverride
           : roomState.bondPoints;
+      const pairToUse = options?.charOverride
+        ? resolveAddress(options.charOverride, {
+            addressMap: effectiveAddressMap,
+          })
+        : companionAddressPair;
 
       const generated = generateCompanionDialogueByTags({
         charTags: tagsToUse,
@@ -1461,16 +1869,40 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
         itemName: options?.itemName,
         customVoices: effectiveTagVoices,
         previousText: activeDialogueText,
+        addressPair: pairToUse,
+        charName: targetChar?.name,
+        inMemoryOpenScene: options?.charOverride
+          ? null
+          : inMemoryCompanionOpenScene,
       });
       setActiveDialogueText(generated.text);
     },
     [
-      companionChar?.tags,
+      companionChar,
       roomState.bondPoints,
       effectiveTagVoices,
       activeDialogueText,
+      companionAddressPair,
+      effectiveAddressMap,
+      inMemoryCompanionOpenScene,
     ]
   );
+
+  // Tự động cập nhật câu chào khi cặp xưng hô hoặc Open Scene trong RAM vừa nạp xong
+  useEffect(() => {
+    if (!companionChar) return;
+    const generated = generateCompanionDialogueByTags({
+      charTags: companionChar.tags || ['Dịu dàng'],
+      situation: 'greeting',
+      bondPoints: roomState.bondPoints,
+      customVoices: effectiveTagVoices,
+      addressPair: companionAddressPair,
+      charName: companionChar.name,
+      inMemoryOpenScene: inMemoryCompanionOpenScene,
+    });
+    setActiveDialogueText(generated.text);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [companionChar?.id, companionAddressPair.self, companionAddressPair.user, inMemoryCompanionOpenScene]);
 
   const handleSelectCompanionChar = (charId: string) => {
     const next = { ...roomState, companionCharId: charId };
@@ -1481,6 +1913,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
       triggerCompanionDialogue('greeting', {
         charTagsOverride: found.tags,
         bondOverride: next.bondPoints,
+        charOverride: found,
       });
     }
   };
@@ -1614,6 +2047,21 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     setRoomState(nextRoom);
     saveCompanionRoomState(nextRoom);
 
+    if (companionChar && targetPet) {
+      setCompanionPetComment(
+        generateCompanionPetComment({
+          char: companionChar,
+          petName: targetPet.name,
+          petSpecies: targetPet.petSpecies,
+          action: 'pet',
+          bondPoints: nextRoom.bondPoints,
+          inMemoryOpenScene: inMemoryCompanionOpenScene,
+          addressMap: effectiveAddressMap,
+          customVoices: effectiveTagVoices,
+        }).text
+      );
+    }
+
     if (currentUser && currentUser.role !== 'guest') {
       logGameActionViaRpc('pet_stroke');
     }
@@ -1662,6 +2110,21 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
       return nextMap;
     });
 
+    if (companionChar && targetPet) {
+      setCompanionPetComment(
+        generateCompanionPetComment({
+          char: companionChar,
+          petName: targetPet.name,
+          petSpecies: targetPet.petSpecies,
+          action: 'feed',
+          bondPoints: nextRoom.bondPoints,
+          inMemoryOpenScene: inMemoryCompanionOpenScene,
+          addressMap: effectiveAddressMap,
+          customVoices: effectiveTagVoices,
+        }).text
+      );
+    }
+
     emitGameQuestAction('feed_pet');
     if (currentUser && currentUser.role !== 'guest') {
       logGameActionViaRpc('feed_pet');
@@ -1673,32 +2136,248 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
     );
   };
 
-  const handleBrewNewDrinkAtBar = async () => {
-    const cost = 10;
-    if (!isOwner && petalsBalance < cost) {
-      showToast(
-        `Cần ${cost} ${currencyName} để pha chế một ly thức uống mới tại quầy nhé ☕`
-      );
+  // ============================================================================
+  // 5. QUẦY PHA CHẾ (brew_start, brew_collect, brew_orders) & KỆ TRƯNG BÀY
+  // ============================================================================
+  const BREW_BASE_OPTIONS: Array<{ label: string; defaultColor: string }> = [
+    { label: 'Americano', defaultColor: '#8d6e63' },
+    { label: 'Trà sữa', defaultColor: '#d7b399' },
+    { label: 'Matcha latte', defaultColor: '#88bf73' },
+    { label: 'Cacao nóng', defaultColor: '#795548' },
+    { label: 'Trà hoa cúc', defaultColor: '#f2cf7a' },
+    { label: 'Cà phê muối', defaultColor: '#a1887f' },
+    { label: 'Trà đào', defaultColor: '#f7b299' },
+  ];
+  const BREW_FLAVOR_OPTIONS: string[] = [
+    'Vani dịu',
+    'Caramel ấm',
+    'Bạc hà mát',
+    'Hoa nhài thanh',
+    'Quế mật',
+    'Sữa yến mạch',
+  ];
+  const BREW_TOPPING_OPTIONS: string[] = [
+    'mật ong',
+    'kem mây',
+    'trân châu',
+    'hoa khô',
+  ];
+  const BREW_COLOR_SWATCHES: string[] = [
+    '#d7b399',
+    '#88bf73',
+    '#f2cf7a',
+    '#f7b299',
+    '#f4a3b0',
+    '#b8a6e0',
+    '#9cc7ee',
+    '#8d6e63',
+  ];
+
+  const [brewBase, setBrewBase] = useState<string>('Trà sữa');
+  const [brewFlavor, setBrewFlavor] = useState<string>('Vani dịu');
+  const [brewTopping, setBrewTopping] = useState<string>('trân châu');
+  const [brewColor, setBrewColor] = useState<string>('#d7b399');
+  const [brewOrders, setBrewOrders] = useState<SupabaseBrewOrderRow[]>([]);
+  const [isStartingBrew, setIsStartingBrew] = useState<boolean>(false);
+  const [brewShortfallDiff, setBrewShortfallDiff] = useState<number | null>(null);
+  const [brewResultModal, setBrewResultModal] = useState<{
+    item: ExtendedGameItem;
+    recipe: BrewRecipePayload;
+  } | null>(null);
+  const [newlyShelvedDrinkId, setNewlyShelvedDrinkId] = useState<string | null>(null);
+  const [selectedShelfDrink, setSelectedShelfDrink] = useState<ExtendedGameItem | null>(null);
+  const [shelfPage, setShelfPage] = useState<number>(0);
+  const collectingOrderIdsRef = useRef<Set<string>>(new Set());
+
+  const freeBrewsLeft = Math.max(0, 6 - (dailyStatus?.brews_used || 0));
+
+  const collectReadyBrewOrder = useCallback(
+    async (orderRow: SupabaseBrewOrderRow) => {
+      const orderId = String(orderRow.id);
+      if (collectingOrderIdsRef.current.has(orderId)) return;
+      collectingOrderIdsRef.current.add(orderId);
+
+      try {
+        const res = await brewCollectViaRpc(orderId);
+        if (res.ok) {
+          setBrewOrders((prev) => prev.filter((o) => String(o.id) !== orderId));
+          if (res.item) {
+            onOptimisticAddInventoryItem?.(res.item);
+            setNewlyReceivedIds((prev) => {
+              const next = new Set(prev);
+              next.add(res.item!.id);
+              return next;
+            });
+            setNewlyShelvedDrinkId(res.item.id);
+            setTimeout(() => {
+              setNewlyShelvedDrinkId((cur) =>
+                cur === res.item!.id ? null : cur
+              );
+            }, 5000);
+          }
+
+          await refreshSupabaseInventoryAndRoll();
+
+          if (res.item) {
+            const recipeMeta =
+              (res.item.meta && typeof res.item.meta === 'object'
+                ? (res.item.meta as unknown as BrewRecipePayload)
+                : orderRow.recipe) || {
+                base: brewBase,
+                flavor: brewFlavor,
+                topping: brewTopping,
+                color: brewColor,
+              };
+            const dbRow: DbInventoryRow & { meta?: Record<string, unknown> | null } = {
+              id: res.item.id,
+              user_id: '',
+              kind: 'drink',
+              item_type: 'drink',
+              name: res.item.name,
+              item_name: res.item.name,
+              rarity: res.item.rarity,
+              seed: res.item.seed || `${res.item.name}_${res.item.id}`,
+              ready_at: res.item.readyAt,
+              created_at: res.item.createdAt,
+              count: res.item.count,
+              meta: recipeMeta as unknown as Record<string, unknown>,
+            };
+            const mapped = mapDbInvRowToGameItem(
+              dbRow,
+              companionChar?.tags || ['Dịu dàng'],
+              effectiveTagPets,
+              companionChar?.name
+            );
+            setBrewResultModal({
+              item: mapped,
+              recipe: recipeMeta,
+            });
+          } else {
+            showToast(res.message);
+          }
+        } else {
+          // Nếu chưa tới giờ hoặc lỗi khác thì bỏ cờ để thử lại sau
+          collectingOrderIdsRef.current.delete(orderId);
+        }
+      } catch {
+        collectingOrderIdsRef.current.delete(orderId);
+      }
+    },
+    [
+      brewBase,
+      brewFlavor,
+      brewTopping,
+      brewColor,
+      companionChar?.tags,
+      companionChar?.name,
+      effectiveTagPets,
+      onOptimisticAddInventoryItem,
+      refreshSupabaseInventoryAndRoll,
+    ]
+  );
+
+  const loadBrewOrders = useCallback(async () => {
+    if (!currentUser || currentUser.role === 'guest' || !currentUser.id) {
+      setBrewOrders([]);
       return;
     }
-    onAddPetals(-cost);
-    const newDrink = generateUniqueGameItem('drink');
-    const inserted = await insertCraftedDrinkToInventory({
-      item_type: 'drink',
-      item_name: newDrink.name,
-      rarity: newDrink.rarity,
-      color: newDrink.visual.primaryColor,
-    });
-    if (inserted) {
-      setNewlyReceivedIds((prev) => {
-        const next = new Set(prev);
-        next.add(inserted.id);
-        return next;
-      });
+    const orders = await fetchBrewOrdersFromSupabase();
+    setBrewOrders(orders);
+    const now = Date.now();
+    for (const ord of orders) {
+      const rMs = ord.ready_at ? new Date(ord.ready_at).getTime() : 0;
+      if (rMs > 0 && now >= rMs) {
+        collectReadyBrewOrder(ord);
+      }
     }
-    await onRefreshInventory?.();
-    emitGameQuestAction('gift_drink');
-    showToast(`☕ Đã pha chế thành công ly "${newDrink.name}" độc nhất!`);
+  }, [currentUser, collectReadyBrewOrder]);
+
+  useEffect(() => {
+    loadBrewOrders();
+  }, [loadBrewOrders]);
+
+  useEffect(() => {
+    if (activeZone === 'drinks') {
+      loadBrewOrders();
+    }
+  }, [activeZone, loadBrewOrders]);
+
+  // Kiểm tra mỗi giây: khi đếm ngược pha chế xong (nowMs >= ready_at) tự động gọi brew_collect(order)
+  useEffect(() => {
+    if (brewOrders.length === 0) return;
+    for (const ord of brewOrders) {
+      const rMs = ord.ready_at ? new Date(ord.ready_at).getTime() : 0;
+      if (rMs > 0 && nowMs >= rMs) {
+        collectReadyBrewOrder(ord);
+      }
+    }
+  }, [nowMs, brewOrders, collectReadyBrewOrder]);
+
+  const handleStartBrew = async () => {
+    if (!currentUser || currentUser.role === 'guest') {
+      onRequireAuth?.('Mời bạn đăng nhập để pha chế thức uống tại quầy nhé ☕');
+      return;
+    }
+    if (isStartingBrew) return;
+    if (brewOrders.length >= 3) {
+      showToast('☕ Quầy đang pha tối đa 3 ly cùng lúc rồi, đợi ly chín thêm chút nhé!');
+      return;
+    }
+    if (freeBrewsLeft <= 0 && !isOwner && coins < 3) {
+      const diff = Math.max(1, 3 - coins);
+      setBrewShortfallDiff(diff);
+      showToast(`Chưa đủ ${coinCurrencyName}, còn thiếu ${diff} ${coinCurrencyName}`);
+      return;
+    }
+
+    setBrewShortfallDiff(null);
+    setIsStartingBrew(true);
+    try {
+      const recipe: BrewRecipePayload = {
+        base: brewBase,
+        flavor: brewFlavor,
+        topping: brewTopping,
+        color: brewColor,
+      };
+      const res = await brewStartViaRpc(recipe);
+      if (!res.ok) {
+        if (res.errorCode === 'not_enough_coins') {
+          const diff = Math.max(1, 3 - coins);
+          setBrewShortfallDiff(diff);
+          showToast(`Chưa đủ ${coinCurrencyName}, còn thiếu ${diff} ${coinCurrencyName}`);
+        } else {
+          showToast(res.message);
+        }
+        await loadDailyStatus();
+        return;
+      }
+
+      if (typeof res.cost === 'number' && res.cost > 0) {
+        const c = await fetchMyCoinsFromSupabase();
+        setCoins(c);
+      }
+      setDailyStatus((prev) => ({
+        ...prev,
+        brews_used:
+          typeof res.brews_used === 'number' ? res.brews_used : prev.brews_used + 1,
+      }));
+
+      if (res.order && res.ready_at) {
+        const newOrderRow: SupabaseBrewOrderRow = {
+          id: res.order,
+          recipe,
+          ready_at: res.ready_at,
+          collected: false,
+        };
+        setBrewOrders((prev) => [...prev, newOrderRow]);
+      } else {
+        await loadBrewOrders();
+      }
+      await loadDailyQuests();
+      showToast(res.message);
+    } finally {
+      setIsStartingBrew(false);
+    }
   };
 
   // Lọc danh sách Kho đồ
@@ -1757,7 +2436,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
             <EditableText
               value={
                 customTexts['minigame_desc'] ||
-                'Mỗi bông hoa, chú cá, thú cưng và ly thức uống đều mang một cái tên và hình dáng riêng biệt không trùng lặp. Chăm sóc nhịp chậm để tặng tri kỷ hoặc mở khóa nhân vật mới.'
+                'Không gian chăm sóc hoa lá, hồ cá đêm, thú cưng và quầy pha chế ấm áp. Tích lũy thành quả mỗi ngày để tặng tri kỷ hoặc mở khóa nhân vật mới.'
               }
               onSave={(val) => onUpdateCustomText?.('minigame_desc', val)}
               editMode={canEdit}
@@ -1806,7 +2485,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
             {
               id: 'pond',
               label: '🐟 Hồ Cá Đêm',
-              badge: `${ownedFish.length} chú cá`,
+              badge: `${pondFishItems.length} cá bơi`,
             },
             {
               id: 'companion',
@@ -1815,8 +2494,8 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
             },
             {
               id: 'drinks',
-              label: '☕ Quầy Thức Uống',
-              badge: `${barDrinks.length} ly`,
+              label: '☕ Quầy Pha Chế & Kệ Ly',
+              badge: `${ownedDrinks.length} ly`,
             },
           ] as const
         ).map((tab) => {
@@ -1970,61 +2649,104 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
 
           {/* 2. ĐIỂM DANH & 3. NHIỆM VỤ HÔM NAY */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-            {/* 2. ĐIỂM DANH NHẬN XU */}
-            <div className="soft-card p-5 border border-[var(--border)] flex flex-col justify-between gap-4 bg-gradient-to-b from-[var(--surface)] to-[var(--bg)]">
+            {/* 2. ĐIỂM DANH NHẬN XU (trạng thái chỉ lấy từ rpc daily_status()) */}
+            <div
+              className={`soft-card p-5 border flex flex-col justify-between gap-4 transition-all ${
+                dailyStatus.checked_in
+                  ? 'border-emerald-400/60 bg-gradient-to-b from-emerald-500/10 to-[var(--bg)]'
+                  : 'border-[var(--border)] bg-gradient-to-b from-[var(--surface)] to-[var(--bg)]'
+              } ${checkInJustSparkled ? 'ring-4 ring-amber-400/40 animate-pulse' : ''}`}
+            >
               <div className="space-y-2">
-                <div className="flex items-center gap-2 text-xs font-bold text-[var(--accent)] uppercase tracking-wider">
-                  <Gift className="w-4 h-4" />
-                  <span>Điểm danh mỗi ngày</span>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-xs font-bold text-[var(--accent)] uppercase tracking-wider">
+                    <Gift className="w-4 h-4" />
+                    <span>Điểm danh hôm nay</span>
+                  </div>
+                  {dailyStatus.checked_in && (
+                    <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 text-[10px] font-extrabold">
+                      ✅ Đã điểm danh
+                    </span>
+                  )}
                 </div>
                 <h4 className="font-serif-title text-lg font-bold text-[var(--text)]">
-                  Món Quà Ban Mai 🎁
+                  Điểm danh hôm nay 🎁
                 </h4>
-                <p className="text-xs text-[var(--muted)] leading-relaxed">
-                  Mỗi ngày ghé thăm Chợ nhỏ, bạn sẽ được trao tặng 10 {coinCurrencyName} ngọt ngào để bắt đầu ngày mới tràn đầy niềm vui.
-                </p>
+                {!dailyStatus.checked_in ? (
+                  <p className="text-xs text-[var(--muted)] leading-relaxed">
+                    Mỗi ngày ghé thăm Chợ nhỏ, bấm nút bên dưới để nhận ngay +10 {coinCurrencyName} khởi đầu ngày mới nhé.
+                  </p>
+                ) : (
+                  <div className="p-3.5 rounded-2xl bg-emerald-500/10 border border-emerald-400/30 space-y-2">
+                    <p className="text-xs font-bold text-emerald-700 dark:text-emerald-300 leading-relaxed flex items-start gap-2">
+                      <span className="text-base shrink-0">✅</span>
+                      <span>
+                        Hôm nay bạn đã điểm danh rồi 🌙 Hẹn bạn 7 giờ sáng mai quay lại điểm danh nhé!
+                      </span>
+                    </p>
+                    {checkInJustSparkled && (
+                      <p className="text-[11px] font-extrabold text-amber-600 dark:text-amber-400 animate-bounce">
+                        ✨ +10 {coinCurrencyName} đã cộng vào túi của bạn!
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
 
               <div className="pt-2">
-                <button
-                  type="button"
-                  disabled={isClaimingDaily}
-                  onClick={handleClaimDailyCoins}
-                  className="w-full py-3 rounded-2xl font-extrabold text-xs bg-[var(--accent)] text-[#3a2b30] bouncy-btn shadow-sm cursor-pointer flex items-center justify-center gap-2 disabled:opacity-60"
-                >
-                  {isClaimingDaily ? (
-                    <RefreshCw className="w-4 h-4 animate-spin" />
-                  ) : (
-                    <span>🎁</span>
-                  )}
-                  <span>Nhận quà mỗi ngày (+10 {coinCurrencyName})</span>
-                </button>
-                <p className="text-[10px] text-[var(--muted)] text-center mt-2">
-                  Làm mới tự động sau 00:00 mỗi đêm
-                </p>
+                {!dailyStatus.checked_in ? (
+                  <>
+                    <button
+                      type="button"
+                      disabled={isClaimingDaily}
+                      onClick={handleClaimDailyCoins}
+                      className="w-full py-3 rounded-2xl font-extrabold text-xs bg-[var(--accent)] text-[#3a2b30] bouncy-btn shadow-sm cursor-pointer flex items-center justify-center gap-2 disabled:opacity-60"
+                    >
+                      {isClaimingDaily ? (
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <span>✨</span>
+                      )}
+                      <span>Điểm danh +10 {coinCurrencyName}</span>
+                    </button>
+                    <p className="text-[10px] text-[var(--muted)] text-center mt-2">
+                      Làm mới lúc 7 giờ sáng mỗi ngày
+                    </p>
+                  </>
+                ) : (
+                  <div className="px-3.5 py-2.5 rounded-2xl bg-[var(--surface)] border border-[var(--border)] flex items-center justify-between text-xs">
+                    <span className="text-[var(--muted)] font-semibold flex items-center gap-1.5">
+                      <Clock className="w-3.5 h-3.5 text-[var(--accent)]" />
+                      <span>Lượt mới lúc 7 giờ sáng:</span>
+                    </span>
+                    <strong className="font-mono text-amber-600 dark:text-amber-400">
+                      {questCountdownStr || '00:00:00'}
+                    </strong>
+                  </div>
+                )}
               </div>
             </div>
 
-            {/* 3. NHIỆM VỤ HÔM NAY (ĐỒNG HỒ ĐẾM NGƯỢC & 3 THẺ NHIỆM VỤ) */}
+            {/* 3. NHIỆM VỤ HÔM NAY (ĐỒNG HỒ ĐẾM NGƯỢC 7 GIỜ SÁNG & 3 THẺ NHIỆM VỤ) */}
             <div id="daily-quests-section" className="lg:col-span-2 soft-card p-5 border border-[var(--border)] space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border)] pb-3">
                 <div className="flex items-center gap-2">
                   <span className="text-lg">📋</span>
                   <div>
                     <h4 className="font-serif-title text-base font-bold text-[var(--text)]">
-                      Nhiệm Vụ Hôm Nay
+                      Nhiệm Vụ Nhỏ Hôm Nay
                     </h4>
                     <p className="text-[11px] text-[var(--muted)]">
-                      Làm hành động trong game để tự động nhận thưởng (hoặc bấm &quot;Mình đã làm xong&quot;).
+                      Hoàn thành hành động trong game rồi bấm &quot;Nhận thưởng&quot; để nhận {coinCurrencyName}.
                     </p>
                   </div>
                 </div>
 
-                {/* Đồng hồ đếm ngược resets_at */}
+                {/* Đồng hồ đếm ngược resets_at (7 giờ sáng) */}
                 <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-[var(--bg)] border border-[var(--border)] text-[11px] font-bold text-[var(--text)]">
                   <Clock className="w-3.5 h-3.5 text-[var(--accent)]" />
                   <span>
-                    Nhiệm vụ mới sau:{' '}
+                    Nhiệm vụ mới lúc 7 giờ sáng · còn{' '}
                     <strong className="text-amber-600 dark:text-amber-400 font-mono">
                       {questCountdownStr || '00:00:00'}
                     </strong>
@@ -2155,7 +2877,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
             </div>
           </div>
 
-          {/* 4. CỬA HÀNG CHỢ NHỎ: HÌNH MINH HỌA SVG MẪU CHO MỖI LOẠI */}
+          {/* 4. CỬA HÀNG CHỢ NHỎ: LỜI RIÊNG THÂN MẬT THEO NHÓM HÀNG (LƯU TRONG site_settings.market_texts) */}
           <div className="soft-card p-6 space-y-4 border border-[var(--border)]">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-[var(--border)] pb-3">
               <div>
@@ -2167,9 +2889,6 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                   Hạt giống hoa mua về đem gieo ở Vườn hoa (nở thành Hoa sau 30 phút), cá mới mua cần 30 phút để lớn khôn trước khi mở khóa nhân vật ⏳
                 </p>
               </div>
-              <span className="text-xs text-[var(--muted)] italic">
-                ✨ Mỗi bé có hình dáng và tên riêng do server cấp
-              </span>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -2181,6 +2900,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                     {
                       name: string;
                       emoji: string;
+                      tagline: string;
                       desc: string;
                       needGrow: boolean;
                       sampleSeed: string;
@@ -2189,28 +2909,32 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                     flower: {
                       name: 'Hạt giống hoa',
                       emoji: '🌱',
-                      desc: 'Hạt giống hoa mang sắc màu riêng, đem gieo vào ô Vườn hoa để nở thành Hoa sau 30 phút.',
+                      tagline: effectiveMarketTexts.seed,
+                      desc: 'Hạt giống hoa đem gieo vào ô Vườn hoa để nở thành Hoa sau 30 phút.',
                       needGrow: true,
                       sampleSeed: 'market_sample_flower_sakura_bloom',
                     },
                     fish: {
                       name: 'Cá Bơi',
                       emoji: '🐟',
-                      desc: 'Chú cá lấp lánh, ấp nở và bơi chậm trong Hồ cá đêm.',
+                      tagline: effectiveMarketTexts.fish,
+                      desc: 'Chú cá lấp lánh, thả vào Hồ cá đêm để ấp nở và bơi lội êm đềm.',
                       needGrow: true,
                       sampleSeed: 'market_sample_fish_koi_moon',
                     },
                     drink: {
                       name: 'Thức Uống',
                       emoji: '☕',
-                      desc: 'Ly nước pha sẵn ngọt lành, bày ở Quầy thức uống và dùng ngay.',
+                      tagline: effectiveMarketTexts.drink,
+                      desc: 'Ly nước pha sẵn ngọt lành, trưng trên kệ gỗ ở Quầy pha chế và dùng ngay.',
                       needGrow: false,
                       sampleSeed: 'market_sample_drink_matcha_latte',
                     },
                     pet: {
                       name: 'Thú Cưng',
                       emoji: '🐾',
-                      desc: 'Người bạn thú đáng yêu có loài, màu lông và biểu cảm riêng.',
+                      tagline: effectiveMarketTexts.pet,
+                      desc: 'Người bạn thú đáng yêu đồng hành cùng bạn và người thương tại Khu thú cưng.',
                       needGrow: false,
                       sampleSeed: 'market_sample_pet_fluffy_kitty',
                     },
@@ -2218,6 +2942,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                   const meta = labelMap[row.kind] || {
                     name: row.kind,
                     emoji: '📦',
+                    tagline: effectiveMarketTexts.seed,
                     desc: 'Vật phẩm kỳ diệu tại Chợ nhỏ.',
                     needGrow: false,
                     sampleSeed: `market_sample_${row.kind}`,
@@ -2249,12 +2974,12 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                           )}
                         </div>
 
-                        <div className="text-center space-y-0.5">
+                        <div className="text-center space-y-1">
                           <h5 className="font-serif-title text-base font-bold text-[var(--text)]">
                             {row.buy_price} {coinCurrencyName} → 1 {meta.emoji} {meta.name}
                           </h5>
-                          <p className="text-[10.5px] font-semibold text-[var(--accent)]">
-                            ✨ Mỗi bé có hình dáng và tên riêng
+                          <p className="text-xs font-bold text-[var(--accent)]">
+                            {meta.tagline}
                           </p>
                         </div>
 
@@ -2518,35 +3243,28 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                 )}
               </div>
 
-              <div className="flex flex-wrap items-center gap-3">
-                <button
-                  type="button"
-                  disabled={!hasFreeGachaToday || isRollingGacha}
-                  onClick={() => handleRollGacha(true)}
-                  className={`flex-1 py-3 px-4 rounded-full text-xs font-bold transition-all inline-flex items-center justify-center gap-2 ${
-                    hasFreeGachaToday
-                      ? 'bg-[var(--accent)] text-[#3a2b30] bouncy-btn cursor-pointer shadow-sm'
-                      : 'bg-[var(--border)] text-[var(--muted)] opacity-60 cursor-not-allowed'
-                  }`}
-                >
-                  <Gift className="w-4 h-4" />
-                  <span>
-                    {hasFreeGachaToday
-                      ? '🎁 Mở quà Miễn Phí hôm nay (1/1)'
-                      : 'Đã nhận lượt miễn phí hôm nay'}
-                  </span>
-                </button>
-
+              {/* Nút mở quà Gacha theo daily_status().rolled */}
+              {hasFreeGachaToday ? (
                 <button
                   type="button"
                   disabled={isRollingGacha}
-                  onClick={() => handleRollGacha(false)}
-                  className="py-3 px-5 rounded-full text-xs font-bold border-2 border-[var(--accent)] bg-[var(--surface)] text-[var(--text)] hover:bg-[var(--accent)]/20 bouncy-btn cursor-pointer inline-flex items-center gap-1.5"
+                  onClick={handleRollGacha}
+                  className="w-full py-3.5 px-5 rounded-full text-xs font-extrabold bg-[var(--accent)] text-[#3a2b30] bouncy-btn cursor-pointer shadow-sm inline-flex items-center justify-center gap-2 disabled:opacity-60"
                 >
-                  <Sparkles className="w-3.5 h-3.5 text-[var(--accent)]" />
-                  <span>Roll thêm (-15 {currencyName})</span>
+                  <Gift className="w-4 h-4" />
+                  <span>🎁 Mở quà hôm nay</span>
                 </button>
-              </div>
+              ) : (
+                <div className="p-4 rounded-2xl bg-[var(--bg)] border border-[var(--border)] flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                  <span className="font-bold text-[var(--text)]">
+                    🎁 Hôm nay bạn đã mở quà rồi, 7 giờ sáng mai có lượt miễn phí mới nhé
+                  </span>
+                  <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[var(--surface)] border border-[var(--border)] font-mono font-bold text-amber-600 dark:text-amber-400 shrink-0">
+                    <Clock className="w-3.5 h-3.5 text-[var(--accent)]" />
+                    <span>{questCountdownStr || '00:00:00'}</span>
+                  </span>
+                </div>
+              )}
             </div>
 
             {/* Bảng Nhiệm vụ nhỏ mỗi ngày kiếm Cánh hoa */}
@@ -2706,10 +3424,10 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                   {hasFreeGachaToday && (
                     <button
                       type="button"
-                      onClick={() => handleRollGacha(true)}
+                      onClick={handleRollGacha}
                       className="px-4 py-2 rounded-full text-xs font-bold border border-[var(--accent)] bg-[var(--surface)] text-[var(--text)] cursor-pointer"
                     >
-                      🎁 Mở Gacha Miễn Phí
+                      🎁 Mở quà hôm nay
                     </button>
                   )}
                 </div>
@@ -2765,7 +3483,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                               : item.category === 'flower'
                               ? 4
                               : fishStage,
-                            { size: 54 }
+                            { size: 54, meta: item.meta }
                           )}
                         </div>
                         <div className="min-w-0 space-y-1 pr-6">
@@ -2821,13 +3539,16 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                             ? sanitizePetVibeNote(
                                 item.vibeReason || item.description,
                                 item.matchedTag,
-                                item.petSpecies
+                                item.petSpecies,
+                                companionChar?.name
                               )
                             : item.category === 'flower'
                             ? '🌸 Hoa đã nở rực rỡ — sẵn sàng dùng để mở khóa nhân vật hoặc tặng người thương.'
                             : item.category === 'fish'
-                            ? '🐟 Đã lớn khôn — đang bơi trong Hồ cá & sẵn sàng mở khóa.'
-                            : '☕ Sẵn sàng thưởng thức ở Quầy thức uống hoặc mở khóa nhân vật.'}
+                            ? pondFishIdSet.has(item.id)
+                              ? '🐟 Đang bơi lội trong Hồ cá đêm & sẵn sàng mở khóa.'
+                              : '🐟 Đang ở trong Kho đồ — có thể thả xuống Hồ cá đêm hoặc mở khóa nhân vật.'
+                            : '☕ Đang trưng trên kệ gỗ ở Quầy pha chế & sẵn sàng tặng người thương.'}
                         </p>
                       )}
 
@@ -3166,6 +3887,9 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                   <h4 className="font-serif-title text-base font-bold text-[var(--text)]">
                     ➕ Mua thêm ô vườn
                   </h4>
+                  <p className="text-xs font-bold text-[var(--accent)]">
+                    {effectiveMarketTexts.plot}
+                  </p>
                   <p className="text-xs font-extrabold text-amber-600 dark:text-amber-400">
                     Giá:{' '}
                     {isOwner
@@ -3211,78 +3935,329 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
       )}
 
       {/* =====================================================================
-          KHU 3: HỒ CÁ (HIỂN THỊ MỌI MÓN kind = 'fish' TRONG INVENTORY)
+          KHU 3: HỒ CÁ ĐÊM (CÂU CÁ 5 GIÂY fish_cast/fish_catch & THẢ CÁ pond_fish)
          ===================================================================== */}
       {activeZone === 'pond' && (
         <div className="space-y-6">
           <div className="soft-card p-6 space-y-5">
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-[var(--border)] pb-4">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-[var(--border)] pb-4">
               <div className="space-y-1">
-                <h3 className="font-serif-title text-2xl font-bold text-[var(--text)] flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <Fish className="w-5 h-5 text-[var(--accent)]" />
-                  <span>Hồ Cá Đêm ({ownedFish.length} chú cá)</span>
-                </h3>
-                <p className="text-xs text-[var(--muted)]">
-                  Mọi chú cá trong Kho đồ đều bơi tại đây. Khi chưa tới giờ nở (<code>ready_at</code>) sẽ hiện là <strong>🥚 Trứng cá</strong>, khi tới giờ sẽ nở thành cá bơi chậm có tên riêng!
+                  <h3 className="font-serif-title text-2xl font-bold text-[var(--text)]">
+                    Hồ Cá Đêm ({pondFishItems.length} chú cá đang bơi)
+                  </h3>
+                  <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-[var(--accent)]/25 text-[var(--text)]">
+                    🎣 Còn {freeCastsLeft} lượt câu miễn phí hôm nay (làm mới 7 giờ sáng)
+                  </span>
+                </div>
+                <p className="text-xs text-[var(--muted)] leading-relaxed">
+                  Thả cần câu để săn hộp quà 🎁 trôi qua lại trong 5 giây! Cá mới nhận được cất vào Kho đồ — bấm <strong>➕ Thả cá vào hồ</strong> để chọn những chú cá bạn muốn cho bơi trong hồ nhé.
                 </p>
               </div>
 
-              <div className="flex flex-wrap items-center gap-2.5">
-                <span className="sticker-chip text-xs font-bold">
-                  🐟 Hạt cá hiện có: {roomState.fishFoodCount}
-                </span>
+              <div className="flex flex-wrap items-center gap-2">
+                {/* Nút Thả cần câu */}
+                <button
+                  type="button"
+                  onClick={handleClickCastButton}
+                  disabled={
+                    fishingPhase === 'dropping' ||
+                    fishingPhase === 'active' ||
+                    fishingPhase === 'catching'
+                  }
+                  className="px-4 py-2.5 rounded-full text-xs font-extrabold bg-gradient-to-r from-amber-400 via-amber-300 to-amber-400 text-stone-900 shadow-xs hover:brightness-105 bouncy-btn cursor-pointer inline-flex items-center gap-1.5 disabled:opacity-60"
+                >
+                  <span>
+                    {fishingPhase === 'dropping'
+                      ? '🎣 Đang thả dây câu...'
+                      : fishingPhase === 'active'
+                      ? '🎁 Bấm vào hộp quà dưới hồ!'
+                      : fishingPhase === 'catching'
+                      ? '✨ Đang kéo quà lên...'
+                      : freeCastsLeft > 0 || isOwner
+                      ? '🎣 Thả cần'
+                      : `🎣 Câu thêm (5 ${coinCurrencyName})`}
+                  </span>
+                </button>
+
+                {/* Nút ➕ Thả cá vào hồ */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!currentUser || currentUser.role === 'guest') {
+                      onRequireAuth?.('Mời bạn đăng nhập để thả cá vào hồ nhé 🐟');
+                      return;
+                    }
+                    setSelectedFishIdsToRelease(
+                      unreleasedFishItems.map((f) => f.id)
+                    );
+                    setReleaseFishModalOpen(true);
+                  }}
+                  className="px-4 py-2.5 rounded-full text-xs font-bold bg-[var(--accent)] text-[#3a2b30] bouncy-btn cursor-pointer inline-flex items-center gap-1.5 shadow-2xs"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>
+                    ➕ Thả cá vào hồ ({unreleasedFishItems.length})
+                  </span>
+                </button>
+
                 <button
                   type="button"
                   onClick={handleBuyFishFood}
-                  className="px-4 py-2 rounded-full text-xs font-bold bg-[var(--accent)] text-[#3a2b30] bouncy-btn cursor-pointer inline-flex items-center gap-1.5"
+                  className="px-3.5 py-2 rounded-full text-xs font-bold border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] hover:border-[var(--accent)] cursor-pointer inline-flex items-center gap-1.5"
                 >
                   <ShoppingBag className="w-3.5 h-3.5" />
-                  <span>Mua +3 Hạt cá (-8 {currencyEmoji})</span>
+                  <span>+3 Hạt cá (-8 {currencyEmoji})</span>
                 </button>
-                <button
-                  type="button"
-                  onClick={handleFishCast}
-                  disabled={isCastingRod}
-                  className="px-4 py-2 rounded-full text-xs font-bold border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] hover:border-[var(--accent)] cursor-pointer inline-flex items-center gap-1.5"
-                >
-                  <span>{isCastingRod ? '🎣 Đang thả câu...' : '🎣 Thả cần câu'}</span>
-                </button>
+
                 <button
                   type="button"
                   onClick={() => setActiveZone('market')}
-                  className="px-4 py-2 rounded-full text-xs font-bold border border-[var(--accent)] bg-[var(--surface)] text-[var(--text)] hover:bg-[var(--accent)]/20 cursor-pointer inline-flex items-center gap-1.5"
+                  className="px-3.5 py-2 rounded-full text-xs font-bold border border-[var(--accent)] bg-[var(--surface)] text-[var(--text)] hover:bg-[var(--accent)]/20 cursor-pointer inline-flex items-center gap-1.5"
                 >
                   <Store className="w-3.5 h-3.5" />
-                  <span>Mua thêm cá ở Chợ</span>
+                  <span>Chợ cá</span>
                 </button>
               </div>
             </div>
 
-            {/* Mặt hồ SVG trực quan có cá bơi chậm */}
-            <div className="relative h-64 rounded-2xl border-2 border-[var(--border)] bg-gradient-to-b from-[#9cc7ee]/20 to-[#8fcfbf]/25 overflow-hidden p-4">
+            {/* Thanh thông tin lượt câu miễn phí hôm nay */}
+            <div className="px-4 py-2.5 rounded-2xl bg-[var(--bg)] border border-[var(--border)] flex flex-wrap items-center justify-between gap-2 text-xs">
+              <div className="flex items-center gap-2">
+                <span>🎣</span>
+                <span className="font-bold text-[var(--text)]">
+                  Còn {freeCastsLeft} lượt câu miễn phí hôm nay (làm mới 7 giờ sáng)
+                </span>
+                {freeCastsLeft === 0 && !isOwner && (
+                  <span className="text-[11px] text-amber-600 dark:text-amber-400 font-semibold">
+                    · Hết lượt miễn phí, câu thêm tốn 5 {coinCurrencyName}/lượt
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-3 text-[11px] text-[var(--muted)]">
+                <span>🐟 Hạt cá: <strong className="text-[var(--text)]">{roomState.fishFoodCount}</strong></span>
+                <span>📦 Cá chờ thả trong kho: <strong className="text-[var(--text)]">{unreleasedFishItems.length}</strong></span>
+              </div>
+            </div>
+
+            {/* Cảnh báo thiếu Xu khi câu thêm */}
+            {castShortfallDiff !== null && castShortfallDiff > 0 && (
+              <div className="p-4 rounded-2xl border-2 border-rose-400 bg-rose-500/10 text-xs flex flex-wrap items-center justify-between gap-3 animate-fade-in">
+                <div className="space-y-0.5">
+                  <p className="font-extrabold text-rose-600 dark:text-rose-300">
+                    ⚠️ Chưa đủ {coinCurrencyName}, còn thiếu {castShortfallDiff} {coinCurrencyName} để câu thêm!
+                  </p>
+                  <p className="text-[11px] text-[var(--muted)]">
+                    Hoàn thành nhiệm vụ hằng ngày hoặc điểm danh để nhận thêm {coinCurrencyName} nhé.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleGoToDailyQuests}
+                    className="px-3.5 py-1.5 rounded-full bg-[var(--accent)] text-[#3a2b30] font-bold text-xs cursor-pointer bouncy-btn"
+                  >
+                    📋 Đi làm nhiệm vụ
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCastShortfallDiff(null)}
+                    className="px-2.5 py-1.5 rounded-full border border-[var(--border)] text-[var(--muted)] hover:text-[var(--text)] text-xs cursor-pointer"
+                  >
+                    Đóng
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Mặt hồ SVG trực quan: Câu cá tương tác 5 giây + Cá trong pond_fish bơi chậm */}
+            <div
+              onClick={() => {
+                // Nếu đang có hộp quà active mà bấm trượt ra ngoài mặt hồ -> hụt quà
+                if (fishingPhase === 'active' && fishingSessionRef.current) {
+                  handleFishingMiss(fishingSessionRef.current);
+                }
+              }}
+              className={`relative h-72 rounded-2xl border-2 border-[var(--border)] bg-gradient-to-b from-[#9cc7ee]/25 via-[#89bdd8]/20 to-[#8fcfbf]/30 overflow-hidden p-4 select-none ${
+                fishingPhase === 'active' ? 'cursor-crosshair ring-2 ring-amber-400/60' : ''
+              }`}
+            >
+              {/* Sóng nước dịu */}
               <div className="absolute inset-0 pointer-events-none opacity-30">
-                <div className="w-32 h-32 rounded-full border border-[var(--accent)] absolute top-6 left-12 animate-ping" style={{ animationDuration: '6s' }} />
-                <div className="w-40 h-40 rounded-full border border-[var(--accent)] absolute bottom-4 right-16 animate-ping" style={{ animationDuration: '8s' }} />
+                <div
+                  className="w-32 h-32 rounded-full border border-[var(--accent)] absolute top-6 left-12 animate-ping"
+                  style={{ animationDuration: '6s' }}
+                />
+                <div
+                  className="w-40 h-40 rounded-full border border-[var(--accent)] absolute bottom-4 right-16 animate-ping"
+                  style={{ animationDuration: '8s' }}
+                />
               </div>
 
-              {ownedFish.length === 0 ? (
+              {/* Hiệu ứng nước bắn khi vừa thả cá vào hồ */}
+              {pondSplashEffect && (
+                <div className="absolute inset-0 pointer-events-none flex items-center justify-center z-20 animate-fade-in">
+                  <div className="px-4 py-2 rounded-full bg-sky-500/20 border border-sky-300/60 backdrop-blur-xs text-xs font-extrabold text-[var(--text)] shadow-lg animate-bounce">
+                    💦 Tủm! Các bé cá vừa nhảy xuống hồ mát lành ✨
+                  </div>
+                </div>
+              )}
+
+              {/* Hoạt ảnh dây câu SVG thả xuống mặt nước (~1 giây + vòng sóng lan) */}
+              {(fishingPhase === 'dropping' ||
+                fishingPhase === 'active' ||
+                fishingPhase === 'catching') && (
+                <svg
+                  className="absolute inset-0 w-full h-full pointer-events-none z-20"
+                  viewBox="0 0 400 220"
+                  preserveAspectRatio="none"
+                >
+                  {/* Cần câu ở góc trên */}
+                  <path
+                    d="M 180 0 Q 195 25 200 42"
+                    stroke="#8d6e63"
+                    strokeWidth="4"
+                    fill="none"
+                    strokeLinecap="round"
+                  />
+                  {/* Dây câu thả xuống */}
+                  <line
+                    x1="200"
+                    y1="42"
+                    x2={fishingPhase === 'active' ? `${fishingBoxX * 4}` : '200'}
+                    y2={fishingPhase === 'active' ? `${fishingBoxY * 2.2}` : '125'}
+                    stroke="#ffffff"
+                    strokeWidth="1.5"
+                    strokeDasharray="3 2"
+                    opacity="0.85"
+                  />
+                  {/* Vòng sóng lan nơi phao chạm nước */}
+                  <ellipse
+                    cx={fishingPhase === 'active' ? `${fishingBoxX * 4}` : '200'}
+                    cy={fishingPhase === 'active' ? `${fishingBoxY * 2.2}` : '125'}
+                    rx="18"
+                    ry="6"
+                    fill="none"
+                    stroke="#ffffff"
+                    strokeWidth="1.5"
+                    opacity="0.65"
+                  >
+                    <animate
+                      attributeName="rx"
+                      values="8;28;8"
+                      dur="1.2s"
+                      repeatCount="indefinite"
+                    />
+                    <animate
+                      attributeName="opacity"
+                      values="0.8;0.1;0.8"
+                      dur="1.2s"
+                      repeatCount="indefinite"
+                    />
+                  </ellipse>
+                </svg>
+              )}
+
+              {/* Trạng thái đang thả dây câu (~1s) */}
+              {fishingPhase === 'dropping' && (
+                <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 px-4 py-1.5 rounded-full bg-[var(--surface)]/95 border border-[var(--accent)] text-xs font-extrabold text-[var(--text)] shadow-md animate-pulse">
+                  🎣 Dây câu đang chạm mặt nước... Chuẩn bị bấm vào hộp quà nhé!
+                </div>
+              )}
+
+              {/* Hộp quà 🎁 chạy qua lại + vòng tròn đếm ngược ĐÚNG 5 GIÂY */}
+              {fishingPhase === 'active' && (
+                <>
+                  <div className="absolute top-3 left-1/2 -translate-x-1/2 z-30 px-4 py-1.5 rounded-full bg-amber-400 text-stone-900 text-xs font-black shadow-md flex items-center gap-2">
+                    <span>🎯 Bấm trúng hộp quà 🎁 trước khi hết giờ!</span>
+                    <span className="font-mono bg-white/80 px-2 py-0.5 rounded-full text-[11px]">
+                      {(fishingRemainingMs / 1000).toFixed(1)}s
+                    </span>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleFishingCatchSuccess}
+                    style={{
+                      left: `${fishingBoxX}%`,
+                      top: `${fishingBoxY}%`,
+                      transition: 'left 65ms linear, top 65ms linear',
+                    }}
+                    className="absolute -translate-x-1/2 -translate-y-1/2 z-30 w-16 h-16 rounded-full flex items-center justify-center cursor-pointer group focus:outline-none"
+                    title="Bấm ngay để bắt hộp quà!"
+                  >
+                    {/* Vòng tròn SVG đếm ngược 5 giây */}
+                    <svg className="absolute inset-0 w-16 h-16 -rotate-90" viewBox="0 0 64 64">
+                      <circle
+                        cx="32"
+                        cy="32"
+                        r="28"
+                        fill="rgba(255, 255, 255, 0.22)"
+                        stroke="rgba(255,255,255,0.4)"
+                        strokeWidth="4"
+                      />
+                      <circle
+                        cx="32"
+                        cy="32"
+                        r="28"
+                        fill="none"
+                        stroke="#f59e0b"
+                        strokeWidth="4.5"
+                        strokeLinecap="round"
+                        strokeDasharray={2 * Math.PI * 28}
+                        strokeDashoffset={
+                          2 * Math.PI * 28 * (1 - fishingRemainingMs / 5000)
+                        }
+                      />
+                    </svg>
+                    <span className="relative text-3xl drop-shadow-md group-hover:scale-125 active:scale-95 transition-transform animate-bounce">
+                      🎁
+                    </span>
+                  </button>
+                </>
+              )}
+
+              {/* Thông báo khi hụt mất hộp quà */}
+              {fishingPhase === 'missed' && (
+                <div className="absolute inset-0 z-30 flex items-center justify-center pointer-events-none">
+                  <div className="px-5 py-3 rounded-2xl bg-[var(--surface)]/95 border-2 border-amber-400 text-center space-y-1 shadow-xl animate-fade-in">
+                    <div className="text-2xl animate-bounce">🎁💨</div>
+                    <p className="text-xs font-extrabold text-[var(--text)]">
+                      {fishingMissMessage || 'Hụt mất quà rồi, thử lại nhé 🥺'}
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* Cá đang bơi trong hồ (chỉ hiển thị cá trong bảng pond_fish) */}
+              {pondLoading ? (
+                <div className="h-full flex items-center justify-center text-xs text-[var(--muted)] gap-2">
+                  <RefreshCw className="w-4 h-4 animate-spin text-[var(--accent)]" />
+                  <span>Đang tải Hồ cá đêm...</span>
+                </div>
+              ) : pondFishItems.length === 0 ? (
                 <div className="h-full flex flex-col items-center justify-center text-center gap-2 text-xs text-[var(--muted)]">
                   <p className="font-bold text-[var(--text)]">
                     Mặt hồ đêm đang tĩnh lặng 🐟
                   </p>
-                  <p>
-                    Hãy ghé Chợ nhỏ hoặc mở Gacha để thả những chú cá đầu tiên xuống hồ nhé!
+                  <p className="max-w-md">
+                    {unreleasedFishItems.length > 0
+                      ? `Bạn đang có ${unreleasedFishItems.length} bé cá trong Kho đồ chờ thả xuống hồ. Hãy bấm nút "➕ Thả cá vào hồ" phía trên nhé!`
+                      : 'Hãy bấm "🎣 Thả cần" để câu quà hoặc ghé Chợ nhỏ rước cá về thả xuống hồ nhé!'}
                   </p>
                 </div>
               ) : (
-                ownedFish.map((fish, idx) => {
+                pondFishItems.map((fish, idx) => {
                   const readyMs = fish.readyAt ? new Date(fish.readyAt).getTime() : 0;
-                  const isEgg = Boolean(fish.readyAt && !Number.isNaN(readyMs) && readyMs > nowMs);
-                  const topPercent = 12 + ((idx * 23) % 68);
+                  const isEgg = Boolean(
+                    fish.readyAt && !Number.isNaN(readyMs) && readyMs > nowMs
+                  );
+                  const topPercent = 16 + ((idx * 23) % 62);
                   const swimOffset = (idx * 19) % 80;
                   const leftPercent = isEgg
-                    ? 12 + ((idx * 17) % 74)
-                    : (swimOffset + Math.floor(nowMs / 1000) * 2) % 84;
+                    ? 14 + ((idx * 17) % 72)
+                    : (swimOffset + Math.floor(nowMs / 1000) * 2) % 82;
                   const care = fishCareMap[fish.id];
                   const isFull = (care?.fullUntil || 0) > nowMs;
 
@@ -3294,19 +4269,25 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                         left: `${leftPercent}%`,
                         transition: 'left 1.2s linear, top 1s ease',
                       }}
-                      className="absolute flex flex-col items-center group"
+                      className="absolute flex flex-col items-center group z-10"
                     >
                       {(care?.pendingPetals || 0) > 0 && (
                         <button
                           type="button"
-                          onClick={() => handleCollectFishPetals(fish)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleCollectFishPetals(fish);
+                          }}
                           className="mb-1 px-2 py-0.5 rounded-full bg-[var(--accent)] text-[#3a2b30] text-[10px] font-bold shadow-sm animate-bounce cursor-pointer"
                         >
                           +{care?.pendingPetals} {currencyEmoji}
                         </button>
                       )}
                       <div
-                        onClick={() => handleFeedFish(fish)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleFeedFish(fish);
+                        }}
                         title={`Bấm để cho "${fish.name}" ăn`}
                         className="cursor-pointer hover:scale-110 transition-transform"
                       >
@@ -3327,15 +4308,18 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
               )}
             </div>
 
-            {/* Danh sách chi tiết từng chú cá trong hồ */}
-            {ownedFish.length > 0 && (
+            {/* Danh sách chi tiết từng chú cá đang bơi trong hồ (pond_fish) */}
+            {pondFishItems.length > 0 && (
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                {ownedFish.map((fish) => {
+                {pondFishItems.map((fish) => {
                   const readyMs = fish.readyAt ? new Date(fish.readyAt).getTime() : 0;
-                  const isEgg = Boolean(fish.readyAt && !Number.isNaN(readyMs) && readyMs > nowMs);
+                  const isEgg = Boolean(
+                    fish.readyAt && !Number.isNaN(readyMs) && readyMs > nowMs
+                  );
                   const remainingMs = isEgg ? Math.max(0, readyMs - nowMs) : 0;
                   const care = fishCareMap[fish.id];
                   const isFull = (care?.fullUntil || 0) > nowMs;
+                  const isTakingOut = takingOutFishId === fish.id;
 
                   return (
                     <div
@@ -3355,7 +4339,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                         <div className="min-w-0">
                           <div className="flex items-center gap-1.5 flex-wrap">
                             <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[var(--surface)] border border-[var(--border)]">
-                              {isEgg ? '🥚 Trứng đang ấp' : '🐟 Cá đang bơi'}
+                              {isEgg ? '🥚 Trứng nổi trên hồ' : '🐟 Đang bơi trong hồ'}
                             </span>
                             <span className="text-[10px] font-bold text-[var(--muted)]">
                               {RARITY_LABELS[fish.rarity]}
@@ -3366,7 +4350,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                           </h4>
                           <p className="text-[11px] text-[var(--muted)]">
                             {isEgg
-                              ? `Đang lớn, còn ${formatCountdown(remainingMs)}`
+                              ? `Đang ấp nở, còn ${formatCountdown(remainingMs)}`
                               : isFull
                               ? 'Đang no bụng & bơi lội vui vẻ ✨'
                               : 'Đang bơi chậm trong hồ'}
@@ -3383,13 +4367,23 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                           🐟 Cho ăn
                         </button>
 
+                        <button
+                          type="button"
+                          disabled={isTakingOut}
+                          onClick={() => handleTakeOutFish(fish)}
+                          className="px-3 py-1.5 rounded-full text-xs font-bold border border-[var(--border)] bg-[var(--surface)] hover:border-[var(--accent)] text-[var(--text)] cursor-pointer disabled:opacity-50"
+                          title="Nhấc cá khỏi hồ cất về Kho đồ"
+                        >
+                          {isTakingOut ? 'Đang nhấc...' : 'Nhấc lên'}
+                        </button>
+
                         {(care?.pendingPetals || 0) > 0 && (
                           <button
                             type="button"
                             onClick={() => handleCollectFishPetals(fish)}
                             className="px-3 py-1.5 rounded-full text-xs font-bold border border-[var(--accent)] bg-[var(--surface)] text-[var(--text)] cursor-pointer"
                           >
-                            Nhận +{care?.pendingPetals} {currencyEmoji}
+                            +{care?.pendingPetals} {currencyEmoji}
                           </button>
                         )}
                       </div>
@@ -3403,7 +4397,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
       )}
 
       {/* =====================================================================
-          KHU 4: KHU THÚ CƯNG & PHÒNG TRI KỶ (HIỂN THỊ MỌI MÓN kind = 'pet' TRONG INVENTORY)
+          KHU 4: KHU THÚ CƯNG & PHÒNG TRI KỶ (XƯNG HÔ & GIỌNG VĂN THEO CHAR)
          ===================================================================== */}
       {activeZone === 'companion' && (
         <div className="space-y-6">
@@ -3480,7 +4474,7 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                   </div>
                 </div>
 
-                {/* Thông tin Văn phong theo Tag của nhân vật đồng hành */}
+                {/* Thông tin Văn phong theo Tag & Cặp xưng hô từ resolveAddress(char) */}
                 <div className="px-3.5 py-2.5 rounded-xl bg-[var(--surface)] border border-[var(--border)] flex flex-wrap items-center justify-between gap-2 text-[11px]">
                   <div className="text-[var(--muted)]">
                     <span className="font-bold text-[var(--text)]">
@@ -3493,8 +4487,8 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                       ({companionBlendedVoices[0]?.rhythm})
                     </span>
                   </div>
-                  <span className="sticker-chip text-[10px]">
-                    Xưng hô: {companionBlendedVoices[0]?.pronouns}
+                  <span className="sticker-chip text-[10px] font-bold">
+                    Xưng hô: {companionAddressPair.self} - {companionAddressPair.user}
                   </span>
                 </div>
 
@@ -3603,9 +4597,15 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                   </button>
                 </div>
 
-                <p className="text-xs text-[var(--muted)]">
-                  Mọi bé thú cưng trong Kho đồ đều hiện diện tại đây với hình dáng theo seed, tên riêng, độ no và niềm vui.
-                </p>
+                {/* Lời nhận xét riêng của nhân vật đồng hành về thú cưng (dùng đúng cặp xưng-gọi, không tự xưng bằng tên riêng) */}
+                {companionPetComment && (
+                  <div className="p-3 rounded-2xl bg-[var(--bg)] border-l-4 border-[var(--accent)] text-xs italic text-[var(--text)] leading-relaxed">
+                    <span className="font-bold not-italic text-[var(--accent)] mr-1">
+                      💬 {companionChar?.name}:
+                    </span>
+                    {companionPetComment}
+                  </div>
+                )}
 
                 {/* Sân nhỏ cho thú cưng đi lang thang */}
                 <div className="relative h-48 rounded-2xl border-2 border-dashed border-[var(--border)] bg-[var(--bg)] overflow-hidden p-3">
@@ -3699,7 +4699,8 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                     const cleanPetNote = sanitizePetVibeNote(
                       pet.vibeReason || pet.description,
                       pet.matchedTag,
-                      pet.petSpecies
+                      pet.petSpecies,
+                      companionChar?.name
                     );
                     return (
                       <div
@@ -3776,88 +4777,527 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
       )}
 
       {/* =====================================================================
-          KHU 5: QUẦY THỨC UỐNG (HIỂN THỊ MỌI MÓN kind = 'drink' TRONG INVENTORY)
+          KHU 5: QUẦY PHA CHẾ (brew_start / brew_collect / brew_orders) & KỆ GỖ NHIỀU TẦNG
          ===================================================================== */}
       {activeZone === 'drinks' && (
-        <div className="soft-card p-6 space-y-6">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[var(--border)] pb-4">
-            <div className="space-y-1">
-              <h3 className="font-serif-title text-2xl font-bold text-[var(--text)] flex items-center gap-2">
-                <Coffee className="w-5 h-5 text-[var(--accent)]" />
-                <span>Quầy Thức Uống Đêm ({barDrinks.length} ly có sẵn)</span>
-              </h3>
-              <p className="text-xs text-[var(--muted)]">
-                Mọi ly thức uống trong Kho đồ đều được bày tại quầy với màu nước, ống hút và topping vẽ riêng theo seed. Bấm <strong>Tặng cho người thương</strong> để mời {companionChar?.name} thưởng thức!
-              </p>
-            </div>
+        <div className="space-y-6">
+          {/* A. QUẦY PHA CHẾ CÔNG THỨC RIÊNG (1 PHÚT) */}
+          <div className="soft-card p-6 space-y-5">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-[var(--border)] pb-4">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Coffee className="w-5 h-5 text-[var(--accent)]" />
+                  <h3 className="font-serif-title text-2xl font-bold text-[var(--text)]">
+                    Quầy Pha Chế &amp; Kệ Trưng Bày
+                  </h3>
+                  <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-[var(--accent)]/25 text-[var(--text)]">
+                    ☕ Còn {freeBrewsLeft} ly pha miễn phí hôm nay (làm mới 7 giờ sáng)
+                  </span>
+                </div>
+                <p className="text-xs text-[var(--muted)] leading-relaxed">
+                  Tự tay chọn nền đồ uống, hương phụ, topping và sắc màu ly. Mỗi mẻ pha mất <strong>1 phút</strong> — khi hoàn tất, thức uống sẽ <strong>tự động cất vào Kho đồ và đặt lên Kệ trưng bày</strong>!
+                </p>
+              </div>
 
-            <div className="flex items-center gap-2 shrink-0">
               <button
                 type="button"
                 onClick={() => setActiveZone('market')}
-                className="px-4 py-2.5 rounded-full text-xs font-bold border border-[var(--accent)] bg-[var(--surface)] text-[var(--text)] hover:bg-[var(--accent)]/20 cursor-pointer inline-flex items-center gap-1.5"
+                className="px-4 py-2 rounded-full text-xs font-bold border border-[var(--accent)] bg-[var(--surface)] text-[var(--text)] hover:bg-[var(--accent)]/20 cursor-pointer inline-flex items-center gap-1.5 shrink-0"
               >
                 <Store className="w-4 h-4" />
-                <span>🛒 Mua nước ở Chợ</span>
-              </button>
-              <button
-                type="button"
-                onClick={handleBrewNewDrinkAtBar}
-                className="px-4 py-2.5 rounded-full text-xs font-bold bg-[var(--accent)] text-[#3a2b30] bouncy-btn cursor-pointer inline-flex items-center gap-1.5 shadow-xs"
-              >
-                <Sparkles className="w-4 h-4" />
-                <span>☕ Pha chế ly mới (-10 {currencyEmoji})</span>
+                <span>🛒 Mua nước pha sẵn ở Chợ</span>
               </button>
             </div>
-          </div>
 
-          {barDrinks.length === 0 ? (
-            <div className="py-12 text-center space-y-3">
-              <p className="text-sm font-bold text-[var(--text)]">
-                Quầy thức uống của bạn đang trống ☕
-              </p>
-              <p className="text-xs text-[var(--muted)]">
-                Hãy mua Thức uống ở Chợ nhỏ, bấm Pha chế ly mới hoặc mở Gacha để bày những ly nước thơm lừng lên quầy nhé!
-              </p>
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-              {barDrinks.map((drink) => (
-                <div
-                  key={drink.id}
-                  className="p-4 rounded-2xl border border-[var(--border)] bg-[var(--bg)] flex flex-col justify-between gap-3"
-                >
-                  <div className="flex items-center gap-3">
-                    <div className="w-16 h-16 rounded-2xl bg-[var(--surface)] border border-[var(--border)] flex items-center justify-center shrink-0">
-                      {renderItem('drink', drink.seed, drink.rarity, 4, {
-                        size: 54,
-                      })}
-                    </div>
-                    <div className="min-w-0">
-                      <span className="sticker-chip text-[10px] font-bold">
-                        {RARITY_LABELS[drink.rarity]}
-                      </span>
-                      <h4 className="font-serif-title text-base font-bold text-[var(--text)] leading-snug mt-1">
-                        {drink.name}
-                      </h4>
-                    </div>
-                  </div>
-
-                  <p className="text-[11px] text-[var(--muted)] leading-relaxed">
-                    {drink.description}
+            {/* Cảnh báo thiếu Xu khi pha thêm */}
+            {brewShortfallDiff !== null && brewShortfallDiff > 0 && (
+              <div className="p-4 rounded-2xl border-2 border-rose-400 bg-rose-500/10 text-xs flex flex-wrap items-center justify-between gap-3 animate-fade-in">
+                <div className="space-y-0.5">
+                  <p className="font-extrabold text-rose-600 dark:text-rose-300">
+                    ⚠️ Chưa đủ {coinCurrencyName}, còn thiếu {brewShortfallDiff} {coinCurrencyName} để pha thêm ly mới!
                   </p>
-
+                  <p className="text-[11px] text-[var(--muted)]">
+                    Hoàn thành nhiệm vụ hằng ngày hoặc điểm danh ở Chợ nhỏ để nhận thêm {coinCurrencyName} nhé.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    onClick={() => handleGiftItemToCompanion(drink)}
-                    className="w-full py-2 rounded-full text-xs font-bold bg-[var(--accent)] text-[#3a2b30] bouncy-btn cursor-pointer"
+                    onClick={handleGoToDailyQuests}
+                    className="px-3.5 py-1.5 rounded-full bg-[var(--accent)] text-[#3a2b30] font-bold text-xs cursor-pointer bouncy-btn"
                   >
-                    💝 Tặng cho người thương
+                    📋 Đi làm nhiệm vụ
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setBrewShortfallDiff(null)}
+                    className="px-2.5 py-1.5 rounded-full border border-[var(--border)] text-[var(--muted)] hover:text-[var(--text)] text-xs cursor-pointer"
+                  >
+                    Đóng
                   </button>
                 </div>
-              ))}
+              </div>
+            )}
+
+            {/* Bàn chọn công thức pha chế + Xem trước ly SVG */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+              <div className="lg:col-span-8 space-y-4">
+                {/* 1. Chọn nền (base) */}
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-[var(--text)]">
+                    1. Chọn nền thức uống:
+                  </label>
+                  <div className="flex flex-wrap gap-2">
+                    {BREW_BASE_OPTIONS.map((opt) => {
+                      const active = brewBase === opt.label;
+                      return (
+                        <button
+                          key={opt.label}
+                          type="button"
+                          onClick={() => {
+                            setBrewBase(opt.label);
+                            setBrewColor(opt.defaultColor);
+                          }}
+                          className={`px-3.5 py-1.5 rounded-full text-xs font-bold border transition-all cursor-pointer ${
+                            active
+                              ? 'bg-[var(--accent)] text-[#3a2b30] border-[var(--accent)] shadow-2xs'
+                              : 'bg-[var(--bg)] border-[var(--border)] text-[var(--text)] hover:border-[var(--accent)]'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* 2. Chọn hương phụ (flavor) */}
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-[var(--text)]">
+                    2. Chọn hương phụ:
+                  </label>
+                  <div className="flex flex-wrap gap-2">
+                    {BREW_FLAVOR_OPTIONS.map((flav) => {
+                      const active = brewFlavor === flav;
+                      return (
+                        <button
+                          key={flav}
+                          type="button"
+                          onClick={() => setBrewFlavor(flav)}
+                          className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition-all cursor-pointer ${
+                            active
+                              ? 'bg-[var(--accent)]/30 border-[var(--accent)] text-[var(--text)] font-bold'
+                              : 'bg-[var(--bg)] border-[var(--border)] text-[var(--muted)] hover:text-[var(--text)]'
+                          }`}
+                        >
+                          {flav}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* 3. Chọn topping */}
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-[var(--text)]">
+                    3. Chọn topping:
+                  </label>
+                  <div className="flex flex-wrap gap-2">
+                    {BREW_TOPPING_OPTIONS.map((top) => {
+                      const active = brewTopping === top;
+                      return (
+                        <button
+                          key={top}
+                          type="button"
+                          onClick={() => setBrewTopping(top)}
+                          className={`px-3.5 py-1.5 rounded-full text-xs font-bold border transition-all cursor-pointer capitalize ${
+                            active
+                              ? 'bg-amber-400/30 border-amber-400 text-[var(--text)]'
+                              : 'bg-[var(--bg)] border-[var(--border)] text-[var(--muted)] hover:text-[var(--text)]'
+                          }`}
+                        >
+                          ✨ {top}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* 4. Sắc màu nước */}
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-[var(--text)]">
+                    4. Sắc màu ly nước:
+                  </label>
+                  <div className="flex flex-wrap items-center gap-2.5">
+                    {BREW_COLOR_SWATCHES.map((hex) => (
+                      <button
+                        key={hex}
+                        type="button"
+                        onClick={() => setBrewColor(hex)}
+                        style={{ backgroundColor: hex }}
+                        className={`w-7 h-7 rounded-full border-2 transition-transform cursor-pointer ${
+                          brewColor === hex
+                            ? 'border-[var(--text)] scale-125 shadow-sm'
+                            : 'border-white/70 hover:scale-110'
+                        }`}
+                        title={hex}
+                      />
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Khung xem trước ly chuẩn bị pha + Nút Bắt đầu pha */}
+              <div className="lg:col-span-4 p-5 rounded-2xl border border-[var(--border)] bg-[var(--bg)] flex flex-col items-center text-center space-y-3">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--muted)]">
+                  Công thức đang chọn
+                </span>
+                <div className="w-24 h-24 rounded-3xl bg-[var(--surface)] border border-[var(--border)] flex items-center justify-center shadow-inner">
+                  {renderItem(
+                    'drink',
+                    `${brewBase}_${brewFlavor}_${brewTopping}_${brewColor}`,
+                    'rare',
+                    4,
+                    {
+                      size: 74,
+                      meta: {
+                        base: brewBase,
+                        flavor: brewFlavor,
+                        topping: brewTopping,
+                        color: brewColor,
+                      },
+                    }
+                  )}
+                </div>
+                <div className="space-y-0.5">
+                  <h4 className="font-serif-title text-base font-bold text-[var(--text)]">
+                    {brewBase} {brewFlavor}
+                  </h4>
+                  <p className="text-[11px] text-[var(--muted)]">
+                    Topping: <strong>{brewTopping}</strong> · Thời gian pha: <strong>1 phút</strong>
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  disabled={isStartingBrew || brewOrders.length >= 3}
+                  onClick={handleStartBrew}
+                  className="w-full py-3 rounded-full text-xs font-extrabold bg-[var(--accent)] text-[#3a2b30] bouncy-btn cursor-pointer shadow-sm inline-flex items-center justify-center gap-2 disabled:opacity-60"
+                >
+                  {isStartingBrew ? (
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Coffee className="w-4 h-4" />
+                  )}
+                  <span>
+                    {brewOrders.length >= 3
+                      ? 'Đang pha tối đa 3/3 ly'
+                      : freeBrewsLeft > 0 || isOwner
+                      ? '☕ Bắt đầu pha'
+                      : `☕ Pha thêm (3 ${coinCurrencyName})`}
+                  </span>
+                </button>
+
+                <p className="text-[10.5px] text-[var(--muted)]">
+                  Còn {freeBrewsLeft} ly pha miễn phí hôm nay (làm mới 7 giờ sáng)
+                </p>
+              </div>
             </div>
-          )}
+
+            {/* Khay các ly đang pha (tối đa 3 ly cùng lúc, đếm ngược 1 phút theo ready_at từ server) */}
+            {brewOrders.length > 0 && (
+              <div className="pt-4 border-t border-[var(--border)] space-y-3">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-xs font-extrabold text-[var(--text)] flex items-center gap-1.5">
+                    <span>⏳ Quầy đang pha ({brewOrders.length}/3 ly):</span>
+                  </h4>
+                  <span className="text-[11px] text-[var(--muted)]">
+                    Tự động thu thập &amp; treo lên kệ ngay khi đếm ngược về 00:00 ✨
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
+                  {brewOrders.map((ord) => {
+                    const readyMs = ord.ready_at ? new Date(ord.ready_at).getTime() : 0;
+                    const remainMs = Math.max(0, readyMs - nowMs);
+                    const totalMs = 60 * 1000;
+                    const fillPercent = Math.min(
+                      100,
+                      Math.max(8, Math.round(((totalMs - remainMs) / totalMs) * 100))
+                    );
+                    const rec = ord.recipe || {};
+                    const title = `${rec.base || 'Thức uống'} ${rec.flavor || ''}`.trim();
+
+                    return (
+                      <div
+                        key={ord.id}
+                        className="p-4 rounded-2xl border-2 border-amber-400/60 bg-[var(--bg)] flex items-center gap-3.5 shadow-xs"
+                      >
+                        {/* Hình ly đang đầy dần */}
+                        <div className="relative w-14 h-16 rounded-2xl bg-[var(--surface)] border border-[var(--border)] overflow-hidden flex items-center justify-center shrink-0">
+                          <div
+                            className="absolute bottom-0 inset-x-0 transition-all duration-500 opacity-35"
+                            style={{
+                              height: `${fillPercent}%`,
+                              backgroundColor: rec.color || '#d7b399',
+                            }}
+                          />
+                          <div className="relative z-10">
+                            {renderItem(
+                              'drink',
+                              `${rec.base}_${rec.flavor}_${rec.topping}_${ord.id}`,
+                              'rare',
+                              fillPercent >= 100 ? 4 : 2,
+                              {
+                                size: 44,
+                                meta: rec as unknown as Record<string, unknown>,
+                              }
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="min-w-0 flex-1 space-y-1.5">
+                          <div className="flex items-center justify-between gap-1">
+                            <p className="text-xs font-bold text-[var(--text)] truncate">
+                              {title}
+                            </p>
+                            <span className="font-mono text-xs font-extrabold text-amber-600 dark:text-amber-400">
+                              {formatCountdown(remainMs)}
+                            </span>
+                          </div>
+                          <p className="text-[10.5px] text-[var(--muted)] truncate">
+                            Topping: {rec.topping || 'kem mây'} · Đang rót {fillPercent}%
+                          </p>
+                          <div className="w-full h-2 rounded-full bg-[var(--surface)] border border-[var(--border)] overflow-hidden">
+                            <div
+                              className="h-full rounded-full transition-all duration-500"
+                              style={{
+                                width: `${fillPercent}%`,
+                                backgroundColor: rec.color || '#d7b399',
+                              }}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* B. KỆ TRƯNG BÀY GỖ NHIỀU TẦNG (HIỂN THỊ TẤT CẢ LY TRONG INVENTORY kind = 'drink', MỚI NHẤT TRƯỚC) */}
+          <div className="soft-card p-6 space-y-5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[var(--border)] pb-4">
+              <div>
+                <h4 className="font-serif-title text-xl font-bold text-[var(--text)] flex items-center gap-2">
+                  <span>🪵 Kệ Trưng Bày Thức Uống ({ownedDrinks.length} ly)</span>
+                </h4>
+                <p className="text-xs text-[var(--muted)] mt-0.5">
+                  Tất cả thức uống bạn đã pha hoặc sưu tầm trong Kho đồ được xếp trên kệ gỗ nhiều tầng (mới nhất trước). Rê chuột hoặc chạm vào từng ly để xem công thức và tặng cho người thương!
+                </p>
+              </div>
+
+              {ownedDrinks.length > 12 && (
+                <div className="flex items-center gap-2 text-xs">
+                  <button
+                    type="button"
+                    disabled={shelfPage <= 0}
+                    onClick={() => setShelfPage((p) => Math.max(0, p - 1))}
+                    className="px-3 py-1 rounded-full border border-[var(--border)] bg-[var(--bg)] font-bold text-[var(--text)] cursor-pointer disabled:opacity-40"
+                  >
+                    ← Trang trước
+                  </button>
+                  <span className="font-bold text-[var(--muted)]">
+                    Trang {shelfPage + 1}/{Math.ceil(ownedDrinks.length / 12)}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={(shelfPage + 1) * 12 >= ownedDrinks.length}
+                    onClick={() =>
+                      setShelfPage((p) =>
+                        Math.min(Math.ceil(ownedDrinks.length / 12) - 1, p + 1)
+                      )
+                    }
+                    className="px-3 py-1 rounded-full border border-[var(--border)] bg-[var(--bg)] font-bold text-[var(--text)] cursor-pointer disabled:opacity-40"
+                  >
+                    Trang sau →
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {ownedDrinks.length === 0 ? (
+              <div className="py-12 rounded-2xl border-2 border-dashed border-[#a67c52]/40 bg-[#a67c52]/5 text-center space-y-2">
+                <p className="text-sm font-bold text-[var(--text)]">
+                  Kệ gỗ trưng bày đang chờ những ly nước đầu tiên ☕
+                </p>
+                <p className="text-xs text-[var(--muted)]">
+                  Hãy chọn công thức phía trên và bấm &quot;Bắt đầu pha&quot; để ly nước thơm lừng tự động đáp lên kệ nhé!
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-6">
+                {/* Chia kệ gỗ thành các tầng (mỗi tầng tối đa 6 ly, có thanh cuộn ngang trên màn hình nhỏ) */}
+                {[0, 1].map((tierIdx) => {
+                  const pageDrinks = ownedDrinks.slice(
+                    shelfPage * 12,
+                    (shelfPage + 1) * 12
+                  );
+                  const tierDrinks = pageDrinks.slice(
+                    tierIdx * 6,
+                    (tierIdx + 1) * 6
+                  );
+                  if (tierDrinks.length === 0 && tierIdx > 0) return null;
+
+                  return (
+                    <div
+                      key={`shelf-tier-${tierIdx}`}
+                      className="rounded-3xl bg-gradient-to-b from-[#6d4c41]/10 via-[#8d6e63]/15 to-[#5d4037]/25 p-4 pt-5 border border-[#8d6e63]/35 shadow-inner"
+                    >
+                      <div className="flex items-end gap-4 overflow-x-auto pb-2 px-2">
+                        {tierDrinks.map((drink) => {
+                          const isJustLanded = newlyShelvedDrinkId === drink.id;
+                          const isSelected = selectedShelfDrink?.id === drink.id;
+                          const metaObj = (drink.meta || {}) as Record<
+                            string,
+                            unknown
+                          >;
+                          const recipeLabel =
+                            metaObj.base || metaObj.flavor || metaObj.topping
+                              ? `${metaObj.base || ''}${
+                                  metaObj.flavor ? ` · ${metaObj.flavor}` : ''
+                                }${
+                                  metaObj.topping
+                                    ? ` · Topping ${metaObj.topping}`
+                                    : ''
+                                }`
+                              : drink.description;
+
+                          return (
+                            <div
+                              key={drink.id}
+                              onClick={() =>
+                                setSelectedShelfDrink(
+                                  isSelected ? null : drink
+                                )
+                              }
+                              title={`${drink.name} — ${recipeLabel}`}
+                              className={`group relative flex flex-col items-center min-w-[118px] p-2.5 rounded-2xl transition-all cursor-pointer ${
+                                isJustLanded
+                                  ? 'bg-amber-400/25 ring-2 ring-amber-400 animate-bounce'
+                                  : isSelected
+                                  ? 'bg-[var(--surface)] ring-2 ring-[var(--accent)] shadow-md'
+                                  : 'hover:bg-[var(--surface)]/80 hover:-translate-y-1'
+                              }`}
+                            >
+                              {isJustLanded && (
+                                <span className="absolute -top-2 right-1 px-2 py-0.5 rounded-full bg-amber-500 text-white text-[9px] font-black shadow-xs">
+                                  Vừa lên kệ ✨
+                                </span>
+                              )}
+
+                              <div className="w-16 h-16 flex items-center justify-center">
+                                {renderItem(
+                                  'drink',
+                                  drink.seed,
+                                  drink.rarity,
+                                  4,
+                                  {
+                                    size: 58,
+                                    meta: drink.meta,
+                                  }
+                                )}
+                              </div>
+
+                              <span className="mt-1 text-[11px] font-bold text-[var(--text)] text-center line-clamp-1 max-w-[110px]">
+                                {drink.name}
+                              </span>
+                              <span className="text-[9.5px] text-[var(--muted)] line-clamp-1 max-w-[110px]">
+                                {metaObj.topping
+                                  ? `Topping: ${String(metaObj.topping)}`
+                                  : RARITY_LABELS[drink.rarity]}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      {/* Thanh gỗ đỡ kệ */}
+                      <div className="h-3.5 w-full rounded-full bg-gradient-to-r from-[#5d4037] via-[#8d6e63] to-[#5d4037] shadow-md border-t border-white/20" />
+                    </div>
+                  );
+                })}
+
+                {/* Khung chi tiết khi chạm/bấm vào 1 ly trên kệ */}
+                {selectedShelfDrink && (
+                  <div className="p-4 rounded-2xl border-2 border-[var(--accent)] bg-[var(--bg)] flex flex-col sm:flex-row sm:items-center justify-between gap-4 animate-fade-in">
+                    <div className="flex items-center gap-3.5">
+                      <div className="w-16 h-16 rounded-2xl bg-[var(--surface)] border border-[var(--border)] flex items-center justify-center shrink-0">
+                        {renderItem(
+                          'drink',
+                          selectedShelfDrink.seed,
+                          selectedShelfDrink.rarity,
+                          4,
+                          {
+                            size: 54,
+                            meta: selectedShelfDrink.meta,
+                          }
+                        )}
+                      </div>
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <h5 className="font-serif-title text-base font-bold text-[var(--text)]">
+                            {selectedShelfDrink.name}
+                          </h5>
+                          <span className="sticker-chip text-[10px] font-bold">
+                            {RARITY_LABELS[selectedShelfDrink.rarity]}
+                          </span>
+                        </div>
+                        {selectedShelfDrink.meta &&
+                        (selectedShelfDrink.meta.base ||
+                          selectedShelfDrink.meta.flavor ||
+                          selectedShelfDrink.meta.topping) ? (
+                          <p className="text-xs text-[var(--muted)]">
+                            Công thức:{' '}
+                            <strong className="text-[var(--text)]">
+                              {String(selectedShelfDrink.meta.base || 'Đặc chế')}
+                            </strong>
+                            {selectedShelfDrink.meta.flavor
+                              ? ` · Hương ${String(selectedShelfDrink.meta.flavor)}`
+                              : ''}
+                            {selectedShelfDrink.meta.topping
+                              ? ` · Topping ${String(selectedShelfDrink.meta.topping)}`
+                              : ''}
+                          </p>
+                        ) : (
+                          <p className="text-xs text-[var(--muted)]">
+                            {selectedShelfDrink.description}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => handleGiftItemToCompanion(selectedShelfDrink)}
+                        className="px-4 py-2 rounded-full text-xs font-bold bg-[var(--accent)] text-[#3a2b30] bouncy-btn cursor-pointer"
+                      >
+                        💝 Mời {companionChar?.name || 'người thương'} thưởng thức
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedShelfDrink(null)}
+                        className="px-3 py-2 rounded-full border border-[var(--border)] text-xs text-[var(--muted)] hover:text-[var(--text)] cursor-pointer"
+                      >
+                        Đóng
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -4321,6 +5761,421 @@ export const MiniGameTab: React.FC<MiniGameTabProps> = ({
                 className="flex-1 py-2.5 rounded-full bg-[var(--accent)] text-[#3a2b30] font-bold text-xs cursor-pointer shadow-xs bouncy-btn"
               >
                 Đồng ý bán
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Hộp xác nhận nhẹ nhàng khi câu thêm tốn 5 Xu */}
+      {confirmPaidCastModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 backdrop-blur-xs p-4 animate-fade-in"
+          onClick={() => setConfirmPaidCastModal(false)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-sm rounded-3xl border-2 border-[var(--accent)] bg-[var(--surface)] p-6 space-y-4 shadow-2xl text-center"
+          >
+            <div className="w-12 h-12 mx-auto rounded-2xl bg-amber-500/20 text-amber-600 flex items-center justify-center text-2xl">
+              🎣
+            </div>
+            <div className="space-y-1.5">
+              <h4 className="font-serif-title text-lg font-bold text-[var(--text)]">
+                Câu thêm lượt mới (5 {coinCurrencyName})?
+              </h4>
+              <p className="text-xs text-[var(--muted)] leading-relaxed">
+                Bạn đã dùng hết 5 lượt câu miễn phí hôm nay. Bạn có muốn dùng{' '}
+                <strong className="text-amber-600 dark:text-amber-400">
+                  5 {coinCurrencyName}
+                </strong>{' '}
+                để thả cần câu thêm một lượt không?
+              </p>
+            </div>
+            <div className="flex items-center gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setConfirmPaidCastModal(false)}
+                className="flex-1 py-2.5 rounded-full border border-[var(--border)] text-xs font-bold text-[var(--muted)] hover:text-[var(--text)] cursor-pointer"
+              >
+                Để sau
+              </button>
+              <button
+                type="button"
+                onClick={executeFishingCast}
+                className="flex-1 py-2.5 rounded-full bg-[var(--accent)] text-[#3a2b30] font-extrabold text-xs cursor-pointer shadow-xs bouncy-btn"
+              >
+                🎣 Đồng ý (5 {coinCurrencyName})
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Hộp kết quả khi bấm trúng hộp quà câu cá 🎁 */}
+      {fishingResultModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 backdrop-blur-xs p-4 animate-fade-in"
+          onClick={() => setFishingResultModal(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-md rounded-3xl border-2 border-[var(--accent)] bg-[var(--surface)] p-6 space-y-4 shadow-2xl text-center"
+          >
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-amber-600 dark:text-amber-400">
+                🎁✨ Mở hộp quà câu cá thành công!
+              </span>
+              <button
+                type="button"
+                onClick={() => setFishingResultModal(null)}
+                className="p-1 rounded-full text-[var(--muted)] hover:text-[var(--text)] cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="w-24 h-24 mx-auto rounded-3xl bg-[var(--bg)] border-2 border-[var(--border)] flex items-center justify-center shadow-inner">
+              {renderItem(
+                fishingResultModal.item.category,
+                fishingResultModal.item.seed,
+                fishingResultModal.item.rarity,
+                fishingResultModal.item.category === 'seed'
+                  ? 0
+                  : fishingResultModal.item.category === 'flower'
+                  ? 4
+                  : 'adult',
+                { size: 80, meta: fishingResultModal.item.meta }
+              )}
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-center gap-2">
+                <span className="sticker-chip text-[11px] font-bold">
+                  {CATEGORY_LABELS[fishingResultModal.item.category].emoji}{' '}
+                  {CATEGORY_LABELS[fishingResultModal.item.category].name}
+                </span>
+                <span className="px-2.5 py-0.5 rounded-full text-[11px] font-extrabold bg-[var(--accent)]/30 text-[var(--text)]">
+                  Độ hiếm: {RARITY_LABELS[fishingResultModal.item.rarity]}
+                </span>
+              </div>
+
+              <h4 className="font-serif-title text-2xl font-extrabold text-[var(--text)]">
+                {fishingResultModal.item.category === 'seed'
+                  ? formatSeedName(fishingResultModal.item.name)
+                  : fishingResultModal.item.name}
+              </h4>
+
+              <p className="text-xs font-bold text-emerald-600 dark:text-emerald-400">
+                Đã cất vào Kho đồ ✨
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  const cat = fishingResultModal.item.category;
+                  setFishingResultModal(null);
+                  setInvCategoryFilter(cat);
+                  setActiveZone('gacha_inv');
+                }}
+                className="py-2.5 px-4 rounded-full font-bold text-xs border-2 border-[var(--border)] bg-[var(--bg)] text-[var(--text)] hover:border-[var(--accent)] cursor-pointer"
+              >
+                📦 Xem Kho đồ
+              </button>
+
+              {fishingResultModal.item.category === 'fish' ? (
+                <button
+                  type="button"
+                  disabled={isReleasingFish}
+                  onClick={async () => {
+                    const fId = fishingResultModal.item.id;
+                    setFishingResultModal(null);
+                    await handleReleaseSelectedFish([fId]);
+                  }}
+                  className="py-2.5 px-4 rounded-full font-bold text-xs bg-[var(--accent)] text-[#3a2b30] cursor-pointer shadow-sm bouncy-btn"
+                >
+                  🐟 Thả vào hồ ngay
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setFishingResultModal(null)}
+                  className="py-2.5 px-4 rounded-full font-bold text-xs bg-[var(--accent)] text-[#3a2b30] cursor-pointer shadow-sm bouncy-btn"
+                >
+                  🎣 Câu tiếp
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Hộp chọn cá trong Kho đồ để thả xuống Hồ cá đêm (release_fish) */}
+      {releaseFishModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 backdrop-blur-xs p-4 animate-fade-in"
+          onClick={() => !isReleasingFish && setReleaseFishModalOpen(false)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-lg rounded-3xl border-2 border-[var(--accent)] bg-[var(--surface)] p-6 space-y-4 shadow-2xl max-h-[88vh] flex flex-col"
+          >
+            <div className="flex items-center justify-between border-b border-[var(--border)] pb-3">
+              <div>
+                <h4 className="font-serif-title text-xl font-bold text-[var(--text)]">
+                  ➕ Thả Cá Từ Kho Đồ Vào Hồ
+                </h4>
+                <p className="text-xs text-[var(--muted)] mt-0.5">
+                  Chọn một hoặc nhiều chú cá đang ở trong Kho đồ để thả xuống Hồ cá đêm nhé.
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={isReleasingFish}
+                onClick={() => setReleaseFishModalOpen(false)}
+                className="p-1.5 rounded-full text-[var(--muted)] hover:text-[var(--text)] cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto pr-1 space-y-2.5 min-h-[160px]">
+              {unreleasedFishItems.length === 0 ? (
+                <div className="py-10 px-4 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--bg)]/60 text-center space-y-3">
+                  <p className="text-xs font-bold text-[var(--text)]">
+                    Chưa có bé cá nào chờ thả. Đi câu cá hoặc ghé Chợ nhé 🐟
+                  </p>
+                  <div className="flex items-center justify-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setReleaseFishModalOpen(false)}
+                      className="px-3.5 py-1.5 rounded-full text-xs font-bold bg-[var(--accent)] text-[#3a2b30] cursor-pointer"
+                    >
+                      🎣 Đi câu cá
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setReleaseFishModalOpen(false);
+                        setActiveZone('market');
+                      }}
+                      className="px-3.5 py-1.5 rounded-full text-xs font-bold border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] cursor-pointer"
+                    >
+                      🛒 Ghé Chợ nhỏ
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                unreleasedFishItems.map((fish) => {
+                  const checked = selectedFishIdsToRelease.includes(fish.id);
+                  const readyMs = fish.readyAt ? new Date(fish.readyAt).getTime() : 0;
+                  const isEgg = Boolean(
+                    fish.readyAt && !Number.isNaN(readyMs) && readyMs > nowMs
+                  );
+
+                  return (
+                    <label
+                      key={fish.id}
+                      className={`p-3 rounded-2xl border flex items-center justify-between gap-3 cursor-pointer transition-all ${
+                        checked
+                          ? 'border-2 border-[var(--accent)] bg-[var(--accent)]/15'
+                          : 'border-[var(--border)] bg-[var(--bg)]'
+                      }`}
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setSelectedFishIdsToRelease((prev) => [
+                                ...prev,
+                                fish.id,
+                              ]);
+                            } else {
+                              setSelectedFishIdsToRelease((prev) =>
+                                prev.filter((id) => id !== fish.id)
+                              );
+                            }
+                          }}
+                          className="w-4 h-4 accent-[var(--accent)] rounded cursor-pointer"
+                        />
+                        <div className="w-12 h-12 rounded-xl bg-[var(--surface)] border border-[var(--border)] flex items-center justify-center shrink-0">
+                          {renderItem(
+                            'fish',
+                            fish.seed,
+                            fish.rarity,
+                            isEgg ? 'egg' : 'adult',
+                            { size: 40 }
+                          )}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-xs font-bold text-[var(--text)] truncate">
+                            {fish.name}
+                          </p>
+                          <p className="text-[10.5px] text-[var(--muted)]">
+                            Độ hiếm: {RARITY_LABELS[fish.rarity]}{' '}
+                            {isEgg ? '· 🥚 Trứng cá' : '· 🐟 Đã nở'}
+                          </p>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        disabled={isReleasingFish}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          handleReleaseSelectedFish([fish.id]);
+                        }}
+                        className="px-3 py-1.5 rounded-full bg-[var(--accent)] text-[#3a2b30] font-extrabold text-[11px] cursor-pointer shrink-0 bouncy-btn"
+                      >
+                        💦 Thả ngay
+                      </button>
+                    </label>
+                  );
+                })
+              )}
+            </div>
+
+            {unreleasedFishItems.length > 0 && (
+              <div className="pt-3 border-t border-[var(--border)] flex items-center justify-between gap-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (
+                      selectedFishIdsToRelease.length ===
+                      unreleasedFishItems.length
+                    ) {
+                      setSelectedFishIdsToRelease([]);
+                    } else {
+                      setSelectedFishIdsToRelease(
+                        unreleasedFishItems.map((f) => f.id)
+                      );
+                    }
+                  }}
+                  className="text-xs font-bold text-[var(--muted)] hover:text-[var(--text)] cursor-pointer"
+                >
+                  {selectedFishIdsToRelease.length ===
+                  unreleasedFishItems.length
+                    ? 'Bỏ chọn tất cả'
+                    : 'Chọn tất cả'}
+                </button>
+
+                <button
+                  type="button"
+                  disabled={
+                    isReleasingFish || selectedFishIdsToRelease.length === 0
+                  }
+                  onClick={() =>
+                    handleReleaseSelectedFish(selectedFishIdsToRelease)
+                  }
+                  className="px-5 py-2.5 rounded-full bg-[var(--accent)] text-[#3a2b30] font-extrabold text-xs cursor-pointer shadow-sm bouncy-btn disabled:opacity-50"
+                >
+                  {isReleasingFish
+                    ? 'Đang thả xuống hồ...'
+                    : `💦 Thả (${selectedFishIdsToRelease.length} chú cá)`}
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Hộp kết quả khi pha chế thức uống hoàn tất (tự động thu thập & treo lên kệ) */}
+      {brewResultModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 backdrop-blur-xs p-4 animate-fade-in"
+          onClick={() => setBrewResultModal(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-md rounded-3xl border-2 border-[var(--accent)] bg-[var(--surface)] p-6 space-y-4 shadow-2xl text-center"
+          >
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-amber-600 dark:text-amber-400">
+                ☕✨ Pha chế hoàn tất!
+              </span>
+              <button
+                type="button"
+                onClick={() => setBrewResultModal(null)}
+                className="p-1 rounded-full text-[var(--muted)] hover:text-[var(--text)] cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="w-24 h-24 mx-auto rounded-3xl bg-[var(--bg)] border-2 border-[var(--border)] flex items-center justify-center shadow-inner">
+              {renderItem(
+                'drink',
+                brewResultModal.item.seed,
+                brewResultModal.item.rarity,
+                4,
+                {
+                  size: 80,
+                  meta:
+                    brewResultModal.item.meta ||
+                    (brewResultModal.recipe as unknown as Record<string, unknown>),
+                }
+              )}
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-center gap-2">
+                <span className="sticker-chip text-[11px] font-bold">
+                  ☕ Thức Uống Pha Chế
+                </span>
+                <span className="px-2.5 py-0.5 rounded-full text-[11px] font-extrabold bg-[var(--accent)]/30 text-[var(--text)]">
+                  Độ hiếm: {RARITY_LABELS[brewResultModal.item.rarity]}
+                </span>
+              </div>
+
+              <h4 className="font-serif-title text-2xl font-extrabold text-[var(--text)]">
+                {brewResultModal.item.name}
+              </h4>
+
+              <p className="text-xs text-[var(--muted)]">
+                Công thức:{' '}
+                <strong className="text-[var(--text)]">
+                  {brewResultModal.recipe.base || 'Thức uống'}
+                </strong>
+                {brewResultModal.recipe.flavor
+                  ? ` · Hương ${brewResultModal.recipe.flavor}`
+                  : ''}
+                {brewResultModal.recipe.topping
+                  ? ` · Topping ${brewResultModal.recipe.topping}`
+                  : ''}
+              </p>
+
+              <p className="text-xs font-bold text-emerald-600 dark:text-emerald-400">
+                Đã cất vào Kho đồ và treo lên kệ ✨
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setBrewResultModal(null);
+                  setInvCategoryFilter('drink');
+                  setActiveZone('gacha_inv');
+                }}
+                className="py-2.5 px-4 rounded-full font-bold text-xs border-2 border-[var(--border)] bg-[var(--bg)] text-[var(--text)] hover:border-[var(--accent)] cursor-pointer"
+              >
+                📦 Xem Kho đồ
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedShelfDrink(brewResultModal.item);
+                  setBrewResultModal(null);
+                  setActiveZone('drinks');
+                }}
+                className="py-2.5 px-4 rounded-full font-bold text-xs bg-[var(--accent)] text-[#3a2b30] cursor-pointer shadow-sm bouncy-btn"
+              >
+                🪵 Xem trên Kệ gỗ
               </button>
             </div>
           </div>

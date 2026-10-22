@@ -194,12 +194,17 @@ export default function App() {
   const [inventoryLoading, setInventoryLoading] = useState<boolean>(false);
   const [inventoryError, setInventoryError] = useState<string | null>(null);
 
-  // Xóa bỏ dữ liệu vật phẩm cũ trong localStorage để tránh hai nguồn song song
+  // Xóa bỏ dữ liệu vật phẩm cũ, mồi câu cũ, đồ uống cũ, cờ điểm danh cũ trong localStorage để tránh hai nguồn song song
   useEffect(() => {
     try {
       localStorage.removeItem('item_sys_inventory_v1');
       localStorage.removeItem('item_sys_garden_plots_v1');
       localStorage.removeItem('item_sys_pond_fish_v1');
+      localStorage.removeItem('item_sys_bait_count_v1');
+      localStorage.removeItem('item_sys_brew_queue_v1');
+      localStorage.removeItem('minigame_fish_collection_v1');
+      localStorage.removeItem('minigame_drinks_shelf_v1');
+      localStorage.removeItem('daily_checkin_flag_v1');
     } catch {
       // ignore
     }
@@ -807,6 +812,21 @@ export default function App() {
         await createCharOnSupabase({
           creatorId: currentUser.id,
           name: String(newChar.name || ''),
+          caption:
+            typeof newChar.caption === 'string'
+              ? newChar.caption.trim().slice(0, 60)
+              : '',
+          epithet:
+            typeof newChar.epithet === 'string'
+              ? newChar.epithet.trim().slice(0, 80)
+              : '',
+          addressTerms:
+            typeof newChar.addressTerms === 'string'
+              ? newChar.addressTerms.trim()
+              : '',
+          creatorNote: newChar.creatorNote
+            ? String(newChar.creatorNote).trim()
+            : '',
           imageUrl: newChar.imageUrl ? String(newChar.imageUrl) : undefined,
           tags: Array.isArray(newChar.tags) ? (newChar.tags as string[]) : [],
           description: String(newChar.description || ''),
@@ -841,7 +861,12 @@ export default function App() {
     ) => {
       const target = libraryData.characters.find((c) => c.id === charId);
       if (!target) return;
-      if (!canEditItem(currentUser, target.creatorId)) return;
+      if (
+        !can('manage_own_chars', currentUser) &&
+        !canEditItem(currentUser, target.creatorId)
+      ) {
+        return;
+      }
       try {
         await updateCharOnSupabase(charId, patch);
         await refreshLibraryData();
@@ -853,6 +878,7 @@ export default function App() {
             : '⚠️ Không thể cập nhật nhân vật.',
           5000
         );
+        throw err;
       }
     },
     [currentUser, libraryData.characters, refreshLibraryData, notifyToast]
@@ -1811,6 +1837,7 @@ export default function App() {
         onCloseGuideModal={() => setShowEditGuideModal(false)}
         onOpenGuideModal={() => setShowEditGuideModal(true)}
         onNotify={notifyToast}
+        characters={libraryData.characters}
       />
 
       {/* Hộp thoại Đăng nhập / Đăng ký */}
@@ -2268,6 +2295,9 @@ export default function App() {
               onRequireAuth={handleRequireAuth}
               initialSubZone={miniGameInitialZone}
               initialTargetKind={miniGameTargetKind}
+              unlockedCharIds={unlockedCharIds}
+              marketTexts={siteConfig.marketTexts}
+              addressMap={siteConfig.addressMap}
             />
           ) : (
             renderGuestGatePrompt(

@@ -1,12 +1,10 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useState, useEffect, useRef, useCallback } from 'react';
 import {
   Search,
   RotateCcw,
   Heart,
   Plus,
   Image as ImageIcon,
-  User,
-  ExternalLink,
   Trash2,
   Sparkles,
   Lock,
@@ -16,14 +14,17 @@ import {
 } from 'lucide-react';
 import { CharacterItem, Creator } from '../data/sampleData';
 import { CharacterCard } from './CharacterCard';
-import { AuthUser, can, canEditItem } from '../services/authLayer';
+import { OpenSceneBox } from './OpenSceneBox';
+import { AuthUser, can } from '../services/authLayer';
 import { EditableText } from './EditableText';
-import { dataStore } from '../services/dataLayer';
 import {
   CharacterUnlockRequirement,
   ItemCategory,
 } from '../services/itemSystem';
-import { SupabaseInventoryItem } from '../services/supabaseService';
+import {
+  SupabaseInventoryItem,
+  fetchCharSecretsBatch,
+} from '../services/supabaseService';
 
 interface CharTabProps {
   characters: CharacterItem[];
@@ -116,7 +117,9 @@ export const CharTab: React.FC<CharTabProps> = ({
   // Trạng thái form ➕ "Thêm char" (mặc định Chủ web là người đăng)
   const [showAddForm, setShowAddForm] = useState(false);
   const [newName, setNewName] = useState('');
+  const [newCaption, setNewCaption] = useState('');
   const [newEpithet, setNewEpithet] = useState('');
+  const [newAddressTerms, setNewAddressTerms] = useState('');
   const [newImageUrl, setNewImageUrl] = useState('');
   const [newTagsList, setNewTagsList] = useState<string[]>(['Chữa lành']);
   const [newTagInput, setNewTagInput] = useState('');
@@ -207,10 +210,17 @@ export const CharTab: React.FC<CharTabProps> = ({
     return characters.filter((char) => {
       if (q) {
         const matchName = char.name.toLowerCase().includes(q);
+        const matchCaption = (char.caption || '').toLowerCase().includes(q);
         const matchEpithet = char.epithet.toLowerCase().includes(q);
         const matchDesc = char.description.toLowerCase().includes(q);
         const matchTags = char.tags.some((t) => t.toLowerCase().includes(q));
-        if (!matchName && !matchEpithet && !matchDesc && !matchTags) {
+        if (
+          !matchName &&
+          !matchCaption &&
+          !matchEpithet &&
+          !matchDesc &&
+          !matchTags
+        ) {
           return false;
         }
       }
@@ -260,7 +270,15 @@ export const CharTab: React.FC<CharTabProps> = ({
   };
 
   const handleOpenAddModal = () => {
-    setShowAddForm((prev) => !prev);
+    setShowAddForm((prev) => {
+      const next = !prev;
+      if (next) {
+        setNewCaption('');
+        setNewEpithet('');
+        setNewAddressTerms('');
+      }
+      return next;
+    });
   };
 
   const handleCreateCharSubmit = (e: React.FormEvent) => {
@@ -283,15 +301,15 @@ export const CharTab: React.FC<CharTabProps> = ({
 
     onAddCharacter({
       name: newName.trim(),
-      epithet: newEpithet.trim() || 'Người bạn mới nơi sổ tay',
+      caption: newCaption.trim().slice(0, 60),
+      epithet: newEpithet.trim().slice(0, 80),
+      addressTerms: newAddressTerms.trim(),
       creatorId: currentUser.id || defaultCreatorObj?.id || 'owner',
       creatorName: currentUser.displayName || 'Chủ web',
       tags: finalTags.length > 0 ? finalTags : ['Đời thường'],
       description: newDesc.trim(),
-      openingLine:
-        newOpenScene.trim() || '“Chào bạn, rất vui được gặp bạn hôm nay.”',
-      openScene:
-        newOpenScene.trim() || '“Chào bạn, rất vui được gặp bạn hôm nay.”',
+      openingLine: newOpenScene.trim(),
+      openScene: newOpenScene.trim(),
       creatorNote: newCreatorNote.trim() || undefined,
       chatUrl: newChatUrl.trim() || 'https://character.ai',
       avatarSymbol: newName.trim().slice(0, 2).toUpperCase(),
@@ -310,7 +328,9 @@ export const CharTab: React.FC<CharTabProps> = ({
     });
 
     setNewName('');
+    setNewCaption('');
     setNewEpithet('');
+    setNewAddressTerms('');
     setNewImageUrl('');
     setNewTagsList(['Chữa lành']);
     setNewTagInput('');
@@ -326,6 +346,154 @@ export const CharTab: React.FC<CharTabProps> = ({
   const checkCanManageChar = (_char: CharacterItem): boolean => {
     return can('manage_own_chars', currentUser);
   };
+
+  const isOwner = Boolean(
+    (currentUser.profileLoaded && currentUser.profileRole === 'owner') ||
+      canCreateChar
+  );
+
+  // Tải theo lô open_scene & chat_link từ char_secrets bằng .in('char_id', [...])
+  // - Chủ web (owner): tự động tải cho mọi char đang hiển thị
+  // - Khách / Người dùng: CHỈ tải cho các char đã mở khóa (mở tự do hoặc nằm trong unlockedCharIds); TUYỆT ĐỐI không tải char đang khóa khi chưa đủ quyền
+  const [batchSecretsMap, setBatchSecretsMap] = useState<
+    Record<string, { chatLink: string; openScene: string }>
+  >({});
+  const [loadingSecretIds, setLoadingSecretIds] = useState<
+    Record<string, boolean>
+  >({});
+  const [errorSecretIds, setErrorSecretIds] = useState<Record<string, string>>(
+    {}
+  );
+  const inFlightIdsRef = useRef<Set<string>>(new Set());
+  const loadedIdsRef = useRef<Set<string>>(new Set());
+  const prevUserKeyRef = useRef<string>('');
+
+  useEffect(() => {
+    const userKey = `${currentUser.id || 'guest'}_${
+      currentUser.profileRole || currentUser.role
+    }`;
+    if (prevUserKeyRef.current && prevUserKeyRef.current !== userKey) {
+      loadedIdsRef.current.clear();
+      inFlightIdsRef.current.clear();
+      setBatchSecretsMap({});
+      setLoadingSecretIds({});
+      setErrorSecretIds({});
+    }
+    prevUserKeyRef.current = userKey;
+  }, [currentUser.id, currentUser.profileRole, currentUser.role]);
+
+  const loadSecretsBatch = useCallback(async (idsToFetch: string[]) => {
+    const cleanIds = Array.from(new Set(idsToFetch.filter(Boolean)));
+    if (cleanIds.length === 0) return;
+
+    cleanIds.forEach((id) => inFlightIdsRef.current.add(id));
+    setLoadingSecretIds((prev) => {
+      const next = { ...prev };
+      cleanIds.forEach((id) => {
+        next[id] = true;
+      });
+      return next;
+    });
+    setErrorSecretIds((prev) => {
+      const next = { ...prev };
+      cleanIds.forEach((id) => {
+        delete next[id];
+      });
+      return next;
+    });
+
+    try {
+      const fetched = await fetchCharSecretsBatch(cleanIds);
+      cleanIds.forEach((id) => {
+        inFlightIdsRef.current.delete(id);
+        loadedIdsRef.current.add(id);
+      });
+      setBatchSecretsMap((prev) => ({
+        ...prev,
+        ...fetched,
+      }));
+    } catch (err) {
+      const errMsg =
+        err instanceof Error && err.message
+          ? err.message
+          : 'Không tải được Open Scene. Vui lòng thử lại.';
+      cleanIds.forEach((id) => {
+        inFlightIdsRef.current.delete(id);
+      });
+      setErrorSecretIds((prev) => {
+        const next = { ...prev };
+        cleanIds.forEach((id) => {
+          next[id] = errMsg;
+        });
+        return next;
+      });
+    } finally {
+      setLoadingSecretIds((prev) => {
+        const next = { ...prev };
+        cleanIds.forEach((id) => {
+          delete next[id];
+        });
+        return next;
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    if (isLoadingChars || filteredCharacters.length === 0) return;
+
+    const eligibleIds = filteredCharacters
+      .filter((char) => {
+        const charLocked = Boolean(
+          char.isLocked ||
+            (char.unlockRequirements && char.unlockRequirements.length > 0)
+        );
+        const authorized =
+          isOwner || !charLocked || unlockedCharIds.includes(char.id);
+        return (
+          authorized &&
+          !loadedIdsRef.current.has(char.id) &&
+          !inFlightIdsRef.current.has(char.id) &&
+          !errorSecretIds[char.id]
+        );
+      })
+      .map((char) => char.id);
+
+    if (eligibleIds.length > 0) {
+      loadSecretsBatch(eligibleIds);
+    }
+  }, [
+    isLoadingChars,
+    filteredCharacters,
+    isOwner,
+    unlockedCharIds,
+    errorSecretIds,
+    loadSecretsBatch,
+  ]);
+
+  const handleRetrySecret = useCallback(
+    (charId: string) => {
+      loadedIdsRef.current.delete(charId);
+      inFlightIdsRef.current.delete(charId);
+      loadSecretsBatch([charId]);
+    },
+    [loadSecretsBatch]
+  );
+
+  const handleSecretUpdated = useCallback(
+    (charId: string, secret: { chatLink: string; openScene: string }) => {
+      loadedIdsRef.current.add(charId);
+      setBatchSecretsMap((prev) => ({
+        ...prev,
+        [charId]: secret,
+      }));
+      setErrorSecretIds((prev) => {
+        const next = { ...prev };
+        delete next[charId];
+        return next;
+      });
+    },
+    []
+  );
 
   return (
     <div className="space-y-8">
@@ -429,29 +597,90 @@ export const CharTab: React.FC<CharTabProps> = ({
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <label className="block text-[11px] font-bold text-[var(--muted)]">
+                  Cap đầu thẻ (tùy chọn)
+                </label>
+                <span className="text-[10px] font-medium text-[var(--muted)] tabular-nums">
+                  {newCaption.length}/60
+                </span>
+              </div>
+              <input
+                type="text"
+                value={newCaption}
+                maxLength={60}
+                onChange={(e) => setNewCaption(e.target.value.slice(0, 60))}
+                placeholder="Ví dụ: ✨ Bác sĩ nhà em, đêm nay trực..."
+                className="w-full px-3.5 py-2 rounded-2xl bg-[var(--bg)] border border-[var(--border)] text-[var(--text)] placeholder:text-[var(--muted)]/55 focus:outline-none focus:border-[var(--accent)]"
+              />
+            </div>
+
+            <div>
               <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
                 Danh xưng / Phụ đề ngắn
               </label>
               <input
                 type="text"
                 value={newEpithet}
-                onChange={(e) => setNewEpithet(e.target.value)}
-                placeholder="VD: Chủ tiệm trà chiều mưa"
-                className="w-full px-3.5 py-2 rounded-2xl bg-[var(--bg)] border border-[var(--border)] text-[var(--text)] focus:outline-none focus:border-[var(--accent)]"
+                maxLength={80}
+                onChange={(e) => setNewEpithet(e.target.value.slice(0, 80))}
+                placeholder="Ví dụ: Anh hàng xóm, Cô giáo chủ nhiệm..."
+                className="w-full px-3.5 py-2 rounded-2xl bg-[var(--bg)] border border-[var(--border)] text-[var(--text)] placeholder:text-[var(--muted)]/55 focus:outline-none focus:border-[var(--accent)]"
               />
             </div>
-            <div>
-              <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
-                3. Link chat *
-              </label>
-              <input
-                type="url"
-                value={newChatUrl}
-                onChange={(e) => setNewChatUrl(e.target.value)}
-                required
-                placeholder="https://character.ai/chat/..."
-                className="w-full px-3.5 py-2 rounded-2xl bg-[var(--bg)] border border-[var(--border)] text-[var(--text)] focus:outline-none focus:border-[var(--accent)]"
-              />
+          </div>
+
+          <div>
+            <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
+              3. Link chat *
+            </label>
+            <input
+              type="url"
+              value={newChatUrl}
+              onChange={(e) => setNewChatUrl(e.target.value)}
+              required
+              placeholder="https://character.ai/chat/..."
+              className="w-full px-3.5 py-2 rounded-2xl bg-[var(--bg)] border border-[var(--border)] text-[var(--text)] focus:outline-none focus:border-[var(--accent)]"
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="block text-[11px] font-bold text-[var(--muted)]">
+              Cách xưng hô (tùy chọn)
+            </label>
+            <input
+              type="text"
+              value={newAddressTerms}
+              maxLength={50}
+              onChange={(e) => setNewAddressTerms(e.target.value)}
+              placeholder="Ví dụ: anh - em"
+              className="w-full px-3.5 py-2 rounded-2xl bg-[var(--bg)] border border-[var(--border)] text-[var(--text)] placeholder:text-[var(--muted)]/55 focus:outline-none focus:border-[var(--accent)]"
+            />
+            <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+              <span className="text-[10px] text-[var(--muted)]">Gợi ý nhanh:</span>
+              {[
+                'anh - em',
+                'anh - bé',
+                'anh - vợ',
+                'em - anh',
+                'chị - em',
+                'cậu - tớ',
+                'mình - cậu',
+                'tôi - em',
+              ].map((pair) => (
+                <button
+                  key={pair}
+                  type="button"
+                  onClick={() => setNewAddressTerms(pair)}
+                  className={`px-2.5 py-0.5 rounded-full text-[11px] border transition-colors cursor-pointer ${
+                    newAddressTerms.trim().toLowerCase() === pair
+                      ? 'border-[var(--accent)] bg-[var(--accent)]/25 text-[var(--text)] font-bold'
+                      : 'border-[var(--border)] bg-[var(--bg)] text-[var(--muted)] hover:text-[var(--text)] hover:border-[var(--accent)]'
+                  }`}
+                >
+                  {pair}
+                </button>
+              ))}
             </div>
           </div>
 
@@ -544,18 +773,24 @@ export const CharTab: React.FC<CharTabProps> = ({
                 className="w-full p-3 rounded-2xl bg-[var(--bg)] border border-[var(--border)] text-[var(--text)] focus:outline-none focus:border-[var(--accent)]"
               />
             </div>
-            <div>
+            <div className="space-y-2">
               <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
                 6. Open Scene (Lời mở đầu của cảnh) *
               </label>
               <textarea
-                rows={3}
+                rows={4}
                 value={newOpenScene}
                 onChange={(e) => setNewOpenScene(e.target.value)}
                 required
                 placeholder="“Ngoài trời mưa phùn lất phất, người vừa đẩy cửa bước vào tiệm...”"
                 className="w-full p-3 rounded-2xl bg-[var(--bg)] border border-[var(--border)] text-[var(--text)] focus:outline-none focus:border-[var(--accent)]"
               />
+              {newOpenScene.trim() !== '' && (
+                <OpenSceneBox
+                  content={newOpenScene}
+                  label="Xem trước khung Open Scene:"
+                />
+              )}
             </div>
           </div>
 
@@ -937,7 +1172,7 @@ export const CharTab: React.FC<CharTabProps> = ({
           </button>
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,320px),1fr))] gap-6 items-start">
           {filteredCharacters.map((char, idx) => (
             <CharacterCard
               key={char.id}
@@ -950,6 +1185,16 @@ export const CharTab: React.FC<CharTabProps> = ({
               onClickCreator={(creatorId) => onSelectCreatorFilter(creatorId)}
               onClickTag={onToggleTag}
               isUnlocked={unlockedCharIds.includes(char.id)}
+              isOwner={isOwner}
+              batchSecret={
+                Object.prototype.hasOwnProperty.call(batchSecretsMap, char.id)
+                  ? batchSecretsMap[char.id]
+                  : null
+              }
+              isLoadingSecret={Boolean(loadingSecretIds[char.id])}
+              secretError={errorSecretIds[char.id] || null}
+              onRetryLoadSecret={() => handleRetrySecret(char.id)}
+              onSecretUpdated={handleSecretUpdated}
               petalsBalance={petalsBalance}
               onUnlockWithPetals={onUnlockWithPetals}
               onUnlockWithItems={onUnlockWithItems}

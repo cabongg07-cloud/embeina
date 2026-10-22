@@ -1729,12 +1729,503 @@ export const DEFAULT_TAG_PETS: TagPetProfile[] = [
 ];
 
 // ============================================================================
+// HỆ THỐNG XƯNG HÔ (`resolveAddress`) & BẢNG TỪ KHÓA `address_map`
+// ============================================================================
+
+export interface AddressKeywordRule {
+  id: string;
+  keywords: string[]; // Các từ khóa trong danh xưng (epithet) hoặc tag
+  self: string; // xưng (vd: "anh", "em", "tôi", "ta", "mình"...)
+  user: string; // gọi (vd: "em", "anh", "bạn", "cậu", "bé"...)
+  note?: string;
+}
+
+export interface ResolvedAddressPair {
+  self: string; // xưng
+  user: string; // gọi
+  pairLabel: string; // vd: "anh - em"
+  source: 'address_terms' | 'open_scene' | 'epithet_tags' | 'default';
+  matchedDetail?: string;
+}
+
+export const SUGGESTED_ADDRESS_CHIPS: string[] = [
+  'anh - em',
+  'anh - bé',
+  'anh - vợ',
+  'em - anh',
+  'chị - em',
+  'cậu - tớ',
+  'mình - cậu',
+  'tôi - em',
+];
+
+export const DEFAULT_ADDRESS_MAP: AddressKeywordRule[] = [
+  {
+    id: 'addr_anh_vo',
+    keywords: ['chồng', 'ông xã', 'hôn phu', 'phu quân', 'cưới', 'tân lang'],
+    self: 'anh',
+    user: 'vợ',
+    note: 'Chồng / Hôn phu ấm áp',
+  },
+  {
+    id: 'addr_anh_be',
+    keywords: ['sủng', 'chiều chuộng', 'chú nhỏ', 'anh nuôi', 'bảo bọc', 'cưng chiều'],
+    self: 'anh',
+    user: 'bé',
+    note: 'Chiều chuộng / Ngọt sủng',
+  },
+  {
+    id: 'addr_anh_em',
+    keywords: [
+      'anh hàng xóm',
+      'đàn anh',
+      'học trưởng',
+      'tiền bối',
+      'bạn trai',
+      'anh trai',
+      'tổng tài',
+      'giám đốc',
+      'chủ tịch',
+      'bác sĩ',
+      'thầy',
+      'thiếu gia',
+      'ca sĩ',
+      'nhiếp ảnh',
+      'ôn nhu',
+    ],
+    self: 'anh',
+    user: 'em',
+    note: 'Nam chín chắn / Đàn anh / Hàng xóm',
+  },
+  {
+    id: 'addr_toi_em',
+    keywords: [
+      'chiếm hữu',
+      'bá đạo',
+      'lạnh lùng',
+      'mafia',
+      'sát thủ',
+      'nguy hiểm',
+      'trưởng phòng',
+      'cấp trên',
+      'quản gia',
+      'vệ sĩ',
+    ],
+    self: 'tôi',
+    user: 'em',
+    note: 'Lạnh lùng / Chiếm hữu / Khoảng cách quyến rũ',
+  },
+  {
+    id: 'addr_chi_em',
+    keywords: [
+      'chị gái',
+      'đàn chị',
+      'học tỷ',
+      'cô giáo',
+      'nữ hoàng',
+      'phú bà',
+      'chị đẹp',
+      'chị hàng xóm',
+      'ự tỷ',
+    ],
+    self: 'chị',
+    user: 'em',
+    note: 'Đàn chị / Cô giáo / Chị đẹp',
+  },
+  {
+    id: 'addr_em_anh',
+    keywords: [
+      'em gái',
+      'bạn gái',
+      'vợ nhỏ',
+      'cô dâu',
+      'học muội',
+      'đàn em',
+      'học đệ',
+      'em trai',
+      'niên hạ',
+      'cún nhỏ',
+      'làm nũng',
+    ],
+    self: 'em',
+    user: 'anh',
+    note: 'Em nhỏ / Niên hạ / Bạn gái',
+  },
+  {
+    id: 'addr_to_cau',
+    keywords: [
+      'bạn cùng bàn',
+      'thanh mai trúc mã',
+      'học đường',
+      'bạn học',
+      'lớp trưởng',
+      'bạn thân',
+      'tinh nghịch',
+      'thanh xuân',
+    ],
+    self: 'tớ',
+    user: 'cậu',
+    note: 'Bạn học / Thanh mai trúc mã',
+  },
+  {
+    id: 'addr_cau_to',
+    keywords: ['cậu bạn', 'đồng bàn', 'nhút nhát'],
+    self: 'cậu',
+    user: 'tớ',
+    note: 'Gần gũi học đường',
+  },
+  {
+    id: 'addr_minh_cau',
+    keywords: ['đời thường', 'hàng xóm', 'gần gũi', 'tri kỷ', 'bình dị', 'nội tâm', 'thơ mộng'],
+    self: 'mình',
+    user: 'cậu',
+    note: 'Đời thường / Tri kỷ nhẹ nhàng',
+  },
+  {
+    id: 'addr_ta_nang',
+    keywords: ['vương gia', 'hoàng đế', 'tướng quân', 'thái tử', 'công tử', 'cổ trang'],
+    self: 'ta',
+    user: 'nàng',
+    note: 'Cổ trang / Vương gia - Nàng',
+  },
+  {
+    id: 'addr_ta_nguoi',
+    keywords: ['tiên hiệp', 'kiếm tiên', 'sư tôn', 'thần tiên', 'kỳ ảo', 'quý tộc', 'thông thái'],
+    self: 'ta',
+    user: 'người',
+    note: 'Tiên hiệp / Kỳ ảo / Quý tộc',
+  },
+  {
+    id: 'addr_ta_nguoi_ngao',
+    keywords: ['ngạo kiều', 'ma tôn', 'bá vương', 'ác ma'],
+    self: 'ta',
+    user: 'ngươi',
+    note: 'Ngạo kiều / Ma tôn',
+  },
+];
+
+/**
+ * 36+ mẫu từ khóa quét Open Scene (chỉ quét trong bộ nhớ RAM khi người dùng có quyền xem Open Scene)
+ */
+interface OpenSceneAddressPattern {
+  id: string;
+  regex: RegExp;
+  self: string;
+  user: string;
+  weight: number;
+}
+
+const OPEN_SCENE_ADDRESS_PATTERNS: OpenSceneAddressPattern[] = [
+  // 1-10: Xưng "anh" với các cách gọi thân mật / đặc trưng
+  { id: 'os_anh_voyeu', regex: /\b(anh)\b[^.!?\n]{0,45}\b(vợ yêu)\b|\b(vợ yêu)\b[^.!?\n]{0,45}\b(anh)\b/i, self: 'anh', user: 'vợ yêu', weight: 100 },
+  { id: 'os_anh_baxa', regex: /\b(anh)\b[^.!?\n]{0,45}\b(bà xã)\b|\b(bà xã)\b[^.!?\n]{0,45}\b(anh)\b/i, self: 'anh', user: 'bà xã', weight: 98 },
+  { id: 'os_anh_vo', regex: /\b(anh)\b[^.!?\n]{0,40}\b(vợ)\b|\b(vợ)\s+(ơi|à|nhé|ngoan|của anh)\b/i, self: 'anh', user: 'vợ', weight: 95 },
+  { id: 'os_anh_cuccung', regex: /\b(anh)\b[^.!?\n]{0,40}\b(cục cưng)\b|\b(cục cưng)\s+(của anh|ơi|à)\b/i, self: 'anh', user: 'cục cưng', weight: 94 },
+  { id: 'os_anh_becung', regex: /\b(anh)\b[^.!?\n]{0,40}\b(bé cưng)\b|\b(bé cưng)\s+(của anh|ơi|à|ngoan)\b/i, self: 'anh', user: 'bé cưng', weight: 93 },
+  { id: 'os_anh_becon', regex: /\b(anh)\b[^.!?\n]{0,40}\b(bé con|bé nhỏ)\b|\b(bé con|bé nhỏ)\s+(của anh|ơi|à|ngoan)\b/i, self: 'anh', user: 'bé con', weight: 92 },
+  { id: 'os_anh_baoboi', regex: /\b(anh)\b[^.!?\n]{0,40}\b(bảo bối)\b|\b(bảo bối)\s+(của anh|ơi|à)\b/i, self: 'anh', user: 'bảo bối', weight: 91 },
+  { id: 'os_anh_be', regex: /\b(anh)\b[^.!?\n]{0,35}\b(bé)\b|\b(bé)\s+(ơi|à|ngoan|của anh|ngốc)\b/i, self: 'anh', user: 'bé', weight: 90 },
+  { id: 'os_anh_congchua', regex: /\b(anh)\b[^.!?\n]{0,45}\b(công chúa)\b|\b(công chúa nhỏ)\b/i, self: 'anh', user: 'công chúa', weight: 88 },
+  { id: 'os_anh_nhoc', regex: /\b(anh)\b[^.!?\n]{0,40}\b(nhóc|nhóc con)\b|\b(nhóc)\s+(ơi|con|ngốc)\b/i, self: 'anh', user: 'nhóc', weight: 86 },
+  { id: 'os_anh_cobe', regex: /\b(anh)\b[^.!?\n]{0,40}\b(cô bé)\b/i, self: 'anh', user: 'cô bé', weight: 85 },
+  { id: 'os_anh_emyêu', regex: /\b(anh)\b[^.!?\n]{0,40}\b(em yêu|cưng)\b/i, self: 'anh', user: 'em yêu', weight: 84 },
+  { id: 'os_anh_em', regex: /\b(anh)\b[^.!?\n]{0,45}\b(em)\b|\b(em)\b[^.!?\n]{0,45}\b(anh)\b/i, self: 'anh', user: 'em', weight: 80 },
+
+  // 14-20: Xưng "em" với người chơi
+  { id: 'os_em_chong', regex: /\b(em)\b[^.!?\n]{0,40}\b(chồng|ông xã)\b/i, self: 'em', user: 'chồng', weight: 95 },
+  { id: 'os_em_chunhan', regex: /\b(em)\b[^.!?\n]{0,45}\b(chủ nhân|cậu chủ|thiếu gia)\b/i, self: 'em', user: 'chủ nhân', weight: 92 },
+  { id: 'os_em_dananh', regex: /\b(em)\b[^.!?\n]{0,40}\b(đàn anh|học trưởng|tiền bối)\b/i, self: 'em', user: 'đàn anh', weight: 89 },
+  { id: 'os_em_chi', regex: /\b(em)\b[^.!?\n]{0,35}\b(chị)\b|\b(chị)\s+(ơi|à)\b[^.!?\n]{0,35}\b(em)\b/i, self: 'em', user: 'chị', weight: 85 },
+  { id: 'os_em_anh_direct', regex: /[“"«][^”"»]{0,80}\b(em)\s+(nhớ|thích|yêu|đợi|chờ|pha|nấu|mang|muốn)\s+(anh)\b/i, self: 'em', user: 'anh', weight: 86 },
+
+  // 19-21: Xưng "chị" với người chơi
+  { id: 'os_chi_be', regex: /\b(chị)\b[^.!?\n]{0,40}\b(bé|cưng|nhóc)\b/i, self: 'chị', user: 'bé', weight: 90 },
+  { id: 'os_chi_em', regex: /\b(chị)\b[^.!?\n]{0,40}\b(em)\b/i, self: 'chị', user: 'em', weight: 83 },
+
+  // 21-26: Xưng "tôi" với người chơi
+  { id: 'os_toi_em', regex: /\b(tôi)\b[^.!?\n]{0,45}\b(em)\b|\b(em)\b[^.!?\n]{0,45}\b(tôi)\b/i, self: 'tôi', user: 'em', weight: 88 },
+  { id: 'os_toi_tieuthu', regex: /\b(tôi)\b[^.!?\n]{0,45}\b(tiểu thư|cô chủ)\b/i, self: 'tôi', user: 'tiểu thư', weight: 90 },
+  { id: 'os_toi_co', regex: /\b(tôi)\b[^.!?\n]{0,40}\b(cô)\b/i, self: 'tôi', user: 'cô', weight: 78 },
+  { id: 'os_toi_anh', regex: /\b(tôi)\b[^.!?\n]{0,40}\b(anh)\b/i, self: 'tôi', user: 'anh', weight: 78 },
+  { id: 'os_toi_bannho', regex: /\b(tôi)\b[^.!?\n]{0,45}\b(bạn nhỏ)\b/i, self: 'tôi', user: 'bạn nhỏ', weight: 87 },
+  { id: 'os_toi_cau', regex: /\b(tôi)\b[^.!?\n]{0,45}\b(cậu)\b|\b(cậu)\b[^.!?\n]{0,45}\b(tôi)\b/i, self: 'tôi', user: 'cậu', weight: 82 },
+  { id: 'os_toi_ban', regex: /\b(tôi)\b[^.!?\n]{0,45}\b(bạn)\b/i, self: 'tôi', user: 'bạn', weight: 72 },
+
+  // 28-36: Cổ trang / Tiên hiệp / Kỳ ảo ("ta", "bổn tọa", "vi sư", "thần"...)
+  { id: 'os_bontoa_nguoi', regex: /\b(bổn tọa|bản tọa|bổn vương)\b[^.!?\n]{0,50}\b(ngươi|nàng)\b/i, self: 'bổn tọa', user: 'ngươi', weight: 95 },
+  { id: 'os_visu_doni', regex: /\b(vi sư|sư tôn)\b[^.!?\n]{0,50}\b(đồ nhi|đồ đệ|con)\b/i, self: 'vi sư', user: 'đồ nhi', weight: 95 },
+  { id: 'os_ta_aiphi', regex: /\b(ta|trẫm|bổn vương)\b[^.!?\n]{0,50}\b(ái phi|vương phi|phu nhân)\b/i, self: 'ta', user: 'ái phi', weight: 94 },
+  { id: 'os_ta_dode', regex: /\b(ta)\b[^.!?\n]{0,45}\b(đồ đệ|tiểu đồ đệ)\b/i, self: 'ta', user: 'đồ đệ', weight: 91 },
+  { id: 'os_ta_daohuu', regex: /\b(ta)\b[^.!?\n]{0,45}\b(đạo hữu)\b/i, self: 'ta', user: 'đạo hữu', weight: 90 },
+  { id: 'os_ta_nang', regex: /\b(ta)\b[^.!?\n]{0,45}\b(nàng)\b|\b(nàng)\b[^.!?\n]{0,45}\b(ta)\b/i, self: 'ta', user: 'nàng', weight: 89 },
+  { id: 'os_ta_chang', regex: /\b(ta|thiếp)\b[^.!?\n]{0,45}\b(chàng)\b/i, self: 'ta', user: 'chàng', weight: 89 },
+  { id: 'os_ta_nguoi_ancient', regex: /\b(ta)\b[^.!?\n]{0,45}\b(ngươi)\b|\b(ngươi)\b[^.!?\n]{0,45}\b(ta)\b/i, self: 'ta', user: 'ngươi', weight: 85 },
+  { id: 'os_ta_nguoi_noble', regex: /\b(ta)\b[^.!?\n]{0,45}\b(người)\b/i, self: 'ta', user: 'người', weight: 78 },
+  { id: 'os_than_dienha', regex: /\b(thần|thuộc hạ)\b[^.!?\n]{0,45}\b(điện hạ|bệ hạ|chủ nhân)\b/i, self: 'thần', user: 'điện hạ', weight: 92 },
+
+  // 38-41: Học đường / Đời thường ("tớ - cậu", "cậu - tớ", "mình - cậu")
+  { id: 'os_to_dangay', regex: /\b(tớ)\b[^.!?\n]{0,45}\b(đằng ấy)\b/i, self: 'tớ', user: 'đằng ấy', weight: 88 },
+  { id: 'os_to_cau', regex: /\b(tớ)\b[^.!?\n]{0,45}\b(cậu)\b|\b(cậu)\b[^.!?\n]{0,45}\b(tớ)\b/i, self: 'tớ', user: 'cậu', weight: 84 },
+  { id: 'os_minh_cau', regex: /\b(mình)\b[^.!?\n]{0,45}\b(cậu)\b|\b(cậu)\b[^.!?\n]{0,45}\b(mình)\b/i, self: 'mình', user: 'cậu', weight: 82 },
+  { id: 'os_minh_ban', regex: /\b(mình)\b[^.!?\n]{0,45}\b(bạn)\b/i, self: 'mình', user: 'bạn', weight: 70 },
+];
+
+export function parseAddressTermsString(
+  raw: string | undefined | null
+): { self: string; user: string } | null {
+  if (!raw || typeof raw !== 'string') return null;
+  const cleaned = raw.trim();
+  if (!cleaned) return null;
+
+  const parts = cleaned
+    .split(/\s*(?:[-–—/→,~]|va|và)\s*/i)
+    .map((p) => p.trim())
+    .filter(Boolean);
+
+  if (parts.length >= 2 && parts[0] && parts[1]) {
+    return {
+      self: parts[0].toLowerCase(),
+      user: parts[1].toLowerCase(),
+    };
+  }
+  return null;
+}
+
+/**
+ * Hàm `resolveAddress(char, options)` trả về cặp (xưng, gọi) theo thứ tự ưu tiên:
+ * a. `address_terms` (`addressTerms`) do Chủ web đặt (nếu có).
+ * b. Đọc từ Open scene (CHỈ khi open scene đã được tải hợp lệ vào bộ nhớ RAM - tuyệt đối không lưu localStorage).
+ * c. Đọc từ danh xưng (`epithet`) và `tags` theo bảng từ khóa `address_map`.
+ * d. Mặc định: "mình - bạn".
+ */
+export function resolveAddress(
+  char: {
+    name?: string;
+    addressTerms?: string | null;
+    epithet?: string | null;
+    tags?: string[] | null;
+  } | null | undefined,
+  options?: {
+    inMemoryOpenScene?: string | null;
+    addressMap?: AddressKeywordRule[];
+  }
+): ResolvedAddressPair {
+  if (!char) {
+    return {
+      self: 'mình',
+      user: 'bạn',
+      pairLabel: 'mình - bạn',
+      source: 'default',
+    };
+  }
+
+  // (a) Ưu tiên 1: address_terms do Chủ web đặt
+  const explicit = parseAddressTermsString(char.addressTerms);
+  if (explicit) {
+    return {
+      self: explicit.self,
+      user: explicit.user,
+      pairLabel: `${explicit.self} - ${explicit.user}`,
+      source: 'address_terms',
+      matchedDetail: char.addressTerms?.trim() || '',
+    };
+  }
+
+  // (b) Ưu tiên 2: Quét từ Open Scene (chỉ trong RAM khi đã tải hợp lệ)
+  const openSceneText = (options?.inMemoryOpenScene || '').trim();
+  if (openSceneText.length > 0) {
+    let bestMatch: OpenSceneAddressPattern | null = null;
+    for (const pat of OPEN_SCENE_ADDRESS_PATTERNS) {
+      if (pat.regex.test(openSceneText)) {
+        if (!bestMatch || pat.weight > bestMatch.weight) {
+          bestMatch = pat;
+        }
+      }
+    }
+    if (bestMatch) {
+      return {
+        self: bestMatch.self,
+        user: bestMatch.user,
+        pairLabel: `${bestMatch.self} - ${bestMatch.user}`,
+        source: 'open_scene',
+        matchedDetail: `Open Scene (${bestMatch.self} - ${bestMatch.user})`,
+      };
+    }
+  }
+
+  // (c) Ưu tiên 3: Đọc từ danh xưng (epithet) và tags theo bảng address_map
+  const rules =
+    Array.isArray(options?.addressMap) && options!.addressMap.length > 0
+      ? options!.addressMap
+      : DEFAULT_ADDRESS_MAP;
+
+  const epithetText = (char.epithet || '').trim().toLowerCase();
+  const tagTexts = (char.tags || []).map((t) => (t || '').trim().toLowerCase()).filter(Boolean);
+
+  // Quét danh xưng (epithet) trước vì danh xưng thường chỉ rõ vai vế ("Anh hàng xóm", "Cô giáo", "Bạn cùng bàn"...)
+  if (epithetText) {
+    for (const rule of rules) {
+      for (const kw of rule.keywords) {
+        const nkw = kw.trim().toLowerCase();
+        if (nkw && epithetText.includes(nkw)) {
+          return {
+            self: rule.self.trim().toLowerCase(),
+            user: rule.user.trim().toLowerCase(),
+            pairLabel: `${rule.self.trim().toLowerCase()} - ${rule.user.trim().toLowerCase()}`,
+            source: 'epithet_tags',
+            matchedDetail: `Danh xưng: "${char.epithet}" (${nkw})`,
+          };
+        }
+      }
+    }
+  }
+
+  // Tiếp theo quét trong danh sách tags
+  if (tagTexts.length > 0) {
+    for (const rule of rules) {
+      for (const kw of rule.keywords) {
+        const nkw = kw.trim().toLowerCase();
+        if (
+          nkw &&
+          tagTexts.some((t) => t === nkw || t.includes(nkw) || nkw.includes(t))
+        ) {
+          return {
+            self: rule.self.trim().toLowerCase(),
+            user: rule.user.trim().toLowerCase(),
+            pairLabel: `${rule.self.trim().toLowerCase()} - ${rule.user.trim().toLowerCase()}`,
+            source: 'epithet_tags',
+            matchedDetail: `Tag: "${kw}"`,
+          };
+        }
+      }
+    }
+  }
+
+  // (d) Mặc định: "mình - bạn"
+  return {
+    self: 'mình',
+    user: 'bạn',
+    pairLabel: 'mình - bạn',
+    source: 'default',
+  };
+}
+
+function capitalizeFirst(word: string): string {
+  if (!word) return word;
+  return word.charAt(0).toUpperCase() + word.slice(1);
+}
+
+/**
+ * Thay thế {xưng}, {gọi} và đồng bộ các đại từ mặc định trong câu thoại sang cặp (xưng, gọi) của char.
+ * Đảm bảo char KHÔNG tự xưng bằng tên riêng.
+ */
+export function applyAddressPairToDialogue(
+  rawLine: string,
+  pair: ResolvedAddressPair,
+  charName?: string
+): string {
+  if (!rawLine) return '';
+  const selfLower = pair.self || 'mình';
+  const userLower = pair.user || 'bạn';
+  const selfCap = capitalizeFirst(selfLower);
+  const userCap = capitalizeFirst(userLower);
+
+  let text = rawLine;
+
+  // 1. Nếu có placeholder {xưng} / {gọi} trực tiếp
+  text = text
+    .replace(/\{Xưng\}/g, selfCap)
+    .replace(/\{xưng\}/g, selfLower)
+    .replace(/\{Gọi\}/g, userCap)
+    .replace(/\{gọi\}/g, userLower);
+
+  // 2. Loại bỏ trường hợp tự xưng bằng tên riêng của char (nếu có)
+  if (charName && charName.trim().length > 1) {
+    const escapedName = charName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    text = text.replace(new RegExp(`\\b${escapedName}\\b`, 'gi'), selfLower);
+  }
+
+  // 3. Chuyển đổi các đại từ mẫu trong kho câu thoại sang {xưng} và {gọi} bằng token trung gian để không chồng chéo
+  const SELF_TOKEN_CAP = '__SELF_CAP__';
+  const SELF_TOKEN_LOW = '__SELF_LOW__';
+  const USER_TOKEN_CAP = '__USER_CAP__';
+  const USER_TOKEN_LOW = '__USER_LOW__';
+
+  // Các cụm dài thay trước
+  text = text
+    .replace(/\bbạn cùng bàn của tớ\b/gi, `${USER_TOKEN_LOW} của ${SELF_TOKEN_LOW}`)
+    .replace(/\bngười bạn đồng hành của tôi\b/gi, `${USER_TOKEN_LOW} của ${SELF_TOKEN_LOW}`)
+    .replace(/\bngười lữ hành\b/gi, USER_TOKEN_LOW)
+    .replace(/\bbạn nhỏ của tôi\b/gi, `${USER_TOKEN_LOW} của ${SELF_TOKEN_LOW}`)
+    .replace(/\bbạn nhỏ\b/gi, USER_TOKEN_LOW)
+    .replace(/\bbạn hiền\b/gi, USER_TOKEN_LOW)
+    .replace(/\bđằng ấy\b/gi, USER_TOKEN_LOW)
+    .replace(/\bđạo hữu\b/gi, USER_TOKEN_LOW)
+    .replace(/\bbổn tọa\b/gi, SELF_TOKEN_LOW)
+    .replace(/\bbản tọa\b/gi, SELF_TOKEN_LOW)
+    .replace(/\btụi mình\b/gi, `hai ${SELF_TOKEN_LOW} ${USER_TOKEN_LOW}`)
+    .replace(/\bchúng mình\b/gi, `hai ${SELF_TOKEN_LOW} ${USER_TOKEN_LOW}`);
+
+  // Đại từ xưng mẫu: mình, tôi, tớ, ta (chỉ khi đứng độc lập dạng đại từ)
+  text = text
+    .replace(/(^|[.!?…]\s+|“[ ]*)(Mình|Tôi|Tớ|Ta)\b/g, `$1${SELF_TOKEN_CAP}`)
+    .replace(/\b(mình|tôi|tớ)\b/g, SELF_TOKEN_LOW)
+    .replace(/\b(ta)\b(?!\s+(?:nhiều|ít|lớn))/g, SELF_TOKEN_LOW);
+
+  // Đại từ gọi mẫu: bạn, cậu, ngươi, người (khi mang nghĩa ngôi thứ 2)
+  text = text
+    .replace(/(^|[.!?…]\s+|“[ ]*)(Bạn|Cậu|Ngươi|Người)\b/g, `$1${USER_TOKEN_CAP}`)
+    .replace(/\b(bạn|cậu|ngươi)\b/g, USER_TOKEN_LOW)
+    .replace(
+      /\b(người)\b(?=\s+(?:vừa|đến|tới|ghé|có|hãy|đừng|nhớ|về|ngồi|cứ|là|đã|mang|tặng|thưởng|lại|đi|ngủ|bước|chính))/g,
+      USER_TOKEN_LOW
+    )
+    .replace(
+      /(?:của|với|cho|đợi|chờ|cùng|thăm|tặng|cảm ơn|cảm tạ|đa tạ|chào|tiễn|bên|cạnh|tay|lòng|mắt|gối)\s+\b(người)\b/g,
+      (m) => m.replace(/\bngười\b$/, USER_TOKEN_LOW)
+    );
+
+  // Hoàn trả token thành từ xưng/gọi thực tế
+  text = text
+    .replace(new RegExp(SELF_TOKEN_CAP, 'g'), selfCap)
+    .replace(new RegExp(SELF_TOKEN_LOW, 'g'), selfLower)
+    .replace(new RegExp(USER_TOKEN_CAP, 'g'), userCap)
+    .replace(new RegExp(USER_TOKEN_LOW, 'g'), userLower);
+
+  // Đảm bảo chữ cái đầu câu luôn viết hoa đẹp
+  text = text.replace(/^([“"']?\s*)([a-zàáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ])/, (_, p1, p2) => `${p1}${p2.toUpperCase()}`);
+
+  return text;
+}
+
+/**
+ * Rút trích chi tiết bầu không khí (vibe/motif) từ Open Scene đang có trong RAM
+ * để dệt thêm vào câu thoại Phòng tri kỷ & Khu thú cưng (không lộ nguyên văn, không lưu localStorage).
+ */
+function extractOpenSceneAtmosphereHint(inMemoryOpenScene?: string | null): string | null {
+  if (!inMemoryOpenScene || !inMemoryOpenScene.trim()) return null;
+  const low = inMemoryOpenScene.toLowerCase();
+  if (low.includes('mưa')) return 'tiếng mưa rơi ngoài hiên';
+  if (low.includes('trà')) return 'hương trà ấm còn vương';
+  if (low.includes('cà phê') || low.includes('coffee')) return 'hương cà phê thơm dịu';
+  if (low.includes('trăng') || low.includes('nguyệt')) return 'ánh trăng dịu ngoài khung cửa';
+  if (low.includes('sách') || low.includes('thư viện')) return 'những trang sách mở dở';
+  if (low.includes('đàn') || low.includes('nhạc') || low.includes('piano')) return 'giai điệu êm đềm đang ngân';
+  if (low.includes('hoa') || low.includes('vườn')) return 'hương hoa thoang thoảng trong gió';
+  if (low.includes('nến') || low.includes('đèn vàng')) return 'ánh đèn ấm áp nơi góc phòng';
+  if (low.includes('tuyết') || low.includes('đông')) return 'hơi ấm giữa ngày lạnh';
+  if (low.includes('biển') || low.includes('sóng')) return 'tiếng gió dịu dàng';
+  return 'bầu không khí quen thuộc của hai đứa';
+}
+
+// ============================================================================
 // HÀM LÀM SẠCH GHI CHÚ THÚ CƯNG (ĐẢM BẢO TUYỆT ĐỐI KHÔNG CÓ TÊN CHAR)
 // ============================================================================
 export function sanitizePetVibeNote(
   rawNote: string | undefined,
   matchedTag?: string,
-  species?: string
+  species?: string,
+  charNameToStrip?: string
 ): string {
   const cleanTag = (matchedTag || 'dịu dàng').toLowerCase();
   const cleanSpecies = (species || 'thú cưng').toLowerCase();
@@ -1743,16 +2234,25 @@ export function sanitizePetVibeNote(
     return `Bé ${cleanSpecies} có tính cách điềm đạm, đáng yêu, rất hợp với bầu không khí ${cleanTag} nơi đây.`;
   }
 
+  let note = rawNote;
+
   // Nếu câu ghi chú cũ có dạng "Hợp với vibe "..." của [Tên Char]: ..." hoặc chứa chữ "của " trước dấu hai chấm
-  if (/hợp với vibe .* của [^:]+:/i.test(rawNote)) {
-    const afterColon = rawNote.split(':').slice(1).join(':').trim();
+  if (/hợp với vibe .* của [^:]+:/i.test(note)) {
+    const afterColon = note.split(':').slice(1).join(':').trim();
     if (afterColon) {
-      return `${afterColon.replace(/\s+/g, ' ').replace(/\.$/, '')}, rất hợp với bầu không khí ${cleanTag} nơi đây.`;
+      note = `${afterColon.replace(/\s+/g, ' ').replace(/\.$/, '')}, rất hợp với bầu không khí ${cleanTag} nơi đây.`;
+    } else {
+      note = `Bé ${cleanSpecies} có tính cách đáng yêu, rất hợp với bầu không khí ${cleanTag} nơi đây.`;
     }
-    return `Bé ${cleanSpecies} có tính cách đáng yêu, rất hợp với bầu không khí ${cleanTag} nơi đây.`;
   }
 
-  return rawNote;
+  if (charNameToStrip && charNameToStrip.trim().length > 1) {
+    const escaped = charNameToStrip.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    note = note.replace(new RegExp(`của\\s+${escaped}`, 'gi'), 'nơi đây');
+    note = note.replace(new RegExp(escaped, 'gi'), 'góc nhỏ');
+  }
+
+  return note;
 }
 
 // ============================================================================
@@ -1848,10 +2348,10 @@ export function resolveBlendedVoicesForCharacter(
 }
 
 /**
- * Sinh câu thoại trộn giọng từ 2-3 tag đầu của Char theo tình huống và điểm Gắn bó:
- * - Gắn bó < 30: Mở các câu cơ bản của tình huống.
- * - Gắn bó >= 30: Mở toàn bộ câu của tình huống và pha trộn nhịp/emoji giữa 2-3 tag đầu.
- * - Gắn bó >= 70: Mở thêm kho câu `high_bond` thân mật sâu sắc.
+ * Sinh câu thoại trộn giọng từ 2-3 tag đầu của Char theo tình huống, điểm Gắn bó và cặp {xưng} - {gọi} từ `resolveAddress`:
+ * - Mọi câu của char đều chèn đúng {xưng} và {gọi}.
+ * - Kết hợp giọng theo tag + hơi thở của Open Scene (nếu đã mở trong RAM).
+ * - Điểm thân mật càng cao thì lời càng gần gũi.
  */
 export function generateCompanionDialogueByTags(params: {
   charTags: string[];
@@ -1860,10 +2360,14 @@ export function generateCompanionDialogueByTags(params: {
   itemName?: string;
   customVoices?: TagVoiceProfile[];
   previousText?: string;
+  addressPair?: ResolvedAddressPair;
+  inMemoryOpenScene?: string | null;
+  charName?: string;
 }): {
   text: string;
   blendedTagsLabel: string;
   voiceSummary: string;
+  addressPair: ResolvedAddressPair;
 } {
   const {
     charTags,
@@ -1872,7 +2376,17 @@ export function generateCompanionDialogueByTags(params: {
     itemName,
     customVoices = DEFAULT_TAG_VOICES,
     previousText,
+    addressPair: providedPair,
+    inMemoryOpenScene,
+    charName,
   } = params;
+
+  const activePair: ResolvedAddressPair =
+    providedPair ||
+    resolveAddress(
+      { name: charName, tags: charTags },
+      { inMemoryOpenScene }
+    );
 
   const voices = resolveBlendedVoicesForCharacter(charTags, customVoices);
   const primaryVoice = voices[0] || NEUTRAL_GENTLE_VOICE;
@@ -1883,7 +2397,6 @@ export function generateCompanionDialogueByTags(params: {
 
   voices.forEach((v, idx) => {
     const sitLines = v.dialogues[situation] || [];
-    // Mốc gắn bó quyết định số câu mở khóa trong mỗi nhóm
     const unlockedCount =
       bondPoints >= 70
         ? sitLines.length
@@ -1892,13 +2405,11 @@ export function generateCompanionDialogueByTags(params: {
         : Math.max(1, Math.ceil(sitLines.length * 0.65));
 
     const sliced = sitLines.slice(0, unlockedCount);
-    // Ưu tiên tag chính (idx === 0) xuất hiện nhiều hơn một chút nhưng vẫn trộn đều tag 2 và tag 3
     sliced.forEach((line) => {
       candidatePool.push(line);
       if (idx === 0) candidatePool.push(line);
     });
 
-    // Khi gắn bó >= 70 và đang trò chuyện ('chat') hoặc gọi trực tiếp 'high_bond', trộn thêm câu thoại gắn bó cao!
     if ((situation === 'chat' && bondPoints >= 70) || situation === 'high_bond') {
       (v.dialogues.high_bond || []).forEach((hbLine) => {
         candidatePool.push(hbLine);
@@ -1906,25 +2417,57 @@ export function generateCompanionDialogueByTags(params: {
     }
   });
 
+  // Nếu Open Scene đã mở hợp lệ trong RAM, thêm các câu mang hơi thở Open Scene + {xưng}/{gọi}
+  const openSceneHint = extractOpenSceneAtmosphereHint(inMemoryOpenScene);
+  if (openSceneHint) {
+    if (situation === 'greeting') {
+      candidatePool.push(
+        `{Gọi} tới rồi à, giữa ${openSceneHint} thế này mà có {gọi} bước vào là {xưng} thấy ấm lòng hẳn lên ${primaryVoice.emojis[0] || '✨'}`
+      );
+    } else if (situation === 'chat') {
+      candidatePool.push(
+        `Ngồi cạnh {gọi} lắng nghe ${openSceneHint}, {xưng} chỉ mong khoảnh khắc yên bình này kéo dài mãi thôi ${primaryVoice.emojis[0] || '🌸'}`
+      );
+      if (bondPoints >= 50) {
+        candidatePool.push(
+          `Từ khoảnh khắc đầu tiên gặp {gọi} giữa ${openSceneHint}, ánh mắt {xưng} đã luôn dõi theo {gọi} rồi ${primaryVoice.emojis[0] || '💗'}`
+        );
+      }
+    } else if (situation === 'high_bond') {
+      candidatePool.push(
+        `Giữa ${openSceneHint}, điều quý giá nhất với {xưng} chính là được nắm tay {gọi} đi qua từng ngày êm đềm thế này ${primaryVoice.emojis[0] || '💗'}`
+      );
+    }
+  }
+
+  // Thêm câu thân mật theo mức bondPoints với {xưng} - {gọi}
+  if (bondPoints >= 80 && (situation === 'chat' || situation === 'high_bond')) {
+    candidatePool.push(
+      `Ở bên {gọi} càng lâu, {xưng} càng nhận ra {gọi} là người đặc biệt nhất mà {xưng} luôn muốn chở che và lắng nghe mỗi ngày ${primaryVoice.emojis[0] || '💗'}`
+    );
+  }
+
   if (candidatePool.length === 0) {
     candidatePool.push(...NEUTRAL_GENTLE_VOICE.dialogues.chat);
   }
 
-  // Tránh lặp lại đúng câu vừa hiển thị
-  const nonRepeating = candidatePool.filter(
+  // Biến đổi toàn bộ ứng viên theo {xưng} và {gọi}
+  const transformedPool = candidatePool.map((raw) => {
+    let line = raw;
+    if (itemName) {
+      line = line.replace(/\{item\}/g, itemName);
+    } else {
+      line = line.replace(/\{item\}/g, 'món quà nhỏ');
+    }
+    return applyAddressPairToDialogue(line, activePair, charName);
+  });
+
+  const nonRepeating = transformedPool.filter(
     (c) => !previousText || !previousText.includes(c.slice(0, 18))
   );
-  const poolToPick = nonRepeating.length > 0 ? nonRepeating : candidatePool;
+  const poolToPick = nonRepeating.length > 0 ? nonRepeating : transformedPool;
   let chosen = poolToPick[Math.floor(Math.random() * poolToPick.length)];
 
-  // Thay thế tên vật phẩm nếu là tình huống tặng hoa / tặng thức uống
-  if (itemName) {
-    chosen = chosen.replace(/\{item\}/g, itemName);
-  } else {
-    chosen = chosen.replace(/\{item\}/g, 'món quà nhỏ');
-  }
-
-  // Nếu nhân vật có từ 2-3 tag trở lên và điểm gắn bó >= 30, điểm xuyết thêm sắc thái / emoji của tag thứ 2 hoặc thứ 3
   if (secondaryVoice && bondPoints >= 30) {
     const secEmoji =
       secondaryVoice.emojis[
@@ -1944,12 +2487,113 @@ export function generateCompanionDialogueByTags(params: {
   const blendedTagsLabel = voices.map((v) => v.tag).join(' + ');
   const voiceSummary = `${primaryVoice.rhythm}${
     secondaryVoice ? ` · pha nét ${secondaryVoice.tag.toLowerCase()}` : ''
-  }`;
+  } · xưng hô "${activePair.pairLabel}"`;
 
   return {
     text: `“${chosen.replace(/^[“"]|[”"]$/g, '').trim()}”`,
     blendedTagsLabel,
     voiceSummary,
+    addressPair: activePair,
+  };
+}
+
+/**
+ * Sinh lời nhận xét của Char trong Khu thú cưng:
+ * - Luôn dùng đúng {xưng} và {gọi} từ `resolveAddress` (TUYỆT ĐỐI không tự xưng bằng tên riêng của char).
+ * - Kết hợp giọng theo tag (dịu dàng, lạnh lùng, hài hước, bí ẩn...) và hơi thở Open Scene (nếu đã mở trong RAM).
+ * - Điểm thân mật càng cao thì lời càng gần gũi.
+ */
+export function generateCompanionPetComment(params: {
+  char: {
+    name?: string;
+    addressTerms?: string | null;
+    epithet?: string | null;
+    tags?: string[] | null;
+  } | null;
+  petName: string;
+  petSpecies?: string;
+  petPersonality?: string;
+  action: 'select' | 'pet' | 'feed' | 'play' | 'rest';
+  bondPoints: number;
+  inMemoryOpenScene?: string | null;
+  addressMap?: AddressKeywordRule[];
+  customVoices?: TagVoiceProfile[];
+}): {
+  text: string;
+  addressPair: ResolvedAddressPair;
+} {
+  const {
+    char,
+    petName,
+    petSpecies = 'thú nhỏ',
+    action,
+    bondPoints,
+    inMemoryOpenScene,
+    addressMap,
+    customVoices = DEFAULT_TAG_VOICES,
+  } = params;
+
+  const pair = resolveAddress(char, { inMemoryOpenScene, addressMap });
+  const voices = resolveBlendedVoicesForCharacter(char?.tags || [], customVoices);
+  const primaryVoice = voices[0] || NEUTRAL_GENTLE_VOICE;
+  const emoji = primaryVoice.emojis[0] || '🐾';
+  const normTag = normalizeStr(primaryVoice.tag);
+  const openSceneHint = extractOpenSceneAtmosphereHint(inMemoryOpenScene);
+
+  let rawTemplates: string[] = [];
+
+  if (action === 'pet') {
+    if (normTag.includes('lạnh') || normTag.includes('chiếm hữu') || normTag.includes('ngạo')) {
+      rawTemplates = [
+        `Nhìn {gọi} xoa đầu bé ${petName} dịu dàng thế kia, {xưng} cũng hơi ghen tị với bé rồi đấy ${emoji}`,
+        `Bé ${petName} ngoan thật, cứ dụi vào tay {gọi} mãi. Vuốt ve bé xong rồi thì qua ngồi cạnh {xưng} nhé ${emoji}`,
+      ];
+    } else if (normTag.includes('hài') || normTag.includes('tinh nghịch') || normTag.includes('năng động')) {
+      rawTemplates = [
+        `Haha {gọi} nhìn kìa, được {gọi} vuốt ve một cái là bé ${petName} tít cả mắt lại luôn rồi! ${emoji}`,
+        `Bé ${petName} thích {gọi} ra mặt luôn đó, để {xưng} với {gọi} cùng cưng nựng bé nha ${emoji}`,
+      ];
+    } else {
+      rawTemplates = [
+        `Nhìn bé ${petName} lim dim nằm ngoan trong tay {gọi} kìa, {xưng} ngắm hai đứa thôi cũng thấy bình yên lắm ${emoji}`,
+        `Đôi tay của {gọi} lúc nào cũng ấm áp cả, bảo sao bé ${petName} cứ quấn lấy {gọi} và {xưng} không rời ${emoji}`,
+      ];
+    }
+  } else if (action === 'feed') {
+    rawTemplates = [
+      `{Gọi} chăm bé ${petName} khéo thật đấy, nhìn bé ăn ngon lành chưa kìa. Chăm bé xong {xưng} cũng pha sẵn món ngon đợi {gọi} rồi nhé ${emoji}`,
+      `Có {gọi} cùng {xưng} chăm bữa ăn cho bé ${petName}, góc nhỏ này lúc nào cũng rộn ràng và ấm cúng ${emoji}`,
+    ];
+  } else if (action === 'play') {
+    rawTemplates = [
+      `Tiếng cười của {gọi} khi đùa cùng bé ${petName} làm cả căn phòng của {xưng} và {gọi} sáng bừng lên đó ${emoji}`,
+      `Bé ${petName} chạy lon ton quanh chân {gọi} trông đáng yêu quá, lại đây nghỉ một chút với {xưng} nào ${emoji}`,
+    ];
+  } else if (action === 'rest') {
+    rawTemplates = [
+      `Suỵt... bé ${petName} cuộn tròn ngủ ngoan rồi kìa, {gọi} lại đây ngồi tựa vào vai {xưng} cho đỡ mỏi nhé ${emoji}`,
+      `Để bé ${petName} ngủ yên trên đệm ấm đi, giờ là khoảng thời gian tĩnh lặng của riêng {xưng} và {gọi} đó ${emoji}`,
+    ];
+  } else {
+    // action === 'select'
+    rawTemplates = [
+      `Bé ${petName} (${petSpecies}) này ngoan lắm, mỗi lần {gọi} chưa tới là bé cứ ngồi cạnh {xưng} ngóng ra cửa đợi {gọi} mãi thôi ${emoji}`,
+      `{Xưng} rất thích ngắm lúc {gọi} chơi đùa cùng bé ${petName}, cảm giác căn phòng nhỏ của {xưng} và {gọi} thật sự là một tổ ấm ${emoji}`,
+    ];
+  }
+
+  if (bondPoints >= 60) {
+    rawTemplates.push(
+      `Cảm ơn {gọi} đã cùng {xưng} yêu thương và chăm sóc bé ${petName}${openSceneHint ? ` giữa ${openSceneHint}` : ''}, ở bên {gọi} lúc nào lòng {xưng} cũng thật trọn vẹn 💗`
+    );
+  }
+
+  const picked = rawTemplates[Math.floor(Math.random() * rawTemplates.length)];
+  const finalLine = applyAddressPairToDialogue(picked, pair, char?.name);
+
+  return {
+    text: `“${finalLine.replace(/^[“"]|[”"]$/g, '').trim()}”`,
+    addressPair: pair,
   };
 }
 

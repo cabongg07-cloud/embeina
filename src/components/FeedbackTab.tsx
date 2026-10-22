@@ -366,7 +366,10 @@ export const FeedbackTab: React.FC<FeedbackTabProps> = ({
                   >
                     {characters.map((ch) => (
                       <option key={ch.id} value={ch.id}>
-                        {ch.name} — {ch.epithet}
+                        {ch.name}
+                        {ch.epithet && ch.epithet.trim() !== ''
+                          ? ` — ${ch.epithet}`
+                          : ''}
                       </option>
                     ))}
                   </select>
